@@ -191,8 +191,8 @@ class AppPreferenceSaveInput:
     auto_save_interval_minutes: int
     project_backup_count: int
     output: Optional[AppOutputPreferenceValues] = None
-    #: 新歌词源落位后是否自动识别括号和声；默认开启，未传时按出厂语义处理。
-    auto_chorus_auto_apply: bool = True
+    #: 新歌词源落位后是否自动识别括号和声；默认关闭，未传时按出厂语义处理。
+    auto_chorus_auto_apply: bool = False
     guide_replacement: Optional[dict] = None
     """「批量识别导唱标记」对话框的上次设置；``None``/空保持磁盘现状。"""
     style_presets_baseline: Optional[dict] = None
@@ -248,9 +248,10 @@ def load_app_runtime_preferences(
         auto_chorus_end_chars=(
             str(auto_chorus.get("end_chars") or "") or chorus_end_default
         ),
-        auto_chorus_overwrite=bool(auto_chorus.get("overwrite")),
-        # 缺失（老配置）按默认开启回落：这正是本开关的出厂语义。
-        auto_chorus_auto_apply=bool(auto_chorus.get("auto_apply", True)),
+        auto_chorus_overwrite=bool(auto_chorus.get("overwrite", True)),
+        # 两个开关的缺失回落都按出厂语义：覆盖默认开（N3 的自动分色即整段替换），
+        # 自动应用默认关（导入静默改角色是进阶行为，首次使用先手动触发）。
+        auto_chorus_auto_apply=bool(auto_chorus.get("auto_apply", False)),
         guide_replacement=_guide_replacement_memory(data.get("guide_replacement")),
         selected_scheme_key=selected_scheme_key,
         preview_splitter_ratio=preview_splitter_ratio,

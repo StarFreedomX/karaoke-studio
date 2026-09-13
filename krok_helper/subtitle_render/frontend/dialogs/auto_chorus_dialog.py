@@ -46,8 +46,8 @@ class AutoChorusDialog(ModelessDialog):
         selected_role: str = "",
         begin_chars: str = DEFAULT_CHORUS_BEGIN_CHARS,
         end_chars: str = DEFAULT_CHORUS_END_CHARS,
-        overwrite: bool = False,
-        auto_apply: bool = True,
+        overwrite: bool = True,
+        auto_apply: bool = False,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent.window() if parent is not None else None)
@@ -71,6 +71,11 @@ class AutoChorusDialog(ModelessDialog):
         role_row = QHBoxLayout()
         role_row.addWidget(BodyLabel("角色方案：", self))
         self.role_combo = ComboBox(self)
+        self.role_combo.setToolTip(
+            "角色方案是一整套可复用的字体/颜色/描边样式；这里选中的方案会套到"
+            "括号内的字符上（括号本身一起变色）。列表里没有想要的就选"
+            "「新建「和声」角色」，之后可在属性面板「角色」页调整它的样式。"
+        )
         for name in self._role_options:
             self.role_combo.addItem(name, userData=name)
         self.role_combo.addItem("新建「和声」角色", userData=NEW_ROLE_SENTINEL)
@@ -104,15 +109,17 @@ class AutoChorusDialog(ModelessDialog):
         self.overwrite_check = CheckBox("覆盖已经分配过角色的字符", self)
         self.overwrite_check.setChecked(bool(overwrite))
         self.overwrite_check.setToolTip(
-            "默认只填还没有角色的字符，避免抹掉在歌词打轴里逐字点出来的歌手分配。"
+            "默认勾选：括号里的字符全部改成和声角色（与 N3 自动分色一致）。\n"
+            "取消勾选则只填还没有角色的字符，保留在歌词打轴里逐字点出来的"
+            "歌手分配。"
         )
         layout.addWidget(self.overwrite_check)
 
         self.auto_apply_check = CheckBox("加载歌词源时自动应用（使用本次设置，不弹窗）", self)
         self.auto_apply_check.setChecked(bool(auto_apply))
         self.auto_apply_check.setToolTip(
-            "启用后，导入或新载入歌词源时按这里的设置自动识别括号和声；"
-            "打开 .yurika / .n3proj 工程不会自动执行。也可以在歌词列表"
+            "默认不勾选。启用后，导入或新载入歌词源时按这里的设置自动识别"
+            "括号和声；打开 .yurika / .n3proj 工程不会自动执行。也可以在歌词列表"
             "「加载字幕设置」里打开本对话框。"
         )
         layout.addWidget(self.auto_apply_check)

@@ -3430,6 +3430,14 @@ class PropertyPanel(QWidget):
             index = self._singer_combo.findData(selected_key)
             if index >= 0:
                 self._singer_combo.setCurrentIndex(index)
+        self._singer_combo.setToolTip(
+            "选择要编辑哪一套样式。\n"
+            "「全局默认」：所有字幕的基础样式，角色方案里没单独设置的属性都沿用它。\n"
+            "「标题」：标题文字专用的样式（在「标题」页开启标题后生效），"
+            "不参与歌词分色。\n"
+            "其余条目：角色方案。通过歌词列表「角色」列、逐字符分配或"
+            "「自动识别和声」把角色分给文字后，这些文字就按对应方案渲染。"
+        )
         self._sync_scheme_combo_width()
 
     def _sync_scheme_combo_width(self) -> None:

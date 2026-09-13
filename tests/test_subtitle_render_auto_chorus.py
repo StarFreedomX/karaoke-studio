@@ -246,6 +246,7 @@ def test_import_auto_apply_fills_brackets_and_stays_undoable(window) -> None:
     """导入后自动识别：括号内容进「和声」，且整体一条撤销能退干净。"""
     track = _track(["駅前で（僕は窓辺で）", "月を見あげた"])
     window._timing_track = track
+    window._auto_chorus_auto_apply = True
     window._undo_stack.clear()
 
     window._auto_apply_chorus_on_import(track)
@@ -268,6 +269,7 @@ def test_import_auto_apply_honors_the_remembered_role(window) -> None:
     track.lines[0].chars[0].role_label = "コーラス"
     window._timing_track = track
     window._auto_chorus_role = "コーラス"
+    window._auto_chorus_auto_apply = True
     window._undo_stack.clear()
 
     window._auto_apply_chorus_on_import(track)
@@ -334,7 +336,8 @@ def test_apply_timing_track_skips_auto_chorus_while_loading_project(
 # ── 偏好读写（auto_chorus.auto_apply） ───────────────────────
 
 
-def test_runtime_preferences_default_auto_apply_to_enabled() -> None:
+def test_runtime_preferences_default_auto_apply_to_disabled() -> None:
+    """出厂语义：自动应用默认关（导入静默改角色是进阶行为）。"""
     from krok_helper.subtitle_render.settings.preferences import (
         load_app_runtime_preferences,
     )
@@ -343,11 +346,16 @@ def test_runtime_preferences_default_auto_apply_to_enabled() -> None:
         {}, chorus_begin_default="（(", chorus_end_default="）)"
     )
 
-    assert loaded.auto_chorus_auto_apply is True
+    assert loaded.auto_chorus_auto_apply is False
+    assert loaded.auto_chorus_overwrite is True
 
 
-@pytest.mark.parametrize("raw,expected", [(False, False), (True, True), ("nope", True)])
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(False, False), (True, True), ("", False), ("yes", True)],
+)
 def test_runtime_preferences_parse_auto_apply(raw, expected) -> None:
+    """bool 强转（代码库同惯例）；只有键缺失才回落出厂默认 False。"""
     from krok_helper.subtitle_render.settings.preferences import (
         load_app_runtime_preferences,
     )
@@ -397,6 +405,21 @@ def test_auto_chorus_dialog_auto_apply_checkbox_roundtrips(window) -> None:
         assert dialog.auto_apply() is False
         dialog.auto_apply_check.setChecked(True)
         assert dialog.auto_apply() is True
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_auto_chorus_dialog_defaults_are_overwrite_on_auto_apply_off(window) -> None:
+    """出厂默认：覆盖打开（整段替换，对齐 N3），自动应用关闭。"""
+    from krok_helper.subtitle_render.frontend.dialogs.auto_chorus_dialog import (
+        AutoChorusDialog,
+    )
+
+    dialog = AutoChorusDialog(role_options=["主唱"], parent=window)
+    try:
+        assert dialog.overwrite() is True
+        assert dialog.auto_apply() is False
     finally:
         dialog.close()
         dialog.deleteLater()
