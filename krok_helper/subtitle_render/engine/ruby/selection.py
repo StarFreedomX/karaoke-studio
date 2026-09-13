@@ -138,10 +138,19 @@ def effective_ruby_for_target(
         return ruby
     start = min(intervals[index][0] for index in valid_indices)
     end = max(intervals[index][1] for index in valid_indices)
+    last_part_start = start + max(ruby.reading_part_ms, default=0)
     if (
         ruby.pos_end_ms > ruby.pos_start_ms
         and ruby.pos_start_ms >= start
-        and start < ruby.pos_end_ms < end
+        and (
+            # ruby 窗口天然落在目标区间内：尊重更窄的注音窗口。
+            start < ruby.pos_end_ms < end
+            # 目标区间尾还没走到最后一个 mora checkpoint：钳到这里会把末段
+            # 假名压成零时长（扫光瞬跳到后随字符）。保留 ruby 自己的窗口尾；
+            # 与后随字符的区间重叠是合法打轴，主文字由 ruby 锚点驱动到它
+            # 自己的演唱终点。
+            or end <= last_part_start
+        )
     ):
         end = ruby.pos_end_ms
     if start == ruby.pos_start_ms and end == ruby.pos_end_ms:

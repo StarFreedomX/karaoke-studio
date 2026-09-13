@@ -26,6 +26,7 @@ def layout_pass():
         _LAYOUT_PASS.active_rubies = {}
         _LAYOUT_PASS.ruby_gaps = {}
         _LAYOUT_PASS.char_advances = {}
+        _LAYOUT_PASS.char_ink_widths = {}
         _LAYOUT_PASS.ink_rects = {}
         _LAYOUT_PASS.sayatoo_layouts = {}
         _LAYOUT_PASS.signal_heads = {}
@@ -47,6 +48,7 @@ def layout_pass():
             _LAYOUT_PASS.active_rubies = None
             _LAYOUT_PASS.ruby_gaps = None
             _LAYOUT_PASS.char_advances = None
+            _LAYOUT_PASS.char_ink_widths = None
             _LAYOUT_PASS.ink_rects = None
             _LAYOUT_PASS.sayatoo_layouts = None
             _LAYOUT_PASS.signal_heads = None

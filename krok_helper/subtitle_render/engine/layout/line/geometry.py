@@ -24,15 +24,27 @@ def resolve_char_intervals(
     line: TimingLine,
     style: Style,
     char_widths_for: CharWidthResolver,
+    char_ink_widths_for: CharWidthResolver | None = None,
 ) -> list[tuple[int, int]]:
-    """Resolve final character intervals using backend-provided glyph widths."""
+    """Resolve final character intervals using backend-provided glyph widths.
+
+    ``char_ink_widths_for`` is optional ink-width weights; they only drive the
+    multi-checkpoint leader guard split inside ``compute_char_intervals`` and
+    fall back to layout widths when absent.
+    """
     line_style = style_for_line(style, line)
     render_line = render_line_with_guide_symbols(line)
     if line_style.vertical:
         return compute_char_intervals(render_line)
+    ink_widths = (
+        list(char_ink_widths_for(render_line, line_style))
+        if char_ink_widths_for is not None
+        else None
+    )
     return compute_char_intervals(
         render_line,
         list(char_widths_for(render_line, line_style)),
+        ink_widths=ink_widths,
     )
 
 

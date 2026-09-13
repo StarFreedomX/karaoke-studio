@@ -265,6 +265,22 @@ boundary = int(start + duration × cumulative_width / total_width)
 整段全空白时回退布局宽度加权。修复前空格凭排版宽度分走一段真实走字时间，
 而绘制层因无墨水跳过它，表现为走字停顿、后续字符窗口被压缩。两侧同口径。
 
+2026-09 起补齐**多 checkpoint leader 的共享块保底**（`.sug` 直读与 LRC 同步）：
+共享块首字符打到 mora 级（`TimingChar.checkpoint_ms`，LRC 由 `@Ruby` 的 mora
+时间戳回填并标记段共享块）且宽度加权切点早于最后一个 checkpoint 时，
+`[最后checkpoint, 块尾]` 在「leader 末段」与后随无时间戳字符之间按**墨水宽度**
+分摊（`compute_char_intervals` 的 `ink_widths` 参数，由
+`resolved_char_intervals_for_line` 经 `char_ink_width` 提供；缺省回退布局宽度）：
+leader 末段份额 = leader 墨水 / 锚点段数（与主文字按锚点段等分推进一致），
+末段假名先走、唱完后随字符接棒到块尾。墨水口径避免全角标点（布局宽度 1em、
+墨水极窄，如「{今||い|ま}、、、、、」的顿号群）凭排版宽度把末段假名挤压到比
+标点还短。修复前 leader 区间被切点截短，ruby 被 `effective_ruby_for_target`
+钳制后末段假名变成零时长——扫光瞬跳到后随字符上（SUG 预览无此问题：它的
+假名锚点在窗口尾早于末 checkpoint 时判定为脏数据并回退整串线性）。
+`effective_ruby_for_target` 同时增加挤压保留分支：目标区间尾还没走到最后一个
+mora checkpoint 时保留 ruby 自己的窗口尾，native C++ `effectiveRubyForTarget`
+同步。
+
 ### 7.3 对齐后的结果
 
 设 `[1000]AB[2000]`，且 A 的布局宽度是 B 的 3 倍：
@@ -669,7 +685,7 @@ ruby.parts = [宽 part, 窄 part]
 |---|---|---|---|
 | 输入 | 内存 Project | Nicokara LRC 重建 IR | 是 |
 | 精度 | 原始毫秒 | 厘秒量化 + 帧量化 | 小幅 |
-| `cc=0` 多字 | 布局宽度加权（零墨水字符权重 0，v1.6.2 起） | 布局宽度加权（零墨水字符权重 0，已同步） | **已对齐核心规则** |
+| `cc=0` 多字 | 布局宽度加权（零墨水字符权重 0，v1.6.2 起） | 布局宽度加权（零墨水字符权重 0，已同步）；多 cp leader 共享块按末 checkpoint 保底并在块尾段内按墨水分摊（2026-09 起） | **已对齐核心规则** |
 | 行首无锚点 | 跨行借时间 | 上一可用行尾；无可借行尾时同首时间戳 | **核心规则已对齐** |
 | 行尾无结束点 | 下一行首/音频结束 | 下一可唱行 leader；末行仍 fallback | **下一行首已对齐** |
 | 未完成屏障 | 有 | 无等价信息 | 是 |

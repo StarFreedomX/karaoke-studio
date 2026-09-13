@@ -122,6 +122,16 @@ class TimingChar:
     explicit_end: bool = False
     """源字幕是否在本字符后显式写了结束/释放时间戳。"""
 
+    checkpoint_ms: Optional[list[int]] = None
+    """源数据里该字符的全部演唱时间戳（毫秒，含 ``start_ms``）。
+
+    仅多 checkpoint 字符（SUG 打到 mora 级的轴）非空。``.sug`` 直读来自
+    ``Character.timestamps``；Nicokara LRC 正文只保留每字第一个时间戳，由
+    ``@Ruby`` 的 mora 时间戳回填。共享时间块重切时，leader 的最后一个
+    checkpoint 用来给切点保底——否则块尾字符会把最后一个假名的时间窗口
+    压成零时长（扫光瞬跳）。
+    """
+
     vector_glyph: Optional[GuideSymbol] = None
     """仅供渲染层生成的行内虚拟字符使用；字幕源解析出的真实字符恒为 None。"""
 

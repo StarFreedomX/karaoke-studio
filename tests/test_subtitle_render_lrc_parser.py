@@ -355,6 +355,49 @@ def test_ruby_with_mora_timestamps_in_reading():
     assert r.pos_end_ms == 5000
 
 
+def test_ruby_mora_timestamps_backfill_leader_checkpoint_ms():
+    """@Ruby 的 mora 时间戳回填共享块 leader，重切时给切点保底。
+
+    ``[00:10:00]今、[00:11:00]`` 是两字共享块，等宽时宽度加权切点在 10.50s；
+    ま 的 mora 时间戳 10.60s 晚于切点。没有回填时今被切在 10.50s、ま 被
+    钳成零时长（扫光瞬跳）；回填后 [10.6, 11.0] 在「今末段」与顿号间分摊。
+    """
+
+    from krok_helper.subtitle_render.engine.timing.timeline import compute_char_intervals
+
+    text = (
+        "[00:10:00]今、[00:11:00]日[00:11:40]\n"
+        "\n"
+        "@Ruby1=今,い[00:00:60]ま,[00:10:00],[00:11:00]\n"
+        "@Ruby2=日,か[00:00:40]ん,[00:11:00],[00:11:40]\n"
+    )
+    track = parse_nicokara_lrc(text)
+    line = track.lines[0]
+    assert [(c.text, c.checkpoint_ms) for c in line.chars] == [
+        ("今", [10_000, 10_600]),
+        ("、", None),
+        # 日也是多 mora leader；行尾无后随字符，按单成员段回填。
+        ("日", [11_000, 11_400]),
+    ]
+    # 今、被标成共享块，段尾是下一锚点 11.0s。
+    leader = line.chars[0]
+    assert (
+        leader.source_span_start_ms,
+        leader.source_span_end_ms,
+        leader.source_span_index,
+        leader.source_span_count,
+    ) == (10_000, 11_000, 0, 2)
+    assert line.chars[1].source_span_count == 2
+
+    intervals = compute_char_intervals(line, [1] * len(line.chars))
+    # 等宽下 [10.6, 11.0] 按「今末段 50 : 顿号 100」分摊 → ま 唱到 10.733s，
+    # 顿号接棒到块尾——顺序推进，不同时起笔。
+    assert intervals[:2] == [
+        (10_000, 10_733),
+        (10_733, 11_000),
+    ]
+
+
 def test_ruby_entry_without_position_resolves_to_its_occurrence():
     """A position-less entry is still pinned to the character it landed on.
 

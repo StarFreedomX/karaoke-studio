@@ -181,6 +181,25 @@ RubyAnnotation effectiveRubyForTarget(
         start = std::min(start, intervals[index].first);
         end = std::max(end, intervals[index].second);
     }
+    // Mirrors Painter's effective_ruby_for_target: keep the annotation's own
+    // window when it naturally fits inside the span, and also when the span end
+    // has not reached the last mora checkpoint yet -- clamping there would give
+    // the final reading part a zero-length interval (the wipe front jumps past
+    // it onto the follower character).
+    int lastPartStart = ruby.posStartMs;
+    if (!ruby.readingPartMs.empty()) {
+        lastPartStart += *std::max_element(
+            ruby.readingPartMs.begin(), ruby.readingPartMs.end()
+        );
+    }
+    const bool keepOwnWindow =
+        ruby.posEndMs > ruby.posStartMs
+        && ruby.posStartMs >= start
+        && ((start < ruby.posEndMs && ruby.posEndMs < end)
+            || end <= lastPartStart);
+    if (keepOwnWindow) {
+        end = ruby.posEndMs;
+    }
     if (start == ruby.posStartMs && end == ruby.posEndMs) {
         return ruby;
     }

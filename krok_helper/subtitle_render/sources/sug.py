@@ -651,15 +651,15 @@ def _timing_chars_for_sentence(
                     default_singer_id,
                 )
                 ch_singer = singer_by_id.get(ch_singer_id or "")
+                ch_checkpoints = _offset_timestamps(
+                    getattr(ch, "timestamps", []) or [], offset_ms
+                )
                 result.append(
                     TimingChar(
                         text=text,
                         start_ms=starts[local_index],
-                        explicit_start=bool(
-                            _offset_timestamps(
-                                getattr(ch, "timestamps", []) or [], offset_ms
-                            )
-                        )
+                        checkpoint_ms=ch_checkpoints or None,
+                        explicit_start=bool(ch_checkpoints)
                         or (local_index == 0 and cursor > group_start),
                         explicit_end=(
                             bool(getattr(ch, "is_sentence_end", False))
@@ -740,15 +740,15 @@ def _timing_chars_for_span(
             default_singer_id,
         )
         ch_singer = singer_by_id.get(ch_singer_id or "")
+        ch_checkpoints = _offset_timestamps(
+            getattr(ch, "timestamps", []) or [], offset_ms
+        )
         result.append(
             TimingChar(
                 text=text,
                 start_ms=starts[local_index],
-                explicit_start=bool(
-                    _offset_timestamps(
-                        getattr(ch, "timestamps", []) or [], offset_ms
-                    )
-                ),
+                checkpoint_ms=ch_checkpoints or None,
+                explicit_start=bool(ch_checkpoints),
                 explicit_end=(
                     bool(getattr(ch, "is_sentence_end", False))
                     and sentence_end_ms is not None

@@ -16,6 +16,7 @@ from krok_helper.subtitle_render.engine.text import (
 from krok_helper.subtitle_render.engine.text import (
     build_font,
     build_latin_font,
+    char_ink_width,
     char_layout_width,
     make_font_for,
 )
@@ -54,15 +55,53 @@ def char_widths_for_intervals(
     ]
 
 
+def char_ink_widths_for_intervals(
+    line: TimingLine,
+    style: Style,
+) -> list[int]:
+    """Measure glyph ink widths for the leader-guard split weights.
+
+    角色/导唱符路径退化为布局宽度——保底分支只关心「多 checkpoint leader +
+    无时间戳后随」的普通歌词段，角色行极少命中且退化行为等于历史口径。
+    """
+    if line_has_role_labels(line):
+        return char_widths_for_intervals(line, style)
+    font = build_font(style)
+    metrics = QFontMetrics(font)
+    latin_font = build_latin_font(style)
+    font_for = make_font_for(style, font, latin_font)
+    latin_metrics = QFontMetrics(latin_font) if font_for is not None else metrics
+    return [
+        (
+            vector_glyph_width(char.vector_glyph, style)
+            if char.vector_glyph is not None
+            else char_ink_width(
+                char.text,
+                font,
+                metrics,
+                latin_metrics,
+                font_for,
+            )
+        )
+        for char in line.chars
+    ]
+
+
 def resolved_char_intervals_for_line(
     line: TimingLine,
     style: Style,
 ) -> list[tuple[int, int]]:
     """Resolve final Painter-compatible character timing intervals."""
-    return resolve_char_intervals(line, style, char_widths_for_intervals)
+    return resolve_char_intervals(
+        line,
+        style,
+        char_widths_for_intervals,
+        char_ink_widths_for=char_ink_widths_for_intervals,
+    )
 
 
 __all__ = [
+    "char_ink_widths_for_intervals",
     "char_widths_for_intervals",
     "resolved_char_intervals_for_line",
 ]

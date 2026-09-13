@@ -772,6 +772,7 @@ def _char_has_no_wipe_ink(ch: TimingChar) -> bool:
 def compute_char_intervals(
     line: TimingLine,
     char_widths: Optional[Sequence[int | float]] = None,
+    ink_widths: Optional[Sequence[int | float]] = None,
 ) -> list[tuple[int, int]]:
     """返回 ``line`` 中每个字符的 ``(start_ms, end_ms)`` 区间序列。
 
@@ -782,8 +783,14 @@ def compute_char_intervals(
     ``[start]多字[next]`` 共享时间块会按正布局宽度加权切分。算法与 SUG
     ``KaraokePreview`` 一致：边界使用 ``int(start + duration * 累计宽度 / 总宽度)``。
     空格等零墨水字符权重为 0（零时长窗口、瞬时跨过），时长由可见字符瓜分——
-    否则空格凭排版宽度分走一段真实走字时间，绘制层却因无墨水跳过它，表现为
-    走字停顿、后续字符窗口被压缩；整段全空白时回退布局宽度加权。
+    否则空格凭排版宽度分走一段真实走字时间，绘制层却因无墨水跳过它，表现为走字
+    停顿、后续字符窗口被压缩；整段全空白时回退布局宽度加权。
+    块首是**多 checkpoint leader**（``checkpoint_ms`` 带 mora 级时间戳）且宽度
+    加权切点早于最后一个 checkpoint 时，``[最后checkpoint, 块尾]`` 在「leader
+    末段」与后随字符之间按**墨水宽度**分摊（``ink_widths`` 缺省时回退布局宽度）：
+    末段假名先走、唱完后随字符接棒到块尾，避免末段假名被钳成零时长、或与后随
+    字符同时起笔，也避免全角标点（advance=1em 但墨水极窄）按布局宽度把末段
+    假名挤压到比标点还短。
     元数据不完整、区间无效或总宽度为 0 时保留兼容的 ``start_ms`` 区间。
 
     **区间可以重叠。** 源里显式写了释放点（``pause_release_ms``）时就以它为准，
@@ -818,6 +825,16 @@ def compute_char_intervals(
                 end = line.end_ms
         else:
             end = ch.start_ms + 500
+        # 多 checkpoint 字符（mora 级打轴）的区间至少覆盖最后一个 checkpoint：
+        # 区间尾被下一字符的兼容起点压到末 checkpoint 之前时，末段假名会被
+        # 钳成零时长（扫光瞬跳到后随字符）。与共享块重切的保底同语义；行尾
+        # 字符钳到 ``line.end_ms``，非行尾允许与后随区间重叠（重叠本就合法）。
+        if ch.checkpoint_ms and len(ch.checkpoint_ms) >= 2:
+            last_cp = max(int(cp) for cp in ch.checkpoint_ms)
+            if i + 1 == n and line.end_ms is not None:
+                last_cp = min(last_cp, line.end_ms)
+            if last_cp > end:
+                end = last_cp
         # 容错：end 不应早于 start
         if end < ch.start_ms:
             end = ch.start_ms
@@ -874,6 +891,94 @@ def compute_char_intervals(
             continue
 
         duration = span_end - span_start
+
+        # 多 checkpoint leader 的切点保底：leader 打到 mora 级的轴时，它的
+        # 演唱区间必须覆盖最后一个 checkpoint。宽度加权的切点落在最后
+        # checkpoint 之前时（后随无时间戳字符较宽 / checkpoint 偏晚），
+        # leader 区间直接延伸到块尾（与 SUG 合并组轴同语义：末段假名与
+        # 后随字符共赏 [last_cp, span_end]），后随字符从 last_cp 起按宽度
+        # 加权分剩余时长。否则 ``effective_ruby_for_target`` 会把 ruby 钳到
+        # leader 区间，最后一个假名被压成零时长——扫光瞬跳到后随字符。
+        leader_cut = int(span_start + duration * weights[0] / total_width)
+        leader_last_cp: Optional[int] = None
+        checkpoints = first.checkpoint_ms
+        if checkpoints and len(checkpoints) >= 2:
+            candidates = [
+                int(cp)
+                for cp in checkpoints
+                if leader_cut < cp <= span_end
+            ]
+            if candidates:
+                leader_last_cp = max(candidates)
+
+        if leader_last_cp is not None:
+            # 保底分支：[last_cp, span_end] 在「leader 末段」与后随字符之间按
+            # 墨水宽度分摊（ink_widths 缺省/全零时回退布局宽度），而不是让两
+            # 者同时起步同时收尾——ま（末段假名）先走，唱完后随字符接棒到块
+            # 尾（SUG 合并组轴的空间推进语义）。leader 末段的墨水份额 = leader
+            # 墨水 / 锚点段数，与主文字按锚点段等分推进的 checkpoint 语义一致。
+            # 墨水口径还避免全角标点（布局宽度 1em、墨水极窄）凭排版宽度把
+            # 末段假名挤压到比标点还短。
+            ink_available = (
+                ink_widths is not None
+                and len(ink_widths) == n
+                and any(
+                    float(ink_widths[index + offset]) > 0.0
+                    for offset in range(count)
+                    if not _char_has_no_wipe_ink(group[offset])
+                )
+            )
+            if ink_available:
+                leader_weight = max(
+                    float(ink_widths[index]) if not _char_has_no_wipe_ink(group[0]) else 0.0,
+                    0.0,
+                )
+                follower_weights = [
+                    max(float(ink_widths[index + offset]), 0.0)
+                    for offset in range(1, count)
+                ]
+            else:
+                leader_weight = weights[0]
+                follower_weights = weights[1:]
+            follower_total = sum(follower_weights)
+            if follower_total <= 0.0 and not ink_available:
+                follower_weights = [
+                    max(float(char_widths[index + offset]), 0.0)
+                    for offset in range(1, count)
+                ]
+                follower_total = sum(follower_weights)
+            remaining = span_end - leader_last_cp
+            anchor_count = len(
+                [cp for cp in checkpoints if span_start <= cp <= span_end]
+            )
+            tail_weight = leader_weight / max(anchor_count, 1)
+            tail_total = tail_weight + follower_total
+            if tail_total <= 0.0 or remaining <= 0:
+                result[index] = (int(span_start), span_end)
+                for offset in range(1, count):
+                    result[index + offset] = (leader_last_cp, leader_last_cp)
+                index += count
+                continue
+            split = int(leader_last_cp + remaining * tail_weight / tail_total)
+            split = max(leader_last_cp, min(span_end, split))
+            result[index] = (int(span_start), max(int(span_start), split))
+            cumulative = 0.0
+            for offset, width in enumerate(follower_weights, start=1):
+                char_start = (
+                    split
+                    if cumulative == 0.0
+                    else int(split + (span_end - split) * cumulative / follower_total)
+                )
+                cumulative += width
+                char_end = (
+                    span_end
+                    if offset == count - 1
+                    else int(split + (span_end - split) * cumulative / follower_total)
+                )
+                result[index + offset] = (char_start, max(char_start, char_end))
+            index += count
+            continue
+
         cumulative = 0.0
         for offset, width in enumerate(weights):
             char_start = int(span_start + duration * cumulative / total_width)

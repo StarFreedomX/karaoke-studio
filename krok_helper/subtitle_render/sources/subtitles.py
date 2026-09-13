@@ -101,6 +101,7 @@ def parse_nicokara_lrc(text: str) -> TimingTrack:
     timing_lines = _parse_body_lines(body_lines)
     meta, ruby_entries = _parse_tail(tail_lines)
     rubies = _resolve_positioned_rubies(timing_lines, ruby_entries)
+    _backfill_leader_checkpoint_ms(timing_lines, rubies)
     # LRC 本身不保存分页和段落边界。这里只恢复歌词、空行和计时语义，
     # 进入字幕项目后再由该字幕源的加载设置统一生成 page_plan。
     return TimingTrack(meta=meta, lines=timing_lines, rubies=rubies)
@@ -939,6 +940,18 @@ def _resolve_positioned_rubies(
                     continue
                 group_start = intervals[index][0]
                 group_end = intervals[index + span - 1][1]
+                # 演唱段延伸：kanji 右侧紧随的无独立时间戳字符（如
+                # ``{今||…い|ま}、`` 的顿号）与 leader 同属一个演唱段。SUG
+                # exporter 写的 pos2 本就是段尾（下一锚点），把 group_end 压在
+                # kanji 自己的区间尾会把注音窗口截短，末段假名失去走字时间。
+                segment_end = index + span
+                while (
+                    segment_end < len(line.chars)
+                    and not line.chars[segment_end].explicit_start
+                ):
+                    segment_end += 1
+                if segment_end > index + span:
+                    group_end = intervals[segment_end - 1][1]
                 begin_bound = (
                     0 if entry.position_start_ms is None else entry.position_start_ms
                 )
@@ -999,6 +1012,68 @@ def _resolve_positioned_rubies(
     combined = unmatched + resolved
     combined.sort(key=lambda item: item[0])
     return [ruby for _order, ruby in combined]
+
+
+def _backfill_leader_checkpoint_ms(
+    lines: list[TimingLine], rubies: list[RubyAnnotation]
+) -> None:
+    """用已定位 ``@Ruby`` 的 mora 时间戳恢复共享块的 leader checkpoint 与段边界。
+
+    LRC 正文只保留每字第一个时间戳；leader 打到 mora 级的额外 checkpoint 只存
+    在于读音串。这里把 leader 的全部 checkpoint 回填到 ``TimingChar``，并把
+    「leader + 右侧无独立时间戳后随」标成共享时间块——共享块重切时最后一个
+    checkpoint 给切点保底（见 :func:`compute_char_intervals`），否则末段假名
+    会被钳成零时长（扫光瞬跳），后随字符也从 codepoint 等分点提前起笔。
+    """
+
+    for ruby in rubies:
+        if not ruby.reading_part_ms:
+            continue
+        if ruby.target_line_index is None or not (
+            0 <= ruby.target_line_index < len(lines)
+        ):
+            continue
+        line = lines[ruby.target_line_index]
+        if ruby.target_char_start is None or not (
+            0 <= ruby.target_char_start < len(line.chars)
+        ):
+            continue
+        leader = line.chars[ruby.target_char_start]
+        if leader.start_ms != ruby.pos_start_ms:
+            continue
+
+        # 演唱段：leader 起到下一个显式时间戳字符（不含）。
+        segment_end = ruby.target_char_start + 1
+        while (
+            segment_end < len(line.chars)
+            and not line.chars[segment_end].explicit_start
+        ):
+            segment_end += 1
+        segment = line.chars[ruby.target_char_start:segment_end]
+
+        # 段的演唱终点：下一显式时间戳字符的起点；段在行尾时用行尾。
+        if segment_end < len(line.chars):
+            span_end = line.chars[segment_end].start_ms
+        elif line.end_ms is not None:
+            span_end = line.end_ms
+        else:
+            span_end = segment[-1].start_ms + 500
+        if span_end <= leader.start_ms:
+            continue
+
+        checkpoints = [leader.start_ms]
+        for relative_ms in ruby.reading_part_ms:
+            timestamp = leader.start_ms + int(relative_ms)
+            checkpoints.append(max(checkpoints[-1], min(span_end, timestamp)))
+        leader.checkpoint_ms = checkpoints
+
+        if len(segment) < 2:
+            continue
+        for offset, ch in enumerate(segment):
+            ch.source_span_start_ms = leader.start_ms
+            ch.source_span_end_ms = span_end
+            ch.source_span_index = offset
+            ch.source_span_count = len(segment)
 
 
 def _base_char_span(line: TimingLine, index: int, kanji: str) -> Optional[int]:

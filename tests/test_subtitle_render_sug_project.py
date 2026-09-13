@@ -923,6 +923,169 @@ def test_sug_untimed_plain_follower_stops_at_next_checkpoint() -> None:
     ]
 
 
+def test_sug_late_last_mora_checkpoint_keeps_ruby_window() -> None:
+    """共享块切点必须保底覆盖 leader 的最后一个 mora checkpoint。
+
+    ``{今||[00:10.00]い|[00:10.60]ま}、{日||...}`` —— 等宽布局下宽度加权切点
+    在 10.50s，早于 ま 的 checkpoint 10.60s。修复前今的区间被切在 10.50s，
+    ruby 被 ``effective_ruby_for_target`` 钳制后 ま 变成 (10.50, 10.50) 零时长，
+    扫光瞬跳到顿号上。修复后 [10.6, 11.0] 在「今末段」与顿号之间按宽度分摊
+    （等宽下 50:100 → 今唱到 10.733s），顿号接棒到块尾。
+    """
+
+    from krok_helper.subtitle_render.engine.ruby.selection import (
+        effective_ruby_for_target,
+    )
+    from krok_helper.subtitle_render.engine.ruby.timing import (
+        ruby_visual_units_and_intervals,
+    )
+
+    singer = Singer(id="main", name="主唱", is_default=True)
+    chars, _ = parse_timed_line(
+        "{今||[00:10.00]い|[00:10.60]ま}、{日||[00:11.00]か|[00:11.40]ん}[>00:12.00]",
+        default_singer_id=singer.id,
+    )
+    track = timing_track_from_sug_project(
+        Project(
+            singers=[singer],
+            sentences=[Sentence(singer_id=singer.id, characters=chars)],
+        )
+    )
+
+    line = track.lines[0]
+    assert [(c.text, c.checkpoint_ms) for c in line.chars] == [
+        ("今", [10_000, 10_600]),
+        ("、", None),
+        ("日", [11_000, 11_400]),
+    ]
+
+    intervals = compute_char_intervals(line, [1] * len(line.chars))
+    # 等宽下 [10.6, 11.0] 按「今末段 50 : 顿号 100」分摊 → ま 唱到 10.733s，
+    # 顿号接棒到块尾——顺序推进，不同时起笔。
+    assert intervals[:2] == [
+        (10_000, 10_733),
+        (10_733, 11_000),
+    ]
+
+    ruby = next(r for r in track.rubies if r.kanji == "今")
+    effective = effective_ruby_for_target(ruby, [0], intervals)
+    assert ruby_visual_units_and_intervals(effective) == [
+        ("い", (10_000, 10_600)),
+        ("ま", (10_600, 10_733)),
+    ]
+
+
+def test_sug_guard_split_uses_ink_weights_with_many_followers() -> None:
+    """多后随字符的保底分摊按墨水宽度计权，标点不凭 advance 挤压末段假名。
+
+    ``{今||[00:10.00]い|[00:10.60]ま}、、、、、{日||...}`` —— 全角顿号布局宽度
+    1em 但墨水极窄；按布局宽度分摊时 ま 只剩 36ms（比每个顿号还短）。传
+    ink_widths 后 leader 末段（ink 90/2=45）对 5 顿（15×5=75）分摊
+    [10.6, 11.0]：ま 到 10.75s、每个顿号 50ms。
+    """
+
+    singer = Singer(id="main", name="主唱", is_default=True)
+    chars, _ = parse_timed_line(
+        "{今||[00:10.00]い|[00:10.60]ま}、、、、、{日||[00:11.00]か|[00:11.40]ん}[>00:12.00]",
+        default_singer_id=singer.id,
+    )
+    track = timing_track_from_sug_project(
+        Project(
+            singers=[singer],
+            sentences=[Sentence(singer_id=singer.id, characters=chars)],
+        )
+    )
+    line = track.lines[0]
+    n = len(line.chars)
+    intervals = compute_char_intervals(
+        line,
+        [100] * n,
+        ink_widths=[90] + [15] * 5 + [90],
+    )
+    assert [(c.text, start, end) for c, (start, end) in zip(line.chars, intervals)][:7] == [
+        ("今", 10_000, 10_750),
+        ("、", 10_750, 10_800),
+        ("、", 10_800, 10_850),
+        ("、", 10_850, 10_900),
+        ("、", 10_900, 10_950),
+        ("、", 10_950, 11_000),
+        ("日", 11_000, 12_000),
+    ]
+
+    from krok_helper.subtitle_render.engine.ruby.selection import (
+        effective_ruby_for_target,
+    )
+    from krok_helper.subtitle_render.engine.ruby.timing import (
+        ruby_visual_units_and_intervals,
+    )
+
+    ruby = next(r for r in track.rubies if r.kanji == "今")
+    effective = effective_ruby_for_target(ruby, [0], intervals)
+    assert ruby_visual_units_and_intervals(effective) == [
+        ("い", (10_000, 10_600)),
+        ("ま", (10_600, 10_750)),
+    ]
+
+
+def test_sug_resolved_intervals_pipe_ink_weights_for_guard_split() -> None:
+    """``resolve_char_intervals`` 把墨水权重透传给保底分摊（注入式断言，
+    不依赖运行环境的字体可用性）。"""
+
+    from krok_helper.subtitle_render.domain.models import Style
+    from krok_helper.subtitle_render.engine.layout.line.geometry import (
+        resolve_char_intervals,
+    )
+
+    singer = Singer(id="main", name="主唱", is_default=True)
+    chars, _ = parse_timed_line(
+        "{今||[00:10.00]い|[00:10.60]ま}、、、、、{日||[00:11.00]か}[>00:11.50]",
+        default_singer_id=singer.id,
+    )
+    track = timing_track_from_sug_project(
+        Project(
+            singers=[singer],
+            sentences=[Sentence(singer_id=singer.id, characters=chars)],
+        )
+    )
+    line = track.lines[0]
+    char_count = len(line.chars)
+    intervals = resolve_char_intervals(
+        line,
+        Style(),
+        lambda _line, _style: [100] * char_count,
+        char_ink_widths_for=(
+            lambda _line, _style: [90] + [15] * 5 + [100] * (char_count - 6)
+        ),
+    )
+    # 墨水口径：今末段 45 对 5×15 分摊 [10.6, 11.0] → ま 到 10.75s，
+    # 每个顿号 50ms（advance 等分口径只有 36ms）。
+    assert intervals[0] == (10_000, 10_750)
+    assert intervals[1] == (10_750, 10_800)
+
+
+def test_sug_early_last_mora_checkpoint_keeps_width_weighted_split() -> None:
+    """末 checkpoint 早于宽度加权切点时维持原有按宽度分配，不被保底改写。"""
+
+    singer = Singer(id="main", name="主唱", is_default=True)
+    chars, _ = parse_timed_line(
+        "{今||[00:10.00]い|[00:10.20]ま}、{日||[00:11.00]か}[>00:11.50]",
+        default_singer_id=singer.id,
+    )
+    track = timing_track_from_sug_project(
+        Project(
+            singers=[singer],
+            sentences=[Sentence(singer_id=singer.id, characters=chars)],
+        )
+    )
+
+    line = track.lines[0]
+    # 等宽下切点在 10.50s，晚于 ま 的 10.20s —— 走原宽度加权路径。
+    assert compute_char_intervals(line, [1] * len(line.chars))[:2] == [
+        (10_000, 10_500),
+        (10_500, 11_000),
+    ]
+
+
 def test_sug_mid_line_pause_does_not_truncate_line_or_later_ruby() -> None:
     singer = Singer(id="main", name="主唱", color="#ff0000", is_default=True)
     first = Sentence(

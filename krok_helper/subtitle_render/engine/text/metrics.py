@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 from PyQt6.QtGui import QFont, QFontMetrics, QPainterPath
@@ -130,6 +131,47 @@ def char_advance(
         cache[cache_key] = hit
         _LAYOUT_PASS.metrics.append(source)
     return hit
+
+
+def char_ink_width(
+    text: str,
+    font: QFont,
+    metrics: QFontMetrics,
+    latin_metrics: QFontMetrics,
+    font_for: FontSelector | None,
+) -> int:
+    """Return the glyph's horizontal ink width (0 for blank characters).
+
+    与 Painter 的 ``_char_ink_x_ranges`` 同口径（``QPainterPath.addText`` 的
+    矢量包围盒）：多 checkpoint leader 共享块的保底分摊用它计权——走字时长
+    正比于要扫过的墨水量，全角标点（顿号等 advance=1em 但墨水极窄）按 advance
+    计权会把末段假名挤压到比标点还短。
+    """
+    if not text or text.isspace():
+        return 0
+    use_emoji = font_for is not None and is_emoji_text(text)
+    use_latin = font_for is not None and is_n3_latin_text(text)
+    source_font = font_for(text) if use_emoji else None
+    cache = getattr(_LAYOUT_PASS, "char_ink_widths", None)
+    source_key: object
+    if source_font is not None:
+        source_key = ("emoji", _font_signature(source_font))
+    elif use_latin:
+        source_font = font
+        source_key = ("latin", _font_signature(font))
+    else:
+        source_font = font
+        source_key = _font_signature(font)
+    cache_key = (text, source_key)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    path = QPainterPath()
+    path.addText(0.0, 0.0, source_font, text)
+    rect = path.boundingRect()
+    width = 0 if rect.isEmpty() else max(int(math.ceil(rect.width())), 0)
+    if cache is not None:
+        cache[cache_key] = width
+    return width
 
 
 _CHAR_METRIC_CACHE: dict[tuple, tuple[int, float]] = {}
@@ -369,6 +411,7 @@ __all__ = [
     "build_font",
     "build_latin_font",
     "char_advance",
+    "char_ink_width",
     "char_layout_width",
     "char_path_left_offset",
     "clamp_weight",
