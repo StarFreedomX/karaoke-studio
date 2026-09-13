@@ -787,15 +787,25 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
         // one has to be folded into the margin here, exactly as Painter does
         // in _title_block_origin.
         const float titleHalfEdge = std::max(titleStyle.strokeWidth, 0.0f) * 0.5f;
+        // The title block is one page: each row carries its own alignment
+        // (Python resolves the layout's line_alignments top-down), so both the
+        // edge margin and the center offset must hold the title's own offsets
+        // whichever alignment a row ends up using.  The anchor's horizontal
+        // suffix only stays as the default alignment.
+        titleStyle.horizontalMargin = offsetX + titleHalfEdge;
+        titleStyle.centerOffsetX = offsetX;
         if (anchor.endsWith(QStringLiteral("left"))) {
             titleStyle.alignment = "left";
-            titleStyle.horizontalMargin = offsetX + titleHalfEdge;
         } else if (anchor.endsWith(QStringLiteral("right"))) {
             titleStyle.alignment = "right";
-            titleStyle.horizontalMargin = offsetX + titleHalfEdge;
         } else {
             titleStyle.alignment = "center";
-            titleStyle.centerOffsetX = offsetX;
+        }
+        QStringList rowAlignments;
+        for (const auto &value : title.value(
+                 QStringLiteral("row_alignments")
+             ).toArray()) {
+            rowAlignments.append(value.toString());
         }
         if (anchor.startsWith(QStringLiteral("top"))) {
             titleStyle.verticalPosition = "top";
@@ -870,7 +880,18 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                     std::nullopt,
                 });
             }
-            scene.lineStyles.push_back(titleStyle);
+            // 行级对齐：row_alignments 与 text 的原始行号一一对应（含空行），
+            // 缺省回落锚点水平位；非法值同样回落，不让坏 IR 移动标题。
+            TextStyle rowStyle = titleStyle;
+            if (rowIndex < rowAlignments.size()) {
+                const QString rowAlign = rowAlignments.at(rowIndex);
+                if (rowAlign == QStringLiteral("left")
+                    || rowAlign == QStringLiteral("right")
+                    || rowAlign == QStringLiteral("center")) {
+                    rowStyle.alignment = rowAlign.toStdString();
+                }
+            }
+            scene.lineStyles.push_back(std::move(rowStyle));
             scene.lines.push_back(std::move(titleLine));
         }
     }

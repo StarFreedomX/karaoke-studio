@@ -98,6 +98,26 @@ def resolve_title_overlay(
     return replace(title, **changes)
 
 
+def title_row_alignments(
+    style: Optional[Style], title: TitleOverlay, row_count: int
+) -> list[str]:
+    """Resolve per-row horizontal alignments for a title block seen as one page.
+
+    标题模块整体视为一页：各行自上而下取引用布局的 ``line_alignments``
+    （与歌词页 ``lane_alignment`` 同一套槽位语义），布局行数不足时多余行
+    跟随末行。布局引用缺失（``None`` / 悬空）时退回 ``title.align`` 统一
+    对齐，保持旧工程显式字段语义不变。
+    """
+    count = max(int(row_count), 0)
+    if style is not None:
+        source = title_layout_source(style, title.layout_index)
+        if source is not None:
+            alignments = list(source.line_alignments) or ["left"]
+            last = len(alignments) - 1
+            return [alignments[min(index, last)] for index in range(count)]
+    return [title.align] * count
+
+
 def resolve_title_role_overlay(
     style: Style, base: TitleOverlay, role_label: Optional[str]
 ) -> TitleOverlay:

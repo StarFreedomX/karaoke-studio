@@ -8290,6 +8290,96 @@ def test_title_edge_anchor_keeps_stroke_inside_the_margin(qapp):
     assert stroked_left.y_top == pytest.approx(40.0, abs=0.001)
 
 
+def test_title_rows_consume_layout_alignments_top_down(qapp):
+    """标题块=一页：各行自上而下取布局行对齐槽位，布局行数不足时跟随末行。"""
+    from krok_helper.subtitle_render.engine.painter import (
+        _layout_title_overlay,
+        resolve_title_overlay,
+    )
+
+    track = _title_track()
+    style = Style(
+        layouts=[
+            LyricsLayout(name="三行", line_alignments=["left", "center", "right"]),
+        ],
+        title_overlays=[TitleOverlay(
+            enabled=True,
+            text_template="曲名\n歌手\n专辑",
+            layout_index=1,
+        )],
+    )
+    resolved = resolve_title_overlay(style)
+    assert resolved is not None
+    layout = _layout_title_overlay(1920, 1080, track, resolved, style=style)
+    assert layout is not None
+    half_edge = max(
+        glyph.title.stroke_width_px
+        for row in layout.glyph_rows
+        for glyph in row
+    ) / 2
+    w0, w1, w2 = layout.widths
+    assert layout.row_x[0] == pytest.approx(
+        resolved.offset_x + half_edge, abs=0.001
+    )
+    assert layout.row_x[1] == pytest.approx(
+        (1920 - w1) / 2 + resolved.offset_x, abs=0.001
+    )
+    assert layout.row_x[2] == pytest.approx(
+        1920 - resolved.offset_x - half_edge - w2, abs=0.001
+    )
+    # 块盒 = 各行屏幕位置的并集（不再是「最宽行 + 块内对齐」）
+    assert layout.x0 == pytest.approx(min(layout.row_x), abs=0.001)
+    assert layout.block_w == pytest.approx(
+        max(x + w for x, w in zip(layout.row_x, layout.widths)) - layout.x0,
+        abs=0.001,
+    )
+
+    # 第 4 句超出布局行数 → 跟随布局末行的 right 格式
+    overflow = replace(
+        style,
+        title_overlays=[
+            replace(style.title_overlays[0], text_template="曲名\n歌手\n专辑\n日期")
+        ],
+    )
+    overflow_resolved = resolve_title_overlay(overflow)
+    overflow_layout = _layout_title_overlay(
+        1920, 1080, track, overflow_resolved, style=overflow
+    )
+    assert overflow_layout is not None
+    w3 = overflow_layout.widths[3]
+    assert overflow_layout.row_x[3] == pytest.approx(
+        1920 - overflow_resolved.offset_x - half_edge - w3, abs=0.001
+    )
+
+
+def test_title_mixed_row_alignment_paints_rows_left_and_right(qapp):
+    """[left, right] 两行布局：首行贴左余白、次行贴右余白，不再全用首行对齐。"""
+    track = _title_track()
+    style = Style(
+        dual_line_layout=False,
+        layouts=[
+            LyricsLayout(
+                name="两行",
+                line_y_position="top",
+                line_alignments=["left", "right"],
+            ),
+        ],
+        title_overlays=[TitleOverlay(
+            enabled=True,
+            text_template="短名\n很长的歌手名字",
+            layout_index=1,
+        )],
+    )
+
+    img = _blank(800, 450)
+    paint_frame(img, track, 500, style)
+    left, _top, right, _bottom = _ink_bounds(img)
+    # 左右两行分别贴各自余白（含半描边内缩），整体墨迹横跨几乎全宽；
+    # 若次行仍错误沿用首行 left，右缘只会到 ≈50+行宽 ≪ 750。
+    assert left == pytest.approx(50, abs=8)
+    assert 800 - right == pytest.approx(50, abs=8)
+
+
 def test_default_title_latin_font_does_not_inherit_global_lyrics_font(qapp):
     from krok_helper.subtitle_render.engine.painter import resolve_title_overlay
 

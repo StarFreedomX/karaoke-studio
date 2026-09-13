@@ -12,6 +12,8 @@ from krok_helper.subtitle_render.engine.style.title_semantics import (
     resolve_title_overlay,
     resolve_title_role_overlay,
     resolve_title_text,
+    title_layout_source,
+    title_row_alignments,
     title_show_specs,
 )
 from krok_helper.subtitle_render.domain.timing import TimingTrack
@@ -58,6 +60,14 @@ def title_to_ir(
         style.custom_style_schemes.get(scheme_name),
     )
     payload["text"] = text
+    # 标题块=一页：逐行水平对齐按布局行槽位自上而下解析（不足取末行），
+    # C++ 侧按行覆盖锚点缺省对齐，与 Painter 的逐行屏幕定位同口径。旧工程
+    # （布局引用缺失）不下发：C++ 维持锚点水平位的既有回落，Painter 维持
+    # 整块锚点 + 块内统一对齐的原语义。
+    if title_layout_source(style, title.layout_index) is not None:
+        payload["row_alignments"] = title_row_alignments(
+            style, title, len(text.split("\n"))
+        )
     payload["windows"] = [
         list(window)
         for window in title_show_specs(title, track, duration_ms=duration_ms)

@@ -30,6 +30,8 @@ from krok_helper.subtitle_render.engine.style.title_semantics import (
     resolve_title_overlay,
     resolve_title_role_overlay,
     resolve_title_text,
+    title_layout_source,
+    title_row_alignments,
 )
 from krok_helper.subtitle_render.engine.text import (
     clamp_weight,
@@ -76,6 +78,8 @@ class TitleOverlayLayout:
     glyph_rows: list[list[TitleGlyphLayout]]
     line_heights: list[float]
     line_ascents: list[float]
+    row_x: list[float]
+    """Per-row screen-space left x; rows align independently (title block = one page)."""
 
 
 @dataclass(frozen=True)
@@ -206,6 +210,53 @@ def title_block_origin(
     return x0, y_top
 
 
+def title_row_screen_x(
+    img_w: int,
+    row_w: float,
+    align: str,
+    offset_x: int,
+    half_edge: float,
+) -> float:
+    """Place one title row by its page-row alignment against the screen edges."""
+    if align == "left":
+        return float(offset_x) + half_edge
+    if align == "right":
+        return float(img_w) - float(offset_x) - half_edge - row_w
+    return (float(img_w) - row_w) / 2.0 + float(offset_x)
+
+
+def title_anchor_block_x0(
+    img_w: int,
+    block_w: float,
+    title: TitleOverlay,
+    half_edge: float,
+) -> float:
+    """Legacy anchor-side x of the whole block (widest row) on the nine grid."""
+    if title.anchor.endswith("left"):
+        return float(title.offset_x) + half_edge
+    if title.anchor.endswith("right"):
+        return float(img_w) - block_w - float(title.offset_x) - half_edge
+    return (float(img_w) - block_w) / 2.0 + float(title.offset_x)
+
+
+def title_row_offset_in_block(block_w: float, row_w: float, align: str) -> float:
+    """Legacy within-block row offset driven by the single ``align`` field."""
+    if align == "center":
+        return (block_w - row_w) / 2.0
+    if align == "right":
+        return block_w - row_w
+    return 0.0
+
+
+def title_block_y_top(img_h: int, block_h: float, title: TitleOverlay) -> float:
+    """Vertical anchor of the title block (nine-grid top edge)."""
+    if title.anchor.startswith("top"):
+        return float(title.offset_y)
+    if title.anchor.startswith("bottom"):
+        return float(img_h) - block_h - title.offset_y
+    return (float(img_h) - block_h) / 2.0 + title.offset_y
+
+
 def layout_title_overlay(
     img_w: int,
     img_h: int,
@@ -316,21 +367,37 @@ def layout_title_overlay(
         widths.append(cursor)
         line_ascents.append(max_ascent)
         line_heights.append(max_ascent + max_descent)
-    block_w = max(widths) if widths else 0.0
     line_h = max(line_heights, default=metrics.height())
     gap = max(int(title.line_gap_px), 0)
     block_h = sum(line_heights) + gap * max(len(lines) - 1, 0)
-    if block_w <= 0 or block_h <= 0:
+    if block_h <= 0:
         return None
 
-    x0, y_top = title_block_origin(
-        img_w,
-        img_h,
-        block_w,
-        block_h,
-        title,
-        edge_px=max_edge,
-    )
+    half_edge = max_edge / 2.0
+    if style is not None and title_layout_source(style, title.layout_index) is not None:
+        # 标题块=一页：每行按引用布局的行对齐槽位自上而下各自贴屏定位
+        # （left 贴左余白、right 贴右余白、center 居中），块盒取各行屏幕位置
+        # 的并集。统一对齐时与整块锚点定位逐像素等价（同 left/center/right
+        # 的算式）。
+        row_aligns = title_row_alignments(style, title, len(lines))
+        row_x = [
+            title_row_screen_x(img_w, width, align, title.offset_x, half_edge)
+            for align, width in zip(row_aligns, widths)
+        ]
+        x0 = min(row_x)
+        block_w = max(x + w for x, w in zip(row_x, widths)) - x0
+    else:
+        # 布局引用缺失（旧工程显式锚点/对齐字段）：保持整块九宫格锚点定位
+        # + 块内按 ``title.align`` 统一对齐的原语义。
+        block_w = max(widths) if widths else 0.0
+        x0 = title_anchor_block_x0(img_w, block_w, title, half_edge)
+        row_x = [
+            x0 + title_row_offset_in_block(block_w, width, title.align)
+            for width in widths
+        ]
+    if block_w <= 0:
+        return None
+    y_top = title_block_y_top(img_h, block_h, title)
     return TitleOverlayLayout(
         lines=lines,
         widths=widths,
@@ -348,6 +415,7 @@ def layout_title_overlay(
         glyph_rows=glyph_rows,
         line_heights=line_heights,
         line_ascents=line_ascents,
+        row_x=row_x,
     )
 
 
@@ -360,6 +428,7 @@ def title_overlay_layer_key(
     return (
         tuple(layout.lines),
         tuple(round(width, 3) for width in layout.widths),
+        tuple(round(x, 3) for x in layout.row_x),
         round(layout.block_w, 3),
         round(layout.block_h, 3),
         round(layout.line_h, 3),
@@ -440,19 +509,14 @@ def build_title_overlay_layer(
             | QPainter.RenderHint.SmoothPixmapTransform
         )
         line_top = float(pad_top)
-        for glyphs, width, line_height, line_ascent in zip(
+        for row_x, glyphs, line_height, line_ascent in zip(
+            layout.row_x,
             layout.glyph_rows,
-            layout.widths,
             layout.line_heights,
             layout.line_ascents,
         ):
             if glyphs:
-                if title.align == "center":
-                    line_x = pad_left + (layout.block_w - width) / 2.0
-                elif title.align == "right":
-                    line_x = pad_left + (layout.block_w - width)
-                else:
-                    line_x = float(pad_left)
+                line_x = pad_left + (row_x - layout.x0)
                 baseline = line_top + line_ascent
                 run_start = 0
                 while run_start < len(glyphs):
@@ -596,5 +660,7 @@ __all__ = [
     "paint_title_text_stack",
     "paint_title_overlay",
     "title_block_origin",
+    "title_block_y_top",
     "title_overlay_layer_key",
+    "title_row_screen_x",
 ]

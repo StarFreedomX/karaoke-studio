@@ -2376,6 +2376,37 @@ def test_build_render_ir_resolves_title_metadata_and_windows():
     assert ir["titles"][0]["windows"] == [[100, 1_600, 300, 300]]
 
 
+def test_build_render_ir_title_rows_carry_page_alignments():
+    """标题块=一页：``row_alignments`` 按布局行槽位自上而下解析，不足取末行。"""
+    track = _scoped_ir_track()
+    style = Style(
+        layouts=[
+            LyricsLayout(name="三行", line_alignments=["left", "center", "right"]),
+        ],
+        title_overlays=[TitleOverlay(
+            enabled=True,
+            text_template="曲名\n歌手\n专辑\n日期",
+            layout_index=1,
+        )],
+    )
+
+    ir = build_render_ir(track, style, width=640, height=360, fps=60)
+
+    assert ir["titles"][0]["row_alignments"] == [
+        "left", "center", "right", "right",
+    ]
+    # 布局引用缺失（旧工程显式字段）→ 不下发，C++ 侧维持锚点水平位回落
+    legacy = replace(style.title_overlays[0], layout_index=None)
+    legacy_ir = build_render_ir(
+        track,
+        replace(style, title_overlays=[legacy]),
+        width=640,
+        height=360,
+        fps=60,
+    )
+    assert "row_alignments" not in legacy_ir["titles"][0]
+
+
 def _scoped_ir_track() -> TimingTrack:
     return TimingTrack(
         meta=TimingTrackMeta(title="曲名"),
@@ -3840,6 +3871,139 @@ def test_native_gpu_title_uses_title_latin_size_and_reconfigures_when_exe_exists
     small_height, large_height = heights
     assert small_height < 40
     assert large_height > small_height * 1.5
+
+
+def test_native_gpu_title_rows_follow_layout_alignments_when_exe_exists(
+    qapp, monkeypatch
+):
+    """标题块=一页：GPU 按行对齐贴屏定位（left 贴左余白 / right 贴右余白），与 Painter 同口径。"""
+    renderer_path = resolve_native_renderer_path(root=Path.cwd())
+    if renderer_path is None:
+        pytest.skip("native subtitle renderer executable is not built")
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtGui import QColor, QImage, QFont, QFontDatabase, QFontInfo
+
+    from krok_helper.subtitle_render.engine.painter import paint_frame
+
+    # offscreen 平台不枚举系统字体：注册 Arial 让 Painter(Qt) 与 GPU(DWrite)
+    # 解析到同一个字体文件，否则 Qt 静默回退到全角面，进宽口径不一致。
+    if QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\arial.ttf") < 0:
+        pytest.skip("arial.ttf unavailable")
+    assert QFontInfo(QFont("Arial")).family() == "Arial"
+
+    width, height = 320, 180
+    track = TimingTrack(
+        meta=TimingTrackMeta(title="曲名"),
+        lines=[TimingLine(chars=[TimingChar("終", 5_000)], end_ms=6_000)],
+    )
+    scheme = replace(
+        default_title_scheme(),
+        font_family="Arial",
+        font_family_latin="Arial",
+        font_size_px=40,
+        font_weight=400,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+    )
+    style = Style(
+        font_family="Arial",
+        font_family_latin="Arial",
+        font_size_px=40,
+        line_lead_in_ms=0,
+        stroke_width_px=0,
+        stroke2_width_px=0,
+        decoration_kind="none",
+        custom_style_schemes={"标题": scheme},
+        layouts=[LyricsLayout(
+            name="两行",
+            line_y_position="top",
+            horizontal_margin_px=20,
+            line_y_margin_px=10,
+            line_gap_px=10,
+            line_alignments=["left", "right"],
+        )],
+        title_overlays=[TitleOverlay(
+            enabled=True,
+            # 纯 ASCII 短文本：两侧都走 Arial，避开 CJK 回退面在 DWrite/Qt
+            # 间的字形 bearing 差；N3 字符盒按字号取进宽，短行才能在 320 宽
+            # 画布上把 left 行与 right 行清楚分开。
+            text_template="AAAA\nBB",
+            layout_index=1,
+            fade_in_ms=0,
+            fade_out_ms=0,
+        )],
+    )
+
+    def _cluster_rows(ys: np.ndarray, xs: np.ndarray) -> list[tuple[float, float]]:
+        """按 y 空档把像素聚成行，返回每行 (min_x, max_x)。"""
+        order = np.argsort(ys)
+        ys, xs = ys[order], xs[order]
+        spans: list[tuple[float, float]] = []
+        start = 0
+        for index in range(1, len(ys) + 1):
+            if index == len(ys) or ys[index] - ys[index - 1] > 4:
+                band = slice(start, index)
+                spans.append(
+                    (float(xs[band].min()), float(xs[band].max()))
+                )
+                start = index
+        return spans
+
+    with NativeRendererProcess(
+        renderer_path, response_timeout_s=5.0, close_timeout_s=1.0
+    ) as renderer:
+        renderer.configure_gpu(
+            track,
+            style,
+            width=width,
+            height=height,
+            fps=60,
+            force_warp=True,
+        )
+        event = renderer.render_gpu_frame(
+            1_000,
+            force_warp=True,
+            generation=1,
+            shm_key=f"krok-title-rows-{os.getpid()}-{uuid.uuid4().hex}",
+            readback_bands=False,
+        )
+        with SharedFrameRingReader.from_event(event) as reader:
+            frame = reader.read_frame(event)
+            rows = np.frombuffer(frame.payload, dtype=np.uint8).reshape(
+                frame.height, frame.stride
+            )
+            alpha = rows[:, 3 : frame.width * 4 : 4]
+            gpu_ys, gpu_xs = np.where(alpha > 0)
+
+    gpu_spans = _cluster_rows(gpu_ys, gpu_xs)
+
+    img = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(QColor("#101010"))
+    paint_frame(img, track, 1_000, style)
+    bg = QColor("#101010").rgb()
+    painter_coords = [
+        (x, y)
+        for y in range(img.height())
+        for x in range(img.width())
+        if img.pixel(x, y) != bg
+    ]
+    painter_ys = np.array([y for _x, y in painter_coords])
+    painter_xs = np.array([x for x, _y in painter_coords])
+    painter_spans = _cluster_rows(painter_ys, painter_xs)
+
+    assert len(gpu_spans) == 2
+    assert len(painter_spans) == 2
+    # 首行 left 贴左余白、次行 right 贴右余白；行对齐混排真正生效。
+    # ±4 容纳字形 bearing（墨迹边略进 advance 盒）。
+    assert painter_spans[0][0] == pytest.approx(20, abs=4)
+    assert painter_spans[1][1] == pytest.approx(width - 20, abs=4)
+    assert painter_spans[1][0] > painter_spans[0][1]
+    # 两条后端逐行同口径：只比对齐锚定的边缘（left 行左缘 / right 行右缘）；
+    # 自由边宽度差来自 DWrite 与 Qt 的 Arial 进宽舍入，与行锚定无关。
+    assert gpu_spans[0][0] == pytest.approx(painter_spans[0][0], abs=2)
+    assert gpu_spans[1][1] == pytest.approx(painter_spans[1][1], abs=2)
 
 
 def test_native_gpu_title_uses_project_timeline_and_independent_segment_fades(
