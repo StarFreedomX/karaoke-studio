@@ -251,6 +251,24 @@ def test_property_font_menu_search_keys_move_selection_over_matches(qapp) -> Non
     menu.close()
 
 
+def test_property_font_menu_pins_search_box_above_scrolling_list(qapp) -> None:
+    combo = _popup_font_combo(current_index=15)
+    menu = combo.dropMenu
+
+    # 挂在 view 而非 viewport：viewport 子控件会随 contents scroll 一起挪动
+    assert menu._search.parent() is menu.view
+    strip = menu.view.viewportMargins().top()
+    assert strip >= menu._SEARCH_TOP_INSET + menu._search.height()
+    # show 之后立即就位，宽度随视口铺满（不能停在布局前的旧几何上）
+    assert menu._search.width() >= 100
+    y_pinned = menu._search.y()
+    menu.view.scrollToBottom()
+    assert menu._search.y() == y_pinned
+    assert menu._search.width() <= menu.view.viewport().width()
+
+    menu.close()
+
+
 def test_property_font_combo_small_catalog_keeps_plain_popup(qapp) -> None:
     combo = WheelFocusedFontComboBox(
         font_families_provider=lambda: ("Only Font A", "Only Font B")

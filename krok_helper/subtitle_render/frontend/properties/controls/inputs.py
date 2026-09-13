@@ -523,16 +523,20 @@ class _FontMenuSearchEdit(FluentLineEdit):
 
 
 class _FilterableFontMenu(ComboBoxMenu):
-    """Font popup whose leading rows are a search box and an empty-state hint.
+    """Font popup with a search strip pinned above the scrollable list.
 
-    Rows 0/1 hold the filter box and the no-match hint; the font actions start
-    at ``_FIRST_ITEM_ROW`` and keep their combo item index regardless of the
-    active filter, so hiding rows never shifts the action-to-item mapping.
+    The filter box lives in the list viewport's top margin, so it never
+    scrolls away — not even when the popup opens scrolled to the current
+    item deep inside a long catalog.  List row 0 is the no-match hint and
+    the font actions start at ``_FIRST_ITEM_ROW``; their combo item index
+    never shifts, so hiding rows keeps the action-to-item mapping intact.
     """
 
-    _SEARCH_ROW = 0
-    _EMPTY_HINT_ROW = 1
-    _FIRST_ITEM_ROW = 2
+    _SEARCH_TOP_INSET = 4
+    _SEARCH_SIDE_INSET = 12
+    _SEARCH_GAP = 6
+    _EMPTY_HINT_ROW = 0
+    _FIRST_ITEM_ROW = 1
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent=parent)
@@ -540,8 +544,19 @@ class _FilterableFontMenu(ComboBoxMenu):
         self._exec_pos: Optional[QPoint] = None
         self._ani_type = MenuAnimationType.DROP_DOWN
         self._search = _FontMenuSearchEdit(self)
+        # 挂在 view（而非 viewport）上：viewport 的子控件会随 contents scroll
+        # 一起被挪动，只有 view 层的子控件才能钉死在 viewportMargins 预留的
+        # 顶部条带里，列表无论滚到哪里搜索框都不动。
+        self._search.setParent(self.view)
+        self._search.raise_()
+        self._search.show()
+        self.view.setViewportMargins(
+            0,
+            self._SEARCH_TOP_INSET + self._search.height() + self._SEARCH_GAP,
+            0,
+            6,
+        )
         self._empty_hint = BodyLabel("未找到匹配的字体", self)
-        self.addWidget(self._search, selectable=False)
         self.addWidget(self._empty_hint, selectable=False)
         self.view.item(self._EMPTY_HINT_ROW).setHidden(True)
         self._search.textChanged.connect(self._apply_filter)
@@ -592,12 +607,20 @@ class _FilterableFontMenu(ComboBoxMenu):
         self.aniManager = MenuAnimationManager.make(self, aniType)
         self.aniManager.exec(pos)
         self.show()
+        # 首次 show 之前 viewport 的 resize 事件是挂起的，此刻读到的几何
+        # 还是布局前的旧值，show 后必须重新放置一次。
+        self._place_search()
         # 定时器挂在 search 之下：菜单先关再触发时定时器随其销毁，回调不会
         # 摸到已删除的 C++ 对象（PyQt6 没有 QPointer 可用）。
         focus_timer = QTimer(self._search)
         focus_timer.setSingleShot(True)
-        focus_timer.timeout.connect(self._search.setFocus)
+        focus_timer.timeout.connect(self._focus_search)
         focus_timer.start(0)
+
+    def _focus_search(self) -> None:
+        """Re-pin the filter box once layout settles, then take keyboard focus."""
+        self._place_search()
+        self._search.setFocus()
 
     def _visible_item_rows(self) -> list[int]:
         view = self.view
@@ -620,9 +643,12 @@ class _FilterableFontMenu(ComboBoxMenu):
         view.item(self._EMPTY_HINT_ROW).setHidden(matches > 0)
         rows = self._visible_item_rows()
         if needle and rows:
+            view.scrollToTop()
             view.setCurrentRow(rows[0])
         else:
             view.setCurrentRow(self._default_row)
+            if 0 <= self._default_row < view.count():
+                view.scrollToItem(view.item(self._default_row))
         self._fit_view(self._exec_pos, self._ani_type)
         self._keep_anchored()
 
@@ -643,14 +669,6 @@ class _FilterableFontMenu(ComboBoxMenu):
             min(width_limit, content_width + margins.left() + margins.right() + 2),
             view.minimumWidth(),
         )
-        inner_width = max(view_width - margins.left() - margins.right(), 1)
-        view.item(self._SEARCH_ROW).setSizeHint(
-            QSize(inner_width, self._search.height())
-        )
-        self._search.setFixedWidth(inner_width)
-        view.item(self._EMPTY_HINT_ROW).setSizeHint(
-            QSize(inner_width, self._empty_hint.sizeHint().height() + 6)
-        )
 
         rows_height = 0
         for row in range(view.count()):
@@ -670,6 +688,19 @@ class _FilterableFontMenu(ComboBoxMenu):
             )
         view.setFixedSize(QSize(view_width, view_height))
         self.adjustSize()
+        self._place_search()
+
+    def _place_search(self) -> None:
+        """Pin the filter box in the top margin strip above the scrolling list."""
+        viewport = self.view.viewport()
+        self._search.setGeometry(
+            viewport.x() + self._SEARCH_SIDE_INSET,
+            viewport.y()
+            - self.view.viewportMargins().top()
+            + self._SEARCH_TOP_INSET,
+            max(viewport.width() - 2 * self._SEARCH_SIDE_INSET, 1),
+            self._search.height(),
+        )
 
     def _keep_anchored(self) -> None:
         """Keep the open popup attached to its anchor after a filter resize."""
