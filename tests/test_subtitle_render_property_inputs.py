@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QEvent, QSize, Qt
+from PyQt6.QtGui import QFont, QKeyEvent
 from PyQt6.QtWidgets import QWidget
 
 from krok_helper.subtitle_render.frontend.properties.controls.inputs import (
@@ -15,6 +15,7 @@ from krok_helper.subtitle_render.frontend.properties.controls.inputs import (
     WheelFocusedDoubleSpinBox,
     WheelFocusedFontComboBox,
     WheelFocusedSpinBox,
+    _FilterableFontMenu,
 )
 
 
@@ -154,3 +155,109 @@ def test_property_font_combo_uses_injected_catalog_and_canonicalizer(qapp) -> No
 
     combo.setCurrentFont(QFont("Missing Font"))
     assert combo.is_inherited() is True
+
+
+def _popup_font_combo(current_index: int = 0) -> WheelFocusedFontComboBox:
+    families = tuple(f"Test Font {i:02d}" for i in range(20))
+    combo = WheelFocusedFontComboBox(font_families_provider=lambda: families)
+    combo.resize(240, 33)
+    combo.setCurrentIndex(current_index)
+    combo._showComboMenu()
+    return combo
+
+
+def _visible_font_texts(menu: _FilterableFontMenu) -> list[str]:
+    view = menu.view
+    return [
+        view.item(row).text()
+        for row in range(menu._FIRST_ITEM_ROW, view.count())
+        if not view.item(row).isHidden()
+    ]
+
+
+def test_property_font_combo_popup_filters_families_by_search_text(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    assert isinstance(menu, _FilterableFontMenu)
+
+    menu._search.setText("02")
+
+    assert _visible_font_texts(menu) == ["Test Font 02"]
+    assert menu.view.item(menu.view.currentRow()).text() == "Test Font 02"
+    # 隐藏行不影响 action 与条目的对应关系
+    assert menu.action_for_item(0).text() == "Test Font 00"
+    menu.action_for_item(5).trigger()
+    assert combo.currentText() == "Test Font 05"
+
+    menu.close()
+
+
+def test_property_font_combo_popup_restores_full_list_when_filter_cleared(qapp) -> None:
+    combo = _popup_font_combo(current_index=3)
+    menu = combo.dropMenu
+    menu._search.setText("19")
+
+    assert _visible_font_texts(menu) == ["Test Font 19"]
+
+    menu._search.clear()
+
+    assert len(_visible_font_texts(menu)) == 20
+    assert menu.view.currentRow() == menu._FIRST_ITEM_ROW + 3
+    assert menu.view.item(menu._EMPTY_HINT_ROW).isHidden()
+
+    menu.close()
+
+
+def test_property_font_combo_popup_shows_hint_when_nothing_matches(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+
+    menu._search.setText("不存在的字体")
+
+    assert _visible_font_texts(menu) == []
+    assert menu.view.item(menu._EMPTY_HINT_ROW).isHidden() is False
+
+    menu.close()
+
+
+def test_property_font_combo_popup_enter_activates_first_visible_match(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    menu._search.setText("07")
+    event = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier
+    )
+
+    menu._search.keyPressEvent(event)
+
+    assert combo.currentText() == "Test Font 07"
+
+
+def test_property_font_menu_search_keys_move_selection_over_matches(qapp) -> None:
+    combo = _popup_font_combo()
+    menu = combo.dropMenu
+    menu._search.setText("Test Font 1")
+    first_row = menu.view.currentRow()
+
+    menu._search.keyPressEvent(
+        QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier
+        )
+    )
+
+    assert menu.view.currentRow() == first_row + 1
+    assert menu.view.item(menu.view.currentRow()).text() == "Test Font 11"
+
+    menu.close()
+
+
+def test_property_font_combo_small_catalog_keeps_plain_popup(qapp) -> None:
+    combo = WheelFocusedFontComboBox(
+        font_families_provider=lambda: ("Only Font A", "Only Font B")
+    )
+
+    combo._showComboMenu()
+
+    assert combo.dropMenu is not None
+    assert not isinstance(combo.dropMenu, _FilterableFontMenu)
+    combo.dropMenu.close()

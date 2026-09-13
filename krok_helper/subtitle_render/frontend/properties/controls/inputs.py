@@ -5,15 +5,34 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
-from PyQt6.QtCore import QRegularExpression, QSize, Qt, QTimer, pyqtSignal as Signal
-from PyQt6.QtGui import QFont, QRegularExpressionValidator, QValidator
+from PyQt6.QtCore import (
+    QPoint,
+    QPropertyAnimation,
+    QRegularExpression,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal as Signal,
+)
+from PyQt6.QtGui import (
+    QAction,
+    QFont,
+    QRegularExpressionValidator,
+    QValidator,
+)
 from PyQt6.QtWidgets import QSizePolicy, QStackedWidget, QStyle, QWidget
 from qfluentwidgets import (
+    BodyLabel,
     ComboBox as FluentComboBox,
     DoubleSpinBox as FluentDoubleSpinBox,
     LineEdit as FluentLineEdit,
     PlainTextEdit as FluentPlainTextEdit,
     SpinBox as FluentSpinBox,
+)
+from qfluentwidgets.components.widgets.combo_box import ComboBoxMenu
+from qfluentwidgets.components.widgets.menu import (
+    MenuAnimationManager,
+    MenuAnimationType,
 )
 
 from krok_helper.subtitle_render.n3.font_catalog import (
@@ -481,10 +500,200 @@ class WheelFocusedDoubleSpinBox(UnitProtectedSpinBoxMixin, FluentDoubleSpinBox):
         super().wheelEvent(event)
 
 
+class _FontMenuSearchEdit(FluentLineEdit):
+    """Filter box pinned above the font popup list; navigation keys go to the list."""
+
+    def __init__(self, menu: _FilterableFontMenu) -> None:
+        super().__init__(menu)
+        self._menu = menu
+        self.setPlaceholderText("输入以筛选字体")
+        self.setClearButtonEnabled(True)
+        self.setFixedHeight(33)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        key = event.key()
+        if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            self._menu.move_selection(1 if key == Qt.Key.Key_Down else -1)
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._menu.activate_current_item()
+        elif key == Qt.Key.Key_Escape:
+            self._menu.close()
+        else:
+            super().keyPressEvent(event)
+
+
+class _FilterableFontMenu(ComboBoxMenu):
+    """Font popup whose leading rows are a search box and an empty-state hint.
+
+    Rows 0/1 hold the filter box and the no-match hint; the font actions start
+    at ``_FIRST_ITEM_ROW`` and keep their combo item index regardless of the
+    active filter, so hiding rows never shifts the action-to-item mapping.
+    """
+
+    _SEARCH_ROW = 0
+    _EMPTY_HINT_ROW = 1
+    _FIRST_ITEM_ROW = 2
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent=parent)
+        self._default_row = -1
+        self._exec_pos: Optional[QPoint] = None
+        self._ani_type = MenuAnimationType.DROP_DOWN
+        self._search = _FontMenuSearchEdit(self)
+        self._empty_hint = BodyLabel("未找到匹配的字体", self)
+        self.addWidget(self._search, selectable=False)
+        self.addWidget(self._empty_hint, selectable=False)
+        self.view.item(self._EMPTY_HINT_ROW).setHidden(True)
+        self._search.textChanged.connect(self._apply_filter)
+
+    def action_for_item(self, index: int) -> QAction:
+        """Return the menu action bound to combo item ``index``."""
+        return self.menuActions()[self._FIRST_ITEM_ROW + index]
+
+    def set_default_item(self, index: int) -> None:
+        """Highlight the row bound to combo item ``index`` on open."""
+        self._default_row = self._FIRST_ITEM_ROW + index
+        self.view.setCurrentRow(self._default_row)
+
+    def move_selection(self, offset: int) -> None:
+        """Move the highlighted row among visible (non-filtered) rows."""
+        rows = self._visible_item_rows()
+        if not rows:
+            return
+        view = self.view
+        try:
+            pos = rows.index(view.currentRow())
+        except ValueError:
+            pos = 0 if offset > 0 else len(rows) - 1
+        view.setCurrentRow(rows[(pos + offset) % len(rows)])
+
+    def activate_current_item(self) -> None:
+        """Commit the highlighted (or first visible) row like a mouse click."""
+        rows = self._visible_item_rows()
+        if not rows:
+            return
+        view = self.view
+        row = view.currentRow() if view.currentRow() in rows else rows[0]
+        action = view.item(row).data(Qt.ItemDataRole.UserRole)
+        if action is None or not action.isEnabled():
+            return
+        self.close()
+        action.trigger()
+
+    def exec(  # noqa: N802 - qfluentwidgets API
+        self,
+        pos: QPoint,
+        ani: bool = True,
+        aniType: MenuAnimationType = MenuAnimationType.DROP_DOWN,
+    ) -> None:
+        self._exec_pos = QPoint(pos)
+        self._ani_type = aniType
+        self._fit_view(pos, aniType)
+        self.aniManager = MenuAnimationManager.make(self, aniType)
+        self.aniManager.exec(pos)
+        self.show()
+        # 定时器挂在 search 之下：菜单先关再触发时定时器随其销毁，回调不会
+        # 摸到已删除的 C++ 对象（PyQt6 没有 QPointer 可用）。
+        focus_timer = QTimer(self._search)
+        focus_timer.setSingleShot(True)
+        focus_timer.timeout.connect(self._search.setFocus)
+        focus_timer.start(0)
+
+    def _visible_item_rows(self) -> list[int]:
+        view = self.view
+        return [
+            row
+            for row in range(self._FIRST_ITEM_ROW, view.count())
+            if not view.item(row).isHidden()
+        ]
+
+    def _apply_filter(self, text: str) -> None:
+        view = self.view
+        needle = text.strip().casefold()
+        matches = 0
+        for row in range(self._FIRST_ITEM_ROW, view.count()):
+            item = view.item(row)
+            hidden = bool(needle) and needle not in item.text().casefold()
+            item.setHidden(hidden)
+            if not hidden:
+                matches += 1
+        view.item(self._EMPTY_HINT_ROW).setHidden(matches > 0)
+        rows = self._visible_item_rows()
+        if needle and rows:
+            view.setCurrentRow(rows[0])
+        else:
+            view.setCurrentRow(self._default_row)
+        self._fit_view(self._exec_pos, self._ani_type)
+        self._keep_anchored()
+
+    def _fit_view(self, pos: Optional[QPoint], ani_type: MenuAnimationType) -> None:
+        """Resize the list to visible rows only, mirroring adjustSize minus hidden rows."""
+        view = self.view
+        margins = view.viewportMargins()
+        width_limit, height_limit = MenuAnimationManager.make(
+            self, ani_type
+        ).availableViewSize(pos)
+
+        content_width = 0
+        for row in range(self._FIRST_ITEM_ROW, view.count()):
+            item = view.item(row)
+            if not item.isHidden():
+                content_width = max(content_width, item.sizeHint().width(), 1)
+        view_width = max(
+            min(width_limit, content_width + margins.left() + margins.right() + 2),
+            view.minimumWidth(),
+        )
+        inner_width = max(view_width - margins.left() - margins.right(), 1)
+        view.item(self._SEARCH_ROW).setSizeHint(
+            QSize(inner_width, self._search.height())
+        )
+        self._search.setFixedWidth(inner_width)
+        view.item(self._EMPTY_HINT_ROW).setSizeHint(
+            QSize(inner_width, self._empty_hint.sizeHint().height() + 6)
+        )
+
+        rows_height = 0
+        for row in range(view.count()):
+            item = view.item(row)
+            if not item.isHidden():
+                rows_height += max(1, item.sizeHint().height())
+        view_height = min(
+            height_limit, rows_height + margins.top() + margins.bottom() + 3
+        )
+        if view.maxVisibleItems() > 0:
+            view_height = min(
+                view_height,
+                view.maxVisibleItems() * self.itemHeight
+                + margins.top()
+                + margins.bottom()
+                + 3,
+            )
+        view.setFixedSize(QSize(view_width, view_height))
+        self.adjustSize()
+
+    def _keep_anchored(self) -> None:
+        """Keep the open popup attached to its anchor after a filter resize."""
+        if not self.isVisible() or self._exec_pos is None or self.aniManager is None:
+            return
+        if (
+            self.aniManager.ani.state()
+            == QPropertyAnimation.State.Running
+        ):
+            return
+        self.move(self.aniManager._endPosition(self._exec_pos))
+
+
 class WheelFocusedFontComboBox(WheelFocusedComboBox):
-    """Fluent font picker preserving QFontComboBox's small public contract."""
+    """Fluent font picker preserving QFontComboBox's small public contract.
+
+    Long catalogs open with a search box on top of the popup for live
+    filtering; short catalogs keep the plain combo popup.
+    """
 
     currentFontChanged = Signal(QFont)
+
+    #: 弹层条目数达到该值才启用筛选框，避免短列表出现无意义的输入框。
+    filter_min_items = 12
 
     def __init__(
         self,
@@ -502,6 +711,8 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
         self.currentIndexChanged.connect(
             lambda _index: self.currentFontChanged.emit(self.currentFont())
         )
+        if self.count() >= self.filter_min_items:
+            self.setToolTip("展开后可在顶部输入框输入关键字筛选字体")
 
     def enable_inheritance(self, label: str) -> None:
         """Add an explicit N3-style zero slot before installed families."""
@@ -531,3 +742,49 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
             self.currentFontChanged.emit(self.currentFont())
             return
         self.setCurrentIndex(index)
+
+    def _createComboMenu(self):  # noqa: N802 - qfluentwidgets hook
+        if self.count() >= self.filter_min_items:
+            return _FilterableFontMenu(self)
+        return super()._createComboMenu()
+
+    def _showComboMenu(self) -> None:  # noqa: N802 - qfluentwidgets hook
+        """Open the popup, offsetting the default action past the filter rows."""
+        if not self.items:
+            return
+        menu = self._createComboMenu()
+        for i, item in enumerate(self.items):
+            action = QAction(
+                item.icon,
+                item.text,
+                triggered=lambda _checked, index=i: self._onItemClicked(index),
+            )
+            action.setEnabled(item.isEnabled)
+            menu.addAction(action)
+
+        if menu.view.width() < self.width():
+            menu.view.setMinimumWidth(self.width())
+            menu.adjustSize()
+        menu.setMaxVisibleItems(self.maxVisibleItems())
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.closedSignal.connect(self._onDropMenuClosed)
+        self.dropMenu = menu
+
+        if 0 <= self.currentIndex() < len(self.items):
+            if isinstance(menu, _FilterableFontMenu):
+                menu.set_default_item(self.currentIndex())
+            else:
+                menu.setDefaultAction(menu.actions()[self.currentIndex()])
+
+        # determine the animation type by choosing the maximum height of view
+        x = -menu.width()//2 + menu.layout().contentsMargins().left() + self.width()//2
+        pd = self.mapToGlobal(QPoint(x, self.height()))
+        hd = menu.view.heightForAnimation(pd, MenuAnimationType.DROP_DOWN)
+
+        pu = self.mapToGlobal(QPoint(x, 0))
+        hu = menu.view.heightForAnimation(pu, MenuAnimationType.PULL_UP)
+
+        if hd >= hu:
+            menu.exec(pd, aniType=MenuAnimationType.DROP_DOWN)
+        else:
+            menu.exec(pu, aniType=MenuAnimationType.PULL_UP)
