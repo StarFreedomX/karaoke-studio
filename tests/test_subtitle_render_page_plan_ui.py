@@ -235,3 +235,50 @@ def test_sug_software_compensation_reads_timing_module_settings(
 
     monkeypatch.setattr(render_window, "load_app_settings", broken)
     assert render_window._sug_software_compensation_ms() == 0
+
+
+def test_subtitle_loading_settings_round_trips_keep_singer_label_text_flag() -> None:
+    from krok_helper.subtitle_render.domain.models import (
+        subtitle_loading_settings_from_dict,
+        subtitle_loading_settings_to_dict,
+    )
+
+    payload = subtitle_loading_settings_to_dict(
+        SubtitleLoadingSettings(keep_singer_label_text=True)
+    )
+    assert payload["keep_singer_label_text"] is True
+    assert subtitle_loading_settings_from_dict(payload) == SubtitleLoadingSettings(
+        keep_singer_label_text=True
+    )
+
+    # 旧项目快照没有该字段时回落默认值「关闭」，保证升级后既有行为不变。
+    legacy = dict(payload)
+    legacy.pop("keep_singer_label_text")
+    assert (
+        subtitle_loading_settings_from_dict(legacy).keep_singer_label_text is False
+    )
+
+
+def test_loading_settings_dialog_edits_keep_singer_label_text(qapp):
+    parent = QWidget()
+    dialog = _SubtitleLoadingSettingsDialog(
+        mode="global",
+        effective=SubtitleLoadingSettings(keep_singer_label_text=True),
+        global_defaults=SubtitleLoadingSettings(keep_singer_label_text=True),
+        anchor=None,
+        parent=parent,
+    )
+
+    assert dialog._keep_singer_label_check.text() == "保留歌词中【xxx】演唱者名"
+    assert dialog._keep_singer_label_check.toolTip()
+    assert dialog._keep_singer_label_check.isChecked()
+    dialog._keep_singer_label_check.setChecked(False)
+    assert dialog.result_value() == ("global", SubtitleLoadingSettings())
+    dialog._keep_singer_label_check.setChecked(True)
+    assert dialog.result_value() == (
+        "global",
+        SubtitleLoadingSettings(keep_singer_label_text=True),
+    )
+    dialog.deleteLater()
+    parent.deleteLater()
+    qapp.processEvents()

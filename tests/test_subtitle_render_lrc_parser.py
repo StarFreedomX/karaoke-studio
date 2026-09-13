@@ -118,7 +118,8 @@ def test_singer_label_at_line_start():
     line = track.lines[0]
     assert line.singer_label == "ボーカル"
     assert line.singer_id == 0
-    assert [c.text for c in line.chars] == ["あ"]
+    # 无 @Emoji 触发的标签默认保留可见文本（角色切换仍生效）
+    assert "".join(c.text for c in line.chars) == "【ボーカル】あ"
 
 
 def test_singer_label_persists_until_next_label():
@@ -569,33 +570,43 @@ def test_malformed_ruby_entry_silently_skipped():
 
 
 def test_role_label_assigned_per_char_and_switches_midline():
-    # 一行内从 1配色 切到 2配色（标签前后都有 [ts]，与实际格式一致）
+    # 一行内从 1配色 切到 2配色（标签前后都有 [ts]，与实际格式一致）。
+    # 无 @Emoji 触发的标签保留可见文本，且与后续字符同属切换后的角色。
     text = "【1配色】[00:01:00]あ[00:01:50]い[00:02:00]【2配色】[00:02:50]う[00:03:00]\n"
     track = parse_nicokara_lrc(text)
     line = track.lines[0]
+    assert "".join(c.text for c in line.chars) == "【1配色】あい【2配色】う"
     assert [(c.text, c.role_label) for c in line.chars] == [
+        ("【", "1配色"),
+        ("1", "1配色"),
+        ("配", "1配色"),
+        ("色", "1配色"),
+        ("】", "1配色"),
         ("あ", "1配色"),
         ("い", "1配色"),
+        ("【", "2配色"),
+        ("2", "2配色"),
+        ("配", "2配色"),
+        ("色", "2配色"),
+        ("】", "2配色"),
         ("う", "2配色"),
     ]
 
 
-def test_role_label_embedded_after_space_is_not_rendered_as_text():
+def test_role_label_embedded_after_space_is_rendered_as_kept_tag_text():
+    # 标签保留可见文本（角色切换仍按标签位置切），空格锚点保持原有时间戳。
     text = (
         "【1配色】[01:23:66]今[01:24:61] 【3配色】[01:25:19]歩[01:25:94]き[01:26:58]\n"
     )
     track = parse_nicokara_lrc(text)
     line = track.lines[0]
 
-    assert "".join(c.text for c in line.chars) == "今 歩き"
-    assert [(c.text, c.role_label) for c in line.chars] == [
-        ("今", "1配色"),
-        (" ", "1配色"),
-        ("歩", "3配色"),
-        ("き", "3配色"),
-    ]
-    assert line.chars[1].start_ms == 84_610
-    assert line.chars[2].start_ms == 85_190
+    assert "".join(c.text for c in line.chars) == "【1配色】今 【3配色】歩き"
+    texts = [c.text for c in line.chars]
+    assert texts.index("今") == 5
+    assert line.chars[6].text == " "
+    assert line.chars[6].start_ms == 84_610
+    assert next(c for c in line.chars if c.text == "歩").start_ms == 85_190
 
 
 def test_role_label_carries_across_lines():
@@ -1077,3 +1088,122 @@ def test_leading_untimed_space_preserved():
     track = parse_nicokara_lrc(" [00:01:00]あ[00:01:50]\n")
 
     assert [ch.text for ch in track.lines[0].chars] == [" ", "あ"]
+
+
+# ---------------------------------------------------------------------------
+# 【xxx】演唱者标签的文本保留（无 @Emoji 触发无条件保留；开关只管 @Emoji 标签）
+# ---------------------------------------------------------------------------
+
+
+def test_singer_tag_without_emoji_trigger_is_kept_as_text_by_default():
+    track = parse_nicokara_lrc(
+        "[00:01:00]あ[00:01:50]い[00:02:00]\n【B】[00:03:00]う[00:03:50]\n"
+    )
+
+    assert [c.text for c in track.lines[0].chars] == ["あ", "い"]
+    kept = track.lines[1]
+    assert [c.text for c in kept.chars] == ["【", "B", "】", "う"]
+    # 角色切换始终生效：标签文本与后续字符都归属新角色
+    assert [c.role_label for c in kept.chars] == ["B", "B", "B", "B"]
+    assert all(c.role_label is None for c in track.lines[0].chars)
+    assert kept.singer_label == "B"
+
+
+def test_singer_tag_midline_is_kept_as_text_and_switches_role():
+    track = parse_nicokara_lrc("[00:01:00]あ【B】[00:01:50]い[00:02:00]\n")
+
+    chars = track.lines[0].chars
+    assert [c.text for c in chars] == ["あ", "【", "B", "】", "い"]
+    assert chars[0].role_label is None
+    assert [c.role_label for c in chars[1:]] == ["B", "B", "B", "B"]
+
+
+def test_singer_tag_standalone_line_is_kept_as_text(tmp_path):
+    lrc = tmp_path / "demo.lrc"
+    lrc.write_text("[00:01:00]【朵】[00:02:00]\n", encoding="utf-8")
+
+    track = load_nicokara_lrc(lrc)
+
+    line = track.lines[0]
+    assert [c.text for c in line.chars] == ["【", "朵", "】"]
+    assert all(c.role_label == "朵" for c in line.chars)
+
+
+def test_emoji_triggered_tag_replaced_by_avatar_by_default(tmp_path):
+    """默认（开关关）：带 @Emoji 触发的标签走头像替换，文本不保留；
+    无触发的标签保留原文、不插头像。"""
+    lrc = tmp_path / "demo.lrc"
+    (tmp_path / "a.png").write_bytes(b"fake")
+    lrc.write_text(
+        "【A】[00:01:00]●[00:01:50]\n"
+        "【B】[00:02:00]こ[00:02:50]\n"
+        "\n"
+        "@Emoji=【A】,a.png,,NoDecor\n",
+        encoding="utf-8",
+    )
+
+    track = load_nicokara_lrc(lrc)
+
+    first = track.lines[0]
+    assert [c.text for c in first.chars] == ["【A】", "●"]
+    assert first.inline_guide_symbols[0].kind == "bitmap"
+    second = track.lines[1]
+    assert [c.text for c in second.chars] == ["【", "B", "】", "こ"]
+    assert second.inline_guide_symbols == {}
+
+
+def test_keep_singer_label_text_also_keeps_emoji_triggered_tags(tmp_path):
+    """开关开启后，@Emoji 触发的【xxx】标签也保留文本，不再替换为头像。"""
+    lrc = tmp_path / "demo.lrc"
+    (tmp_path / "a.png").write_bytes(b"fake")
+    lrc.write_text(
+        "【A】[00:01:00]●[00:01:50]\n"
+        "\n"
+        "@Emoji=【A】,a.png,,NoDecor\n",
+        encoding="utf-8",
+    )
+
+    track = load_nicokara_lrc(lrc, keep_singer_label_text=True)
+
+    first = track.lines[0]
+    assert [c.text for c in first.chars] == ["【", "A", "】", "●"]
+    assert first.inline_guide_symbols == {}
+    assert all(c.role_label == "A" for c in first.chars)
+
+
+def test_keep_singer_label_text_keeps_visible_emoji_trigger_replacement(tmp_path):
+    """可见字符触发（@Emoji=♪）不受开关影响，仍原位替换。"""
+    lrc = tmp_path / "demo.lrc"
+    (tmp_path / "note.png").write_bytes(b"fake")
+    lrc.write_text(
+        "[00:01:00]♪[00:01:50]a[00:02:00]\n"
+        "\n"
+        "@Emoji=♪,note.png,,NoDecor\n",
+        encoding="utf-8",
+    )
+
+    track = load_nicokara_lrc(lrc, keep_singer_label_text=True)
+
+    line = track.lines[0]
+    assert [c.text for c in line.chars] == ["♪", "a"]
+    assert line.inline_guide_symbols[0].kind == "bitmap"
+
+
+def test_kept_singer_tag_keeps_avatar_index_aligned(tmp_path):
+    """保留标签产出可见字符后，行内头像插入下标仍与 line.chars 对齐。"""
+    lrc = tmp_path / "demo.lrc"
+    (tmp_path / "a.png").write_bytes(b"fake")
+    lrc.write_text(
+        "[00:01:00]【B】[00:01:50]あ[00:02:00]【A】[00:02:50]い[00:03:00]\n"
+        "\n"
+        "@Emoji=【A】,a.png,,NoDecor\n",
+        encoding="utf-8",
+    )
+
+    track = load_nicokara_lrc(lrc)
+
+    chars = track.lines[0].chars
+    texts = [c.text for c in chars]
+    # B 标签保留为 3 个可见字符；A 标签按头像路径插入为 1 个合成字符
+    assert texts == ["【", "B", "】", "あ", "【A】", "い"]
+    assert track.lines[0].inline_guide_symbols[4].kind == "bitmap"

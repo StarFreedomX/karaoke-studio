@@ -3011,7 +3011,12 @@ class SubtitleRenderWindow(QWidget):
     def load_from_lrc(self, path: Path) -> Optional[TimingTrack]:
         """加载 Nicokara 逐字 LRC 文件。返回解析结果（失败返回 None 并弹错）。"""
         try:
-            track = self._subtitle_source_loader.load_lrc(path)
+            track = self._subtitle_source_loader.load_lrc(
+                path,
+                keep_singer_label_text=(
+                    self._subtitle_loading_defaults.keep_singer_label_text
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 — 暴露给用户的统一错误处理
             fluent_error(
                 self, "加载字幕失败", f"无法解析字幕文件：\n{path}\n\n错误：{exc}"
@@ -3180,6 +3185,9 @@ class SubtitleRenderWindow(QWidget):
                 path,
                 apply_sug_export_compensation=(
                     self._subtitle_loading_defaults.apply_sug_export_compensation
+                ),
+                keep_singer_label_text=(
+                    self._subtitle_loading_defaults.keep_singer_label_text
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — 统一错误弹窗
@@ -3387,6 +3395,9 @@ class SubtitleRenderWindow(QWidget):
                 source_path,
                 apply_sug_export_compensation=(
                     self._sug_compensation_enabled_for_track(owner_track)
+                ),
+                keep_singer_label_text=(
+                    self._keep_singer_label_text_for_track(owner_track)
                 ),
             ),
             primary_track=primary_track,
@@ -4490,17 +4501,21 @@ class SubtitleRenderWindow(QWidget):
                 path = Path(path_text)
                 if not path.is_file():
                     continue
-                # 副源在项目打开时按磁盘文件重新解析；导出偏移开关沿用该项目
-                # 保存时该源的加载设置（旧项目快照没有该字段时按默认值应用）。
+                # 副源在项目打开时按磁盘文件重新解析；导出偏移开关与「保留
+                # 【xxx】演唱者名」开关沿用该项目保存时该源的加载设置（旧项目
+                # 快照没有该字段时按默认值应用）。
                 apply_compensation = (
                     self._subtitle_loading_defaults.apply_sug_export_compensation
                 )
+                keep_singer_label = (
+                    self._subtitle_loading_defaults.keep_singer_label_text
+                )
                 if str(item.get("loading_settings_mode") or "") == "custom":
-                    apply_compensation = (
-                        subtitle_loading_settings_from_dict(
-                            item.get("loading_settings")
-                        ).apply_sug_export_compensation
+                    saved_settings = subtitle_loading_settings_from_dict(
+                        item.get("loading_settings")
                     )
+                    apply_compensation = saved_settings.apply_sug_export_compensation
+                    keep_singer_label = saved_settings.keep_singer_label_text
                 axis_ids_raw = item.get("sug_axis_singer_ids")
                 axis_singer_ids = (
                     frozenset(
@@ -4526,7 +4541,9 @@ class SubtitleRenderWindow(QWidget):
                         )
                     else:
                         track = self._load_timing_track_file(
-                            path, apply_sug_export_compensation=apply_compensation
+                            path,
+                            apply_sug_export_compensation=apply_compensation,
+                            keep_singer_label_text=keep_singer_label,
                         )
                 except Exception:  # noqa: BLE001 — 单个副源坏了不阻塞项目打开
                     continue
@@ -5216,6 +5233,14 @@ class SubtitleRenderWindow(QWidget):
             return track.loading_settings
         return self._subtitle_loading_defaults
 
+    def _keep_singer_label_text_for_track(
+        self, track: Optional[TimingTrack]
+    ) -> bool:
+        """该轨道重新解析 ``.lrc`` 时是否连 @Emoji 触发标签也保留文本。"""
+        if track is None:
+            return self._subtitle_loading_defaults.keep_singer_label_text
+        return self._effective_loading_settings(track).keep_singer_label_text
+
     def _sug_compensation_enabled_for_track(
         self, track: Optional[TimingTrack]
     ) -> bool:
@@ -5412,6 +5437,7 @@ class SubtitleRenderWindow(QWidget):
                     apply_sug_export_compensation=(
                         settings.apply_sug_export_compensation
                     ),
+                    keep_singer_label_text=settings.keep_singer_label_text,
                 )
             baseline = self._sug_axis_baseline_for_track_index(track_index)
             if baseline is None:
@@ -5614,6 +5640,9 @@ class SubtitleRenderWindow(QWidget):
                 apply_sug_export_compensation=(
                     self._subtitle_loading_defaults.apply_sug_export_compensation
                 ),
+                keep_singer_label_text=(
+                    self._subtitle_loading_defaults.keep_singer_label_text
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — 统一错误弹窗
             fluent_error(
@@ -5644,9 +5673,14 @@ class SubtitleRenderWindow(QWidget):
         self._mark_project_dirty()
 
     def _load_timing_track_file(
-        self, path: Path, *, apply_sug_export_compensation: bool = True
+        self,
+        path: Path,
+        *,
+        apply_sug_export_compensation: bool = True,
+        keep_singer_label_text: bool = False,
     ) -> TimingTrack:
-        """按需解析字幕文件；``.sug`` 的软件导出补偿开关由调用方的加载设置决定。"""
+        """按需解析字幕文件；``.sug`` 的软件导出补偿开关与 ``.lrc`` 的
+        「保留歌词中【xxx】演唱者名」开关由调用方的加载设置决定。"""
         return self._subtitle_source_loader.load_file(
             path,
             software_compensation_ms=(
@@ -5654,6 +5688,7 @@ class SubtitleRenderWindow(QWidget):
                 if apply_sug_export_compensation
                 else 0
             ),
+            keep_singer_label_text=keep_singer_label_text,
         )
 
     def _on_source_remove_requested(self, index: int) -> None:
@@ -5730,6 +5765,9 @@ class SubtitleRenderWindow(QWidget):
                 path,
                 apply_sug_export_compensation=(
                     self._subtitle_loading_defaults.apply_sug_export_compensation
+                ),
+                keep_singer_label_text=(
+                    self._subtitle_loading_defaults.keep_singer_label_text
                 ),
             )
         except Exception as exc:  # noqa: BLE001 — 统一错误弹窗

@@ -40,17 +40,37 @@ def test_subtitle_source_loader_routes_non_sug_as_lrc(
     tmp_path: Path,
 ) -> None:
     expected = TimingTrack()
-    calls: list[Path] = []
+    calls: list[tuple] = []
     monkeypatch.setattr(
         loader_module,
         "load_nicokara_lrc",
-        lambda path: (calls.append(path), expected)[1],
+        lambda *args, **kwargs: (calls.append((args, kwargs)), expected)[1],
     )
 
     result = SubtitleSourceLoader.load_file(tmp_path / "song.txt")
 
     assert result is expected
-    assert calls == [tmp_path / "song.txt"]
+    assert calls == [((tmp_path / "song.txt",), {"keep_singer_label_text": False})]
+
+
+def test_subtitle_source_loader_routes_lrc_with_keep_singer_label(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    expected = TimingTrack()
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        loader_module,
+        "load_nicokara_lrc",
+        lambda *args, **kwargs: (calls.append((args, kwargs)), expected)[1],
+    )
+
+    result = SubtitleSourceLoader.load_file(
+        tmp_path / "song.lrc", keep_singer_label_text=True
+    )
+
+    assert result is expected
+    assert calls == [((tmp_path / "song.lrc",), {"keep_singer_label_text": True})]
 
 
 def test_subtitle_source_loader_preserves_in_memory_sug_arguments(monkeypatch) -> None:

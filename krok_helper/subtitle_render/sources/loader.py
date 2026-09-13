@@ -25,6 +25,7 @@ class SubtitleSourceLoader:
         *,
         software_compensation_ms: int = 0,
         singer_filter: Collection[str] | None = None,
+        keep_singer_label_text: bool = False,
     ) -> TimingTrack:
         """Load ``.sug`` with compensation and all other paths as Nicokara LRC."""
         path = Path(path)
@@ -34,11 +35,13 @@ class SubtitleSourceLoader:
                 software_compensation_ms=int(software_compensation_ms),
                 singer_filter=singer_filter,
             )
-        return load_nicokara_lrc(path)
+        return load_nicokara_lrc(path, keep_singer_label_text=keep_singer_label_text)
 
     @staticmethod
-    def load_lrc(path: Path) -> TimingTrack:
-        return load_nicokara_lrc(Path(path))
+    def load_lrc(path: Path, *, keep_singer_label_text: bool = False) -> TimingTrack:
+        return load_nicokara_lrc(
+            Path(path), keep_singer_label_text=keep_singer_label_text
+        )
 
     @staticmethod
     def load_sug(

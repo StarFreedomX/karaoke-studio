@@ -28,7 +28,7 @@ import logging
 import re
 import unicodedata
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Collection, Iterable, Optional, Tuple
 
 from krok_helper.subtitle_render.domain.timing import (
     GuideSymbol,
@@ -76,14 +76,23 @@ class _ParsedRubyEntry:
 # ---------------------------------------------------------------------------
 
 
-def load_nicokara_lrc(path: str | Path) -> TimingTrack:
-    """从磁盘读取 Nicokara LRC 文件并解析。"""
+def load_nicokara_lrc(
+    path: str | Path, *, keep_singer_label_text: bool = False
+) -> TimingTrack:
+    """从磁盘读取 Nicokara LRC 文件并解析。
+
+    ``【演唱者名】`` 标签始终被识别为角色切换；没有 ``@Emoji`` 触发的标签
+    按可见文本保留在歌词里。``keep_singer_label_text`` 开启后，带 ``@Emoji``
+    触发的标签也保留文本（不再替换为头像）。
+    """
     p = Path(path)
     raw = p.read_bytes()
     text = _decode_with_bom(raw)
-    track = parse_nicokara_lrc(text)
+    track = parse_nicokara_lrc(text, keep_singer_label_text=keep_singer_label_text)
     body_lines, _tail_lines = _split_body_tail(_normalized_lines(text))
-    _apply_emoji_guides(track, p.parent, body_lines)
+    _apply_emoji_guides(
+        track, p.parent, body_lines, keep_singer_label_text=keep_singer_label_text
+    )
     # 手工编辑的 LRC 理论上可含整行逆序；入口统一理顺 + 打标记。
     normalize_reversed_wipe_lines(track)
     # @HeadOffset 在逆序理顺之后烘焙，逆序行镜像出的「行首字」才是正确目标。
@@ -91,14 +100,20 @@ def load_nicokara_lrc(path: str | Path) -> TimingTrack:
     return track
 
 
-def parse_nicokara_lrc(text: str) -> TimingTrack:
+def parse_nicokara_lrc(
+    text: str, *, keep_singer_label_text: bool = False
+) -> TimingTrack:
     """解析 Nicokara LRC 文本为 :class:`TimingTrack`。
 
     本函数假定输入已经是 ``str``（已去 BOM）。``load_nicokara_lrc`` 会负责 IO + 解码。
     """
     body_lines, tail_lines = _split_body_tail(_normalized_lines(text))
 
-    timing_lines = _parse_body_lines(body_lines)
+    timing_lines = _parse_body_lines(
+        body_lines,
+        keep_singer_label_text=keep_singer_label_text,
+        emoji_triggers=_emoji_trigger_labels(tail_lines),
+    )
     meta, ruby_entries = _parse_tail(tail_lines)
     rubies = _resolve_positioned_rubies(timing_lines, ruby_entries)
     _backfill_leader_checkpoint_ms(timing_lines, rubies)
@@ -157,19 +172,51 @@ def _split_body_tail(lines: list[str]) -> Tuple[list[str], list[str]]:
     return lines[:boundary], lines[boundary:]
 
 
+def _emoji_trigger_labels(lines: Iterable[str]) -> frozenset[str]:
+    """从尾部元数据行提取全部 ``@Emoji`` 触发字符串（含 ``【…】`` 与裸文本形式）。"""
+    triggers: set[str] = set()
+    for line in lines:
+        match = _EMOJI_TAG_RE.match(str(line).strip())
+        if match is None:
+            continue
+        parts = [part.strip() for part in match.group(1).replace("，", ",").split(",")]
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            triggers.add(parts[0])
+    return frozenset(triggers)
+
+
+def _kept_singer_tag_text(
+    label: str, *, keep: bool, emoji_triggers: Collection[str]
+) -> Optional[str]:
+    """返回应按可见文本保留的 ``【…】`` 标签原文（角色切换始终照常生效）。
+
+    没有 ``@Emoji`` 触发的标签无条件保留（无论开关）；有触发的标签默认
+    走头像替换路径不保留，仅当 ``keep``（保留歌词中【xxx】演唱者名）开启
+    时也保留文本。
+    """
+    tag = f"【{label}】"
+    if tag in emoji_triggers or label in emoji_triggers:
+        return tag if keep else None
+    return tag
+
+
 def _apply_emoji_guides(
     track: TimingTrack,
     base_dir: Path,
     body_lines: list[str],
+    *,
+    keep_singer_label_text: bool = False,
 ) -> None:
     """把 ``@Emoji`` 触发标签应用到每行（SHINTA NicokaraMaker3 规格）。
 
     触发字符串在正文里出现一次就原位替换一次为图片，没有"角色名"特判，
     也不占用 ``guide_symbol`` 行前槽位（SUG 分色标签设置助手的透明 1x1
-    占位 + 负 MarginRight 隐形分色即依赖这一语义）。标签本身已被正文解析
-    剥成角色，``line.chars`` 里没有对应字符，因此必须插入合成字符承载头像。
-    整行只有 ``[ts]【朵】`` 这种独立标签（间奏喊话 / 应援）时正文解析不产
-    出任何字符，这里同样插入合成头像字符，起点取标签自带的时间戳。
+    占位 + 负 MarginRight 隐形分色即依赖这一语义）。被替换的标签已由正文
+    解析剥成角色，``line.chars`` 里没有对应字符，因此必须插入合成字符承载
+    头像。整行只有 ``[ts]【朵】`` 这种独立标签（间奏喊话 / 应援）时正文解
+    析不产出任何字符，这里同样插入合成头像字符，起点取标签自带的时间戳。
+    ``keep_singer_label_text`` 开启时 ``【…】`` 标签一律保留文本，不再插入
+    头像；可见字符触发（如 ``@Emoji=♪``）不受该开关影响，仍原位替换。
     """
     specs = _parse_emoji_specs(track.meta.custom, base_dir)
     if not specs:
@@ -189,7 +236,14 @@ def _apply_emoji_guides(
                 line.inline_guide_symbols[inline_index] = _emoji_guide_symbol(
                     specs_by_trigger[trigger], anchored=False
                 )
-        _insert_inline_emoji_tags(track, row, line, raw_text, specs_by_trigger)
+        _insert_inline_emoji_tags(
+            track,
+            row,
+            line,
+            raw_text,
+            specs_by_trigger,
+            keep_singer_label_text=keep_singer_label_text,
+        )
 
 
 def _insert_inline_emoji_tags(
@@ -198,6 +252,8 @@ def _insert_inline_emoji_tags(
     line: TimingLine,
     raw_text: str,
     specs_by_trigger: dict[str, dict[str, object]],
+    *,
+    keep_singer_label_text: bool = False,
 ) -> None:
     """在行内每个标签触发位置插入头像字符。
 
@@ -209,7 +265,11 @@ def _insert_inline_emoji_tags(
     独立标签行也能拿到自己的窗口做头像 wipe。
     """
     offset = 0
-    for trigger, raw_index, own_ts in _emoji_tag_occurrences(raw_text, set(specs_by_trigger)):
+    for trigger, raw_index, own_ts in _emoji_tag_occurrences(
+        raw_text,
+        set(specs_by_trigger),
+        keep_singer_label_text=keep_singer_label_text,
+    ):
         index = raw_index + offset
         following = line.chars[index] if index < len(line.chars) else None
         if following is not None:
@@ -237,7 +297,10 @@ def _insert_inline_emoji_tags(
 
 
 def _emoji_tag_occurrences(
-    raw_line: str, triggers: set[str]
+    raw_line: str,
+    triggers: set[str],
+    *,
+    keep_singer_label_text: bool = False,
 ) -> list[tuple[str, int, Optional[int]]]:
     """按出现顺序列出命中 emoji 触发的 ``【…】`` 标签、插入下标与自带时间戳。
 
@@ -263,10 +326,17 @@ def _emoji_tag_occurrences(
         for kind, value in _split_role_labels(str(token_value)):
             if kind == "role":
                 tag = f"【{value}】"
-                if tag in triggers:
+                if tag in triggers and not keep_singer_label_text:
                     occurrences.append(
                         (tag, char_index, token_ts if token_first_element else None)
                     )
+                elif _kept_singer_tag_text(
+                    value, keep=keep_singer_label_text, emoji_triggers=triggers
+                ):
+                    # 该标签在正文解析里已按可见文本保留（无 @Emoji 触发，
+                    # 或开启了「保留歌词中【xxx】演唱者名」），这里同样计数，
+                    # 保证其余头像的插入下标与 ``line.chars`` 对齐。
+                    char_index += len(_text_elements(tag))
                 token_first_element = False
                 continue
             token_first_element = False
@@ -417,7 +487,12 @@ def _tokenize_line(line: str) -> list[tuple[str, object]]:
     return tokens
 
 
-def _parse_body_lines(lines: Iterable[str]) -> list[TimingLine]:
+def _parse_body_lines(
+    lines: Iterable[str],
+    *,
+    keep_singer_label_text: bool = False,
+    emoji_triggers: Collection[str] = frozenset(),
+) -> list[TimingLine]:
     timing_lines: list[TimingLine] = []
     current_singer_label: Optional[str] = None
     singer_ids: dict[str, int] = {}
@@ -425,7 +500,12 @@ def _parse_body_lines(lines: Iterable[str]) -> list[TimingLine]:
     active_role: Optional[str] = None
 
     for raw_line in lines:
-        line, active_role = _parse_body_line(raw_line, active_role)
+        line, active_role = _parse_body_line(
+            raw_line,
+            active_role,
+            keep_singer_label_text=keep_singer_label_text,
+            emoji_triggers=emoji_triggers,
+        )
         if line.singer_label is not None:
             current_singer_label = line.singer_label
         elif line.chars and current_singer_label is not None:
@@ -444,7 +524,11 @@ def _parse_body_lines(lines: Iterable[str]) -> list[TimingLine]:
 
 
 def _parse_body_line(
-    line: str, active_role: Optional[str] = None
+    line: str,
+    active_role: Optional[str] = None,
+    *,
+    keep_singer_label_text: bool = False,
+    emoji_triggers: Collection[str] = frozenset(),
 ) -> tuple[TimingLine, Optional[str]]:
     """解析一条 body 行。返回 ``(TimingLine, 行末生效的角色标签)``。
 
@@ -481,6 +565,25 @@ def _parse_body_line(
                 active_role = label
                 if singer_label is None:
                     singer_label = active_role
+                kept = _kept_singer_tag_text(
+                    label,
+                    keep=keep_singer_label_text,
+                    emoji_triggers=emoji_triggers,
+                )
+                if kept is None:
+                    continue
+                if pending_ts is not None:
+                    # 独立标签行（``[ts]【朵】`` 间奏喊话）：标签文本以自带
+                    # 时间戳为起点 / 终点成为可见字符。
+                    for ch in _text_elements(kept):
+                        chars.append(
+                            TimingChar(text=ch, start_ms=pending_ts, role_label=active_role)
+                        )
+                else:
+                    # 标签在第一个 [ts] 之前：与行首无时间戳字符同样先缓存，
+                    # 等首个时间戳到来时补回（``【B】[ts]う``）。
+                    for ch in _text_elements(kept):
+                        leading_buffer.append((ch, active_role))
             continue
         # 普通字符：使用前面 pending 的 [ts] 作为起点
         if pending_ts is None:
@@ -492,6 +595,14 @@ def _parse_body_line(
                     active_role = value
                     if singer_label is None:
                         singer_label = active_role
+                    kept = _kept_singer_tag_text(
+                        value,
+                        keep=keep_singer_label_text,
+                        emoji_triggers=emoji_triggers,
+                    )
+                    if kept is not None:
+                        for ch in _text_elements(kept):
+                            leading_buffer.append((ch, active_role))
                     continue
                 for ch in _text_elements(value):
                     leading_buffer.append((ch, active_role))
@@ -502,6 +613,15 @@ def _parse_body_line(
         for kind, value in parts:
             if kind == "role":
                 role_for_entry = value
+                kept = _kept_singer_tag_text(
+                    value,
+                    keep=keep_singer_label_text,
+                    emoji_triggers=emoji_triggers,
+                )
+                if kept is not None:
+                    text_entries.extend(
+                        (element, role_for_entry) for element in _text_elements(kept)
+                    )
                 continue
             text_entries.extend((element, role_for_entry) for element in _text_elements(value))
         if next_ts is None:

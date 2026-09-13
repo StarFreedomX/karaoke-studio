@@ -28,6 +28,7 @@ def subtitle_loading_settings_to_dict(
             settings.allocate_layout_by_actual_rows
         ),
         "apply_sug_export_compensation": bool(settings.apply_sug_export_compensation),
+        "keep_singer_label_text": bool(settings.keep_singer_label_text),
     }
 
 
@@ -66,6 +67,9 @@ def subtitle_loading_settings_from_dict(value: object) -> SubtitleLoadingSetting
                 "apply_sug_export_compensation",
                 defaults.apply_sug_export_compensation,
             )
+        ),
+        keep_singer_label_text=bool(
+            value.get("keep_singer_label_text", defaults.keep_singer_label_text)
         ),
     )
 

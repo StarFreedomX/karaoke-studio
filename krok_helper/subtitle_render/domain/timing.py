@@ -221,6 +221,15 @@ class SubtitleLoadingSettings:
     偏移之上，与 SUG 导出 LRC 的口径一致；不影响 LRC ``@Offset`` 元数据与
     ``style.timing_offset_ms``。仅在重新解析 ``.sug`` 文件时生效。"""
 
+    keep_singer_label_text: bool = False
+    """加载 ``.lrc`` 时，带 ``@Emoji`` 触发的 ``【演唱者名】`` 标签是否也
+    保留文本（不再替换为头像）。
+
+    ``【…】`` 标签始终被识别为角色切换；没有 ``@Emoji`` 触发的标签无论
+    开关如何都按可见文本保留在歌词里。开启后连 ``@Emoji`` 触发的标签也
+    保留原文，头像不再替换该标签。对 ``.sug`` 无影响（其歌手是逐字数据，
+    本就没有 ``【…】`` 文本）。"""
+
 
 @dataclass
 class TrackPage:

@@ -2933,8 +2933,13 @@ def test_project_role_payload_applies_before_missing_schemes_are_materialized(
         }
     )
 
-    assert [ch.role_label for ch in win._timing_track.lines[0].chars] == [None, None]
-    assert "Aqua" not in win._style.custom_style_schemes
+    chars = win._timing_track.lines[0].chars
+    # 存量工程按旧「标签剔除」口径保存逐字角色：回放跳过保留的标签文本位，
+    # 歌词字符拿到保存的 None；标签字符保留解析角色（角色始终识别，其
+    # 配色方案照常物化）。
+    assert "".join(ch.text for ch in chars) == "【Aqua】ab"
+    assert [ch.role_label for ch in chars] == ["Aqua"] * 6 + [None, None]
+    assert "Aqua" in win._style.custom_style_schemes
 
 
 def test_schema_v1_project_is_migrated_to_movable_page_plan_in_memory(

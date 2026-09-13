@@ -369,6 +369,14 @@ class SubtitleLoadingSettingsDialog(ModelessDialog):
             "对 .lrc 字幕源无影响。"
         )
         form.addRow("", self._sug_offset_check)
+        self._keep_singer_label_check = CheckBox("保留歌词中【xxx】演唱者名", self)
+        self._keep_singer_label_check.setToolTip(
+            "加载 .lrc 时【xxx】标签始终用于角色/配色切换；没有对应 @Emoji 头像的"
+            "标签默认就保留原文显示在歌词里。开启后，带 @Emoji 触发的【xxx】标签"
+            "也保留原文，不再替换为头像（可见字符触发如 @Emoji=♪ 不受影响，仍替换）。"
+            "保存后会重新读取字幕文件并刷新段落和页面；对 .sug 无影响。"
+        )
+        form.addRow("", self._keep_singer_label_check)
         self._auto_chorus_button = FluentPushButton("自动识别和声…", self)
         self._auto_chorus_button.setToolTip(
             "按括号把和声部分整源分配到一个角色方案；可在弹窗里开启"
@@ -410,6 +418,7 @@ class SubtitleLoadingSettingsDialog(ModelessDialog):
         self._rows_spin.setValue(settings.rows_per_page)
         self._actual_rows_layout.setChecked(settings.allocate_layout_by_actual_rows)
         self._sug_offset_check.setChecked(settings.apply_sug_export_compensation)
+        self._keep_singer_label_check.setChecked(settings.keep_singer_label_text)
 
     def _current_values(self) -> SubtitleLoadingSettings:
         return SubtitleLoadingSettings(
@@ -420,6 +429,7 @@ class SubtitleLoadingSettingsDialog(ModelessDialog):
             rows_per_page=self._rows_spin.value(),
             allocate_layout_by_actual_rows=self._actual_rows_layout.isChecked(),
             apply_sug_export_compensation=self._sug_offset_check.isChecked(),
+            keep_singer_label_text=self._keep_singer_label_check.isChecked(),
         )
 
     def _on_blank_section_toggled(self, checked: bool) -> None:

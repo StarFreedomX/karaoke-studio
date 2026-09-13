@@ -287,6 +287,31 @@ def _zip_shift_drifted_labels(
     return True
 
 
+def _kept_singer_tag_positions(line: TimingLine) -> set[int]:
+    """正文解析保留为可见文本的 ``【…】`` 演唱者标签字符位。
+
+    LRC 源里任何 ``【…】`` 都是角色标签；「保留歌词中【xxx】演唱者名」
+    生效后这些字符由加载期自动产生。存量工程按旧「标签剔除」口径保存
+    逐字数据，回放时按位跳过它们对齐。
+    """
+    positions: set[int] = set()
+    chars = line.chars
+    index = 0
+    while index < len(chars):
+        if chars[index].text != "【":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(chars) and chars[end].text not in ("【", "】"):
+            end += 1
+        if end < len(chars) and chars[end].text == "】" and end > index + 1:
+            positions.update(range(index, end + 1))
+            index = end + 1
+        else:
+            index += 1
+    return positions
+
+
 def _apply_char_role_labels(track: TimingTrack, payload: object) -> bool:
     if not isinstance(payload, list):
         return False
@@ -295,11 +320,15 @@ def _apply_char_role_labels(track: TimingTrack, payload: object) -> bool:
         if not isinstance(labels, list):
             continue
         emoji_positions = _emoji_label_positions(line)
-        if emoji_positions and len(labels) == len(line.chars) - len(emoji_positions):
-            # @Emoji 标签插入特性之前的存量工程：逐字角色按「无合成标签字符」
-            # 的字符序列保存。按位跳过标签位对齐，避免整体右移一位。
+        auto_positions = emoji_positions | _kept_singer_tag_positions(line)
+        if auto_positions and len(labels) == len(line.chars) - len(auto_positions):
+            # @Emoji 标签插入 / 【…】标签文本保留特性之前的存量工程：逐字角色
+            # 按「无加载期自动字符」的字符序列保存。按位跳过这些字符对齐，
+            # 避免整体右移。
             targets = [
-                index for index in range(len(line.chars)) if index not in emoji_positions
+                index
+                for index in range(len(line.chars))
+                if index not in auto_positions
             ]
         elif (
             emoji_positions
