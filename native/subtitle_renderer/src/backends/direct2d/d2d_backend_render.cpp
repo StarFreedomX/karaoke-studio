@@ -3936,19 +3936,26 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             return slices;
         };
         // One band target per character: utopia follows the transformed wipe
-        // edge of the wiping glyph (delegation included), the plain wipe uses
-        // the shared line front.  Returns nullopt when the char carries no
-        // band this frame (bitmap guides are skipped like the body path).
+        // edge of the wiping glyph, the plain wipe uses the shared line front.
+        //  Returns nullopt when the char carries no band this frame: bitmap
+        // guides are skipped like the body path, and only a character whose
+        // own wipe window contains tMs (closed, so the hand-off arrival frame
+        // keeps its band) carries it — a front resting inside a timing gap
+        // must not park the highlight on the next (unsung) character's rim.
+        // This matches the Painter's ``main_scanline_front`` and the per-unit
+        // ruby fragment gate.
         const auto scanlineCharBand = [&](std::size_t charIndex)
             -> std::optional<std::pair<D2D1_RECT_F, float>> {
             const Impl::CachedChar &ch = line->chars[charIndex];
             if (ch.bitmapGuide.has_value()) {
                 return std::nullopt;
             }
+            const int start = wipeStartMs(ch);
+            const int end = wipeEndMs(ch);
+            if (!(start != end && start <= tMs && tMs <= end)) {
+                return std::nullopt;
+            }
             if (useUtopiaTransition) {
-                if (wipePhaseAt(line->chars, charIndex) != N3WipePhase::Wiping) {
-                    return std::nullopt;
-                }
                 const auto animated = utopiaCharWipe(charIndex);
                 return std::make_pair(
                     scanlineBandRect(animated.first, animated.second),
@@ -5218,7 +5225,20 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                         );
                         band = scanlineBandRect(animated.first, animated.second);
                     } else {
-                        if (rubyWipePhaseAt(ruby) != N3WipePhase::Wiping) {
+                        // Per-unit gate (closed window, like the main text):
+                        // a group-level band keeps the highlight parked on
+                        // the resting group front through intra-group gaps
+                        // and paints not-yet-started units near it. The
+                        // active unit's own front is the group front, so
+                        // gating to in-window units loses nothing.
+                        const Impl::CachedChar *unit =
+                            unitIndex < ruby.chars.size()
+                                ? &ruby.chars[unitIndex]
+                                : nullptr;
+                        const int unitStart = unit ? wipeStartMs(*unit) : 0;
+                        const int unitEnd = unit ? wipeEndMs(*unit) : -1;
+                        if (!(unitStart != unitEnd
+                                && unitStart <= tMs && tMs <= unitEnd)) {
                             continue;
                         }
                         band = scanlineBandRect(ruby.bounds, rubyWipeEdgeAt(ruby));

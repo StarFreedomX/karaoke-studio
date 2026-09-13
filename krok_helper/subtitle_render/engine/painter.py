@@ -590,6 +590,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal import (
     ruby_glow_can_combine_split as _ruby_glow_can_combine_split,
     ruby_glow_states_differ as _ruby_glow_states_differ,
     ruby_glow_layers as _build_horizontal_ruby_glow_layers,
+    ruby_front_is_moving as _ruby_front_is_moving,
     ruby_horizontal_gradient_rect_signature as _ruby_horizontal_gradient_rect_signature,
     ruby_segment_wipe_state as _ruby_segment_wipe_state,
     ruby_text_path_and_rect as _ruby_text_path_and_rect,
@@ -5121,7 +5122,12 @@ def _paint_ruby_scanline_static(
     params = _scanline_params_for_style(style)
     for layout in layouts:
         visible, complete, front = _ruby_wipe_state(layout, t_ms)
-        if not visible or complete:
+        if (
+            not visible
+            or complete
+            # 间隔期锋面停驻时不画高亮带（相控口径，与主文字一致）。
+            or not _ruby_front_is_moving(layout, t_ms)
+        ):
             continue
         target_ruby_font = layout.font or ruby_font
         target_ruby_metrics = layout.metrics or ruby_metrics

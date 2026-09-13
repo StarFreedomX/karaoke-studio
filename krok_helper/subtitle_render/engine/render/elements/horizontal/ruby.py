@@ -1005,6 +1005,31 @@ def ruby_segment_wipe_state(
     return True, complete, previous_front
 
 
+def ruby_front_is_moving(layout: RubyLayout, t_ms: int) -> bool:
+    """Return whether the ruby wipe front is travelling at ``t_ms``.
+
+    间隔期（前一段已唱完、后一段未开始）锋面停在段端点不再行进，此时不
+    产生扫字线高亮——与主文字 ``main_scanline_front`` 的相控口径一致：
+    高亮带只跟随正在行进的锋面；段边界帧（``t == start/end``，交接到达）
+    仍算行进中。
+    """
+    if effective_karaoke_animation(layout.style) == "no_wipe":
+        return False
+    segments = layout.wipe_segments
+    if not segments:
+        ratio = ruby_progress_ratio(layout.ruby, t_ms)
+        return (
+            int(layout.ruby.pos_start_ms)
+            <= t_ms
+            <= int(layout.ruby.pos_end_ms)
+            and 0.0 < ratio
+        )
+    return any(
+        int(segment.start_ms) <= t_ms <= int(segment.end_ms)
+        for segment in segments
+    )
+
+
 def ruby_after_clip_rect_at_time(
     layout: RubyLayout,
     ruby_metrics: QFontMetrics,

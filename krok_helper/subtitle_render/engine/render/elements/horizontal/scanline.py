@@ -353,14 +353,23 @@ def main_scanline_front(
 ) -> float | None:
     """Return the main-text wipe front, or ``None`` when no front is moving.
 
-    ``None`` covers both "nothing sung yet" and "the whole line is complete":
-    the highlight only exists while the front travels through the line.
+    ``None`` covers "nothing sung yet", "the whole line is complete" and the
+    timing gaps in between: the highlight only exists while the front travels,
+    so a front resting at a finished segment's endpoint between gaps draws
+    nothing. Segment boundary frames (``t == start/end``) still count as
+    travelling — the hand-off arrival keeps its band (相控口径，与逐单元注音
+    扫字线 / GPU 的逐字相判定一致).
     """
 
     band = fill_clip_band(segments, t_ms, rtl)
     if band is None:
         return None
     if all(segment_fill_ratio(segment, t_ms) >= 1.0 for segment in segments):
+        return None
+    if not any(
+        int(segment.start_ms) <= t_ms <= int(segment.end_ms)
+        for segment in segments
+    ):
         return None
     return float(band[0] if rtl else band[1])
 
