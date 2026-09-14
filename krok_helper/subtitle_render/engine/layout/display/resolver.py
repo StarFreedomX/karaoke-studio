@@ -185,6 +185,10 @@ def secondary_displacement_squeeze_pairs(
 
     if not measured:
         return ()
+    if style.overlap_fallback_mode == "displace":
+        # 「吃掉走字时长」永不抬升页面：没有刚性位移就没有位移引发的
+        # 级联冲突，这一发现趟直接短路。
+        return ()
 
     page_order: list[Hashable] = []
     page_entries: dict[Hashable, list[tuple[int, LineVisualBand, float]]] = {}
@@ -600,7 +604,15 @@ def apply_animation_time_guard(
     enforce_inter_page_gap: bool,
     adjustments: list[TimingCollisionAdjustment] | None = None,
 ) -> DisplayLines:
-    """Restore animation windows and enforce measured collision separation."""
+    """Restore animation windows and enforce measured collision separation.
+
+    时间压缩两阶段到底后的残余冲突按 ``style.overlap_fallback_mode`` 处理：
+    ``lift`` 留给空间避让（旧行为）；``displace`` 由将要演唱的下一句直接
+    顶掉还在走字的上一句——自动行把残余截进 ``display_end_ms``（允许吃掉
+    走字时长），手工行不参与自动压缩、``display_end_ms`` 保持原值，改为
+    记录渲染期顶掉时刻 ``takeover_end_ms``，由显示调度在渲染侧截断可见性。
+    两种模式都保留 ForceBottom 行位上移；页面平移避让见页偏移解析。
+    """
 
     if not display_lines:
         return display_lines
@@ -711,8 +723,10 @@ def apply_animation_time_guard(
                 #   依旧旧顺序贪心——先砍延迟退场缓冲，再砍提前入场缓冲。
                 # 阶段 B · 动画区（两侧都只剩动画时间时）：左右循环对砍，
                 #   各瞄准剩余量的一半，容量不足的一侧把差额让给另一侧，
-                #   动画按窗口加速播放、不截断。两侧都到底后残余冲突留给
-                #   空间避让。手工覆盖的一侧两个阶段容量均为 0。
+                #   动画按窗口加速播放、不截断。手工覆盖的一侧两个阶段
+                #   容量均为 0。
+                # 两侧都到底后的残余冲突按 ``overlap_fallback_mode`` 处理：
+                #   lift（默认）留给空间避让；displace 由下一句顶掉上一句。
                 exit_stop = max(
                     exit_floors[previous_index],
                     exit_durations[previous_index]
@@ -775,6 +789,20 @@ def apply_animation_time_guard(
                     )
                 exit_take = exit_free_take + exit_zone_take
                 entry_take = entry_free_take + entry_zone_take
+                manual_displace_residual = 0
+                if style.overlap_fallback_mode == "displace":
+                    # 「吃掉走字时长」：压缩到底仍有残余时，由将要演唱的
+                    # 下一句直接顶掉还在走字的上一句。自动行（消失时刻未经
+                    # 手工调整）把残余全部加到消失截短上，可越过走字结束
+                    # 点、下限为自身上屏时刻；手工行不参与自动压缩
+                    # （``display_end_ms`` 保持原值），残余记为渲染期顶掉
+                    # 时刻，由显示调度在渲染侧截断可见性。
+                    if previous.line.display_end_override_ms is None:
+                        exit_take += overlap_ms - exit_take - entry_take
+                    else:
+                        manual_displace_residual = (
+                            overlap_ms - exit_take - entry_take
+                        )
 
                 pair_changed: list[int] = []
                 if exit_take > 0:
@@ -812,7 +840,7 @@ def apply_animation_time_guard(
                                     incoming_index=incoming_index,
                                     boundary="entry",
                                     before_ms=int(incoming.display_start_ms),
-                                    after_ms=int(new_start),
+                                    after_ms=new_start,
                                 )
                             )
                         guarded[incoming_index] = replace(
@@ -820,6 +848,23 @@ def apply_animation_time_guard(
                             display_start_ms=new_start,
                         )
                         pair_changed.append(incoming_index)
+                if manual_displace_residual > 0:
+                    # 手工行只在渲染期被顶掉：显示窗保持手工值，记录更早的
+                    # 渲染可见终点（只收紧，重复趟幂等，后续更强的顶掉仍可
+                    # 继续收紧）。
+                    takeover_end = max(
+                        int(previous.display_start_ms),
+                        int(previous.display_end_ms) - manual_displace_residual,
+                    )
+                    if takeover_end < int(previous.display_end_ms) and (
+                        previous.takeover_end_ms is None
+                        or int(previous.takeover_end_ms) > takeover_end
+                    ):
+                        guarded[previous_index] = replace(
+                            previous,
+                            takeover_end_ms=takeover_end,
+                        )
+                        pair_changed.append(previous_index)
                 if pair_changed:
                     adjusted = True
                     changed_indices.extend(pair_changed)
@@ -926,8 +971,8 @@ def resolve_display_lines(
     policy no longer depends on the Painter implementation.
 
     顺序即契约（旧流程）：每轮 ``resolve_timing`` 只做 同步 → 守卫 的
-    冲突解算；**自动填充段内时间挂在全部冲突解完之后**，再由与填充无关
-    的无条件兜底守卫收口——填充造出的重叠当场兜掉，守卫内循环有趟数
+    冲突解算；**自动填充段内时间挂在全部冲突解完之后**，再由与填充无关的
+    无条件兜底守卫收口——填充造出的重叠当场兜掉，守卫内循环有趟数
     上限，密集冲突时最后一轮可能未完全收敛，输出前统一再兜一次底。
     （把填充提前进每轮曾引发实际工程的显示窗错误，已回退。）
 

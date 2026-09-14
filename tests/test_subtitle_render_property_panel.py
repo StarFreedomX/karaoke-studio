@@ -467,14 +467,21 @@ def test_property_panel_uses_fluent_checkboxes(qapp):
     assert "动画时长或上屏时间由用户手工设定" in overlap_tip
     assert "非零退场动画自动压缩时至少保留" in overlap_tip
     assert "「出场动画保护时间」" in overlap_tip
-    assert "保持位置直到本页播放完毕" in overlap_tip
-    assert "采用被重叠页面布局的行间距" in overlap_tip
-    assert "放不下时改向反方向寻找" in overlap_tip
-    assert "两边都放不下则保持原布局位置" in overlap_tip
     assert "不含注音、描边、阴影和发光的主文字字形" in overlap_tip
     assert "允许出入场动画重叠" in overlap_tip
     assert "不因页面排版变化而扩大碰撞时间" in overlap_tip
     assert "开启后不执行跨页时间压缩或空间避让" in overlap_tip
+    # 「重叠设置」卡片：残余冲突胶囊（WorkspaceSwitcher）默认旧方案且可用，
+    # 抬升细节在胶囊 tooltip。
+    assert panel._overlap_fallback_switch.currentRouteKey() == "lift"
+    assert panel._overlap_fallback_switch.isEnabled() is True
+    fallback_tip = panel._overlap_fallback_switch.toolTip()
+    assert "抬升避让" in fallback_tip
+    assert "吃掉走字时长" in fallback_tip
+    assert "采用被重叠页面布局的行间距" in fallback_tip
+    assert "放不下时改向反方向寻找" in fallback_tip
+    assert "两边都放不下则保持原布局位置" in fallback_tip
+    assert "保持位置直到本页播放完毕" in fallback_tip
 
 
 def test_timing_scope_routes_secondary_edits_to_track_signal(qapp):

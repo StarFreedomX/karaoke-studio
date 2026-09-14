@@ -110,11 +110,8 @@ def test_layout_vertical_builder_preserves_ranges_and_compact_controls(qapp) -> 
     assert host._line_gap_spin.sizePolicy().horizontalPolicy().name == "Fixed"
     assert host._vertical_check.text() == "竖排"
     assert host._rtl_check.text() == "从右到左"
-    assert host._allow_inter_page_line_overlap_check.text() == "启用行间重叠"
-    # c86b54c 起压缩下限是「时间设置」里的可调项，tooltip 指向设置名。
-    tooltip = host._allow_inter_page_line_overlap_check.toolTip()
-    assert "「入场动画保护时间」" in tooltip
-    assert "「出场动画保护时间」" in tooltip
+    # 「启用行间重叠」已随「重叠设置」卡片迁出垂直与方向。
+    assert not hasattr(host, "_allow_inter_page_line_overlap_check")
 
 
 def test_layout_vertical_builder_routes_layout_and_style_fields(qapp) -> None:
@@ -124,14 +121,50 @@ def test_layout_vertical_builder_routes_layout_and_style_fields(qapp) -> None:
     host._line_gap_spin.setValue(-12)
     host._vertical_check.setChecked(True)
     host._rtl_check.setChecked(True)
-    host._allow_inter_page_line_overlap_check.setChecked(True)
 
     assert host.layout_updates == [{"line_gap_px": -12}]
     assert host.updates == [
         {"vertical": True},
         {"right_to_left": True},
+    ]
+
+
+def test_layout_overlap_builder_groups_switch_and_fallback_capsule(qapp) -> None:
+    host = _Host()
+    section = LayoutPropertyPageBuilder(host).make_overlap_section()
+
+    assert section.header.text() == "重叠设置"
+    assert host._allow_inter_page_line_overlap_check.text() == "启用行间重叠"
+    # c86b54c 起压缩下限是「时间设置」里的可调项，tooltip 指向设置名。
+    tooltip = host._allow_inter_page_line_overlap_check.toolTip()
+    assert "「入场动画保护时间」" in tooltip
+    assert "「出场动画保护时间」" in tooltip
+    # 胶囊（WorkspaceSwitcher，同「预览/导出」切换）默认旧方案，
+    # 两档与模型枚举一致，初始可用。
+    capsule = host._overlap_fallback_switch
+    assert capsule.currentRouteKey() == "lift"
+    assert set(capsule._items) == {"lift", "displace"}
+    assert capsule.isEnabled() is True
+    capsule_tooltip = capsule.toolTip()
+    assert "抬升避让" in capsule_tooltip
+    assert "吃掉走字时长" in capsule_tooltip
+
+
+def test_layout_overlap_builder_routes_switch_and_fallback_mode(qapp) -> None:
+    host = _Host()
+    LayoutPropertyPageBuilder(host).make_overlap_section()
+
+    host._overlap_fallback_switch._items["displace"].click()
+    host._allow_inter_page_line_overlap_check.setChecked(True)
+
+    assert host.updates == [
+        {"overlap_fallback_mode": "displace"},
         {"allow_inter_page_line_overlap": True},
     ]
+    # 勾选「启用行间重叠」后不存在跨页避让，收尾策略胶囊随之失效。
+    assert host._overlap_fallback_switch.isEnabled() is False
+    host._allow_inter_page_line_overlap_check.setChecked(False)
+    assert host._overlap_fallback_switch.isEnabled() is True
 
 
 def test_layout_ruby_builder_preserves_ranges_options_and_inline_form(qapp) -> None:

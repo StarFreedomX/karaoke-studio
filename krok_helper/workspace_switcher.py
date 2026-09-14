@@ -101,9 +101,12 @@ class _WorkspaceSwitchItem(QAbstractButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        enabled = self.isEnabled()
         checked = self.isChecked()
         if checked:
             foreground = QColor("#FFFFFF")
+        elif not enabled:
+            foreground = QColor(p.text_disabled)
         else:
             foreground = QColor(p.text_primary if self.underMouse() else p.text_secondary)
             if self.underMouse():
@@ -288,7 +291,7 @@ class WorkspaceSwitcher(QWidget):
         painter.setBrush(QColor(p.progress_bg))
         painter.drawRoundedRect(track, track_radius, track_radius)
 
-        # 选中 thumb：主色实心药丸 + 底部一层轻投影
+        # 选中 thumb：主色实心药丸 + 底部一层轻投影；禁用态整体置灰
         thumb = self._current_thumb_rect()
         if thumb.isValid() and thumb.width() > 0 and thumb.height() > 0:
             thumb_radius = thumb.height() / 2.0
@@ -297,5 +300,9 @@ class WorkspaceSwitcher(QWidget):
             painter.drawRoundedRect(
                 thumb.adjusted(0.0, 1.0, 0.0, 1.5), thumb_radius, thumb_radius
             )
-            painter.setBrush(QColor(p.accent_primary))
+            painter.setBrush(
+                QColor(p.accent_primary)
+                if self.isEnabled()
+                else QColor(p.text_disabled)
+            )
             painter.drawRoundedRect(thumb, thumb_radius, thumb_radius)

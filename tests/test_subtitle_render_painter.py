@@ -11304,6 +11304,51 @@ def test_secondary_displacement_pairs_only_report_new_cascade(monkeypatch):
     ) == ()
 
 
+def test_secondary_displacement_pairs_disabled_in_displace_mode(monkeypatch):
+    """「吃掉走字时长」永不抬升页面：位移级联发现趟直接短路为空。"""
+
+    lines = [
+        TimingLine(chars=[TimingChar(text, 1_000)], end_ms=2_000)
+        for text in ("A", "B")
+    ]
+    display = [
+        DisplayLine(lines[0], 0, 0, 3_000, page_index=0),
+        DisplayLine(lines[1], 0, 0, 3_000, page_index=1),
+    ]
+    measured = [
+        (
+            0,
+            (0, 0),
+            LineVisualBand(0, (0, 0), 0, 3_000, 100.0, 140.0),
+            0.0,
+        ),
+        (
+            1,
+            (0, 1),
+            LineVisualBand(1, (0, 1), 0, 3_000, 40.0, 80.0),
+            0.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        subtitle_painter,
+        "measure_collision_bands",
+        lambda *_args, **_kwargs: measured,
+    )
+    monkeypatch.setattr(
+        display_resolver,
+        "solve_page_axis_offsets",
+        lambda *_args, **_kwargs: {(0, 0): -40.0, (0, 1): -80.0},
+    )
+    style = replace(Style(), overlap_fallback_mode="displace")
+
+    assert (
+        subtitle_painter._secondary_displacement_squeeze_pairs(
+            1920, 1080, TimingTrack(lines=lines), style, display
+        )
+        == ()
+    )
+
+
 def test_animation_only_cross_page_overlap_does_not_move_incoming_page(qapp):
     lines = [
         TimingLine(chars=[TimingChar(text, start)], end_ms=end)
@@ -12701,6 +12746,146 @@ def test_animation_guard_honours_custom_animation_protect_times(qapp):
     # 后句最多推迟到 3_400（默认 250ms 下限时是 3_750），前句手动值不动。
     assert guarded[0].display_end_ms == 3_500
     assert guarded[1].display_start_ms == 3_400
+
+
+def _tight_handoff_lines():
+    """前句刚唱完（2_000）后句马上开唱（2_050）：缓冲压光后仍差 250ms。"""
+
+    return [
+        TimingLine(chars=[TimingChar("前句", 1_000)], end_ms=2_000),
+        TimingLine(chars=[TimingChar("后句", 2_050)], end_ms=5_000),
+    ]
+
+
+def _tight_handoff_display_lines(lines):
+    # A 显示窗 500–3_000（退场余量 1000ms），B 显示窗 250–6_000
+    # （提前入场余量 1800ms）；需要的起点 = 3_000 + 300 = 3_300，
+    # 重叠 3_050ms，两侧缓冲合计只有 2_800ms。
+    return [
+        DisplayLine(lines[0], 0, 500, 3_000, 0, 1, 1),
+        DisplayLine(lines[1], 0, 250, 6_000, 0, 2, 1),
+    ]
+
+
+def test_animation_guard_lift_default_leaves_residual_conflict(qapp):
+    """默认「抬升避让」：压缩到走字两侧底线后残余冲突留给空间避让。"""
+
+    lines = _tight_handoff_lines()
+    track = TimingTrack(lines=lines)
+    style = replace(
+        Style(font_family="Arial", font_family_latin="Arial"),
+        entry_anim="none",
+        exit_anim="none",
+    )
+
+    guarded = _apply_painter_animation_time_guard(
+        1_280,
+        720,
+        track,
+        style,
+        _tight_handoff_display_lines(lines),
+        enforce_inter_page_gap=True,
+    )
+
+    # 缓冲压光：前句消失贴走字结束（2_000）、后句上屏贴走字开始
+    # （2_050），中间只剩 50ms < 300ms 同轨间隔，残余 250ms 不吃走字。
+    assert guarded[0].display_end_ms == 2_000
+    assert guarded[1].display_start_ms == 2_050
+
+
+def test_animation_guard_displace_eats_previous_sweep_for_residual(qapp):
+    """「吃掉走字时长」：压缩到底的残余改由下一句顶掉上一句的走字。"""
+
+    lines = _tight_handoff_lines()
+    track = TimingTrack(lines=lines)
+    style = replace(
+        Style(font_family="Arial", font_family_latin="Arial"),
+        entry_anim="none",
+        exit_anim="none",
+        overlap_fallback_mode="displace",
+    )
+
+    guarded = _apply_painter_animation_time_guard(
+        1_280,
+        720,
+        track,
+        style,
+        _tight_handoff_display_lines(lines),
+        enforce_inter_page_gap=True,
+    )
+
+    # 下一句按压缩后的时刻照常入场（2_050），上一句显示窗被截进走字
+    # 区间 250ms（2_000 − 250 = 1_750），恰好让出 300ms 同轨间隔。
+    assert guarded[1].display_start_ms == 2_050
+    assert guarded[0].display_end_ms == 1_750
+    assert guarded[0].display_end_ms < lines[0].end_ms
+    assert guarded[1].display_start_ms - guarded[0].display_end_ms == 300
+
+
+def test_animation_guard_displace_records_manual_takeover_not_window_cut(qapp):
+    """手工消失时刻不参与自动压缩：窗口保持原值，只记渲染期顶掉时刻。"""
+
+    lines = _tight_handoff_lines()
+    lines[0].display_end_override_ms = 3_000
+    track = TimingTrack(lines=lines)
+    style = replace(
+        Style(font_family="Arial", font_family_latin="Arial"),
+        entry_anim="none",
+        exit_anim="none",
+        overlap_fallback_mode="displace",
+    )
+
+    guarded = _apply_painter_animation_time_guard(
+        1_280,
+        720,
+        track,
+        style,
+        _tight_handoff_display_lines(lines),
+        enforce_inter_page_gap=True,
+    )
+
+    # 手工值 3_000 原样保留（不参与自动压缩）；3_050ms 冲突中入场侧吸收
+    # 1_800ms，剩余 1_250ms 记为渲染期顶掉时刻：3_000 − 1_250 = 1_750，
+    # 恰好让出 300ms 同轨间隔，渲染时被顶掉的走字部分直接消失。
+    assert guarded[0].display_end_ms == 3_000
+    assert guarded[0].takeover_end_ms == 1_750
+    assert guarded[1].display_start_ms == 2_050
+    assert guarded[1].display_start_ms - guarded[0].takeover_end_ms == 300
+
+
+def test_display_schedule_clamps_takeover_but_windows_keep_manual_end():
+    """渲染调度按顶掉时刻截断（CPU 计划与 GPU IR 同源），轨道视图不变。"""
+
+    from krok_helper.subtitle_render.engine.layout.display.schedule import (
+        display_schedule_from_items,
+        display_windows_from_items,
+    )
+
+    lines = _tight_handoff_lines()
+    lines[0].display_end_override_ms = 3_000
+    track = TimingTrack(lines=lines)
+    items = [
+        replace(
+            _tight_handoff_display_lines(lines)[0],
+            takeover_end_ms=1_750,
+        ),
+        _tight_handoff_display_lines(lines)[1],
+    ]
+
+    # 渲染调度：可见终点被顶掉时刻钳制，走字重叠部分不再渲染。
+    assert display_schedule_from_items(track, items)[0] == (0, 500, 1_750)
+    # 轨道视图 / 时间数据：手工消失时刻原样展示。
+    assert display_windows_from_items(track, items)[0] == (500, 3_000)
+
+
+def test_overlap_fallback_mode_roundtrip_and_validation():
+    style = Style(overlap_fallback_mode="displace")
+
+    restored = style_from_dict(style_to_dict(style))
+
+    assert restored.overlap_fallback_mode == "displace"
+    assert Style().overlap_fallback_mode == "lift"
+    assert style_from_dict({"overlap_fallback_mode": "bogus"}).overlap_fallback_mode == "lift"
 
 
 def test_force_bottom_waits_for_automatic_time_avoidance(qapp, monkeypatch):

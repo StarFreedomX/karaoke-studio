@@ -40,6 +40,7 @@ def _build_layout_page(
     layout.addWidget(
         section_pair(host._ruby_section, host._make_vertical_layout_section())
     )
+    layout.addWidget(host._make_overlap_section())
     viewport = host._make_viewport_section()
     viewport.set_expanded(False)
     layout.addWidget(viewport)

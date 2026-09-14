@@ -142,6 +142,12 @@ SMART_HORIZONTALS: tuple[SmartHorizontal, ...] = (
     "equal_margins",
 )
 SectionEndingMode = Literal["hold", "clear"]
+OverlapFallbackMode = Literal["lift", "displace"]
+"""跨页冲突在时间压缩到底仍无法消除时的处理方式。
+
+``lift`` = 抬升避让（移动后进入的整页字幕，旧行为）；``displace`` = 由将要
+演唱的下一句直接顶掉还在走字的上一句（截短其显示窗，允许吃掉走字时长）。
+"""
 LitStyle = Literal["volume", "circle", "square", "rounded"]
 # 标题字幕（B7）：静态叠加文字的锚点 / 对齐 / 显示时段模式。
 TitleAnchor = Literal[
@@ -776,6 +782,17 @@ class Style:
     关闭时，渲染器按最终主文字像素范围压缩冲突时间，仍无法消除时移动后进入的
     整页字幕；开启时跳过这两类跨页避让。该字段是项目级设置，不属于
     ``LyricsLayout``，也不随分页布局预设切换。
+    """
+
+    overlap_fallback_mode: OverlapFallbackMode = "lift"
+    """「重叠设置」：时间压缩消耗完两侧底线仍无法消除跨页冲突时的策略。
+
+    ``lift`` 抬升后进入的整页字幕（空间避让）；``displace`` 由将要演唱的
+    下一句直接顶掉还在走字的上一句（允许吃掉走字时长）。``displace`` 下
+    自动行把残余截进显示窗；手工拖过消失时间的句子不参与自动压缩，
+    时间数据保持原值，只是实际渲染时被顶掉的重叠走字部分直接消失。
+    该模式不做页面平移避让（抬升画面）；ForceBottom 行位上移照常保留。
+    仅在 ``allow_inter_page_line_overlap`` 关闭时参与解算。
     """
 
     font_weight: int = 400  # Qt 习惯 100-900
@@ -1699,6 +1716,10 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = value if value in {"none", "fade", "slide"} else defaults.lit_transition_mode
         elif key == "section_ending_mode":
             changes[key] = value if value in {"hold", "clear"} else defaults.section_ending_mode
+        elif key == "overlap_fallback_mode":
+            changes[key] = (
+                value if value in {"lift", "displace"} else defaults.overlap_fallback_mode
+            )
         elif key == "layout_semantics":
             changes[key] = value if value in {"legacy", "n3_1074"} else defaults.layout_semantics
         elif key == "line_y_position":

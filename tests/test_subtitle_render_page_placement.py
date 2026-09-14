@@ -1,12 +1,20 @@
+from dataclasses import replace
+
 from krok_helper.subtitle_render.domain.models import Style
-from krok_helper.subtitle_render.domain.timing import TimingChar, TimingLine
+from krok_helper.subtitle_render.domain.timing import (
+    TimingChar,
+    TimingLine,
+    TimingTrack,
+)
 from krok_helper.subtitle_render.engine.layout.display.resolver import (
     CollisionLineGeometry,
     build_measured_collision_bands,
 )
 from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine
 from krok_helper.subtitle_render.engine.layout.plan.page_offsets import (
+    PageOffsetResolvers,
     page_offsets_at_time,
+    resolve_page_offset_windows,
 )
 from krok_helper.subtitle_render.engine.layout.page.placement import (
     LineVisualBand,
@@ -30,6 +38,29 @@ def test_page_offset_selector_preserves_half_open_window_semantics():
     assert page_offsets_at_time(windows, t_ms=99) == {0: (1.0, 2.0)}
     assert page_offsets_at_time(windows, t_ms=100) == {0: (3.0, 4.0)}
     assert page_offsets_at_time(windows, t_ms=200) == {}
+
+
+def test_displace_mode_disables_page_offset_resolution():
+    """「吃掉走字时长」永不抬升页面：页偏移解析直接短路，不触发测量。"""
+
+    style = replace(
+        Style(dual_line_layout=True),
+        overlap_fallback_mode="displace",
+    )
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("displace mode must not measure page offsets")
+
+    assert (
+        resolve_page_offset_windows(
+            1920,
+            1080,
+            TimingTrack(),
+            style,
+            PageOffsetResolvers(display_lines=_fail, measure_lines=_fail),
+        )
+        == {}
+    )
 
 
 def _band(line, page, start, end, top, bottom):

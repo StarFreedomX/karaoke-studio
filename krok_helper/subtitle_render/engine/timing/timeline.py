@@ -42,6 +42,14 @@ class DisplayLine:
     section_index: int = 0
     page_index: int = 0
     page_line_count: int = 1
+    takeover_end_ms: int | None = None
+    """「吃掉走字时长」的渲染期顶掉时刻。
+
+    手工拖过消失时间的句子不参与自动压缩（``display_end_ms`` 保持原值），
+    但被下一句顶掉时在此记录渲染侧的可见终点；显示调度投影
+    （``display_schedule_from_items``）按本字段截断渲染窗口，CPU 布局
+    计划与 GPU IR 同源生效，轨道视图与时间数据不受影响。
+    """
 
 
 def assign_lanes(

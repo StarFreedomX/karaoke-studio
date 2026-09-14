@@ -134,7 +134,13 @@ def resolve_page_offset_windows(
 ) -> dict[int, tuple[LayoutOffsetWindow, ...]]:
     """Resolve and cache page translations through backend measurement ports."""
 
-    if style.allow_inter_page_line_overlap or not style.dual_line_layout:
+    if (
+        style.allow_inter_page_line_overlap
+        # 「吃掉走字时长」不做页面平移避让（抬升画面）：残余冲突由时间
+        # 守卫截短上一句或在渲染期顶掉解决；ForceBottom 行位上移不在此列。
+        or style.overlap_fallback_mode == "displace"
+        or not style.dual_line_layout
+    ):
         return {}
     cached = cached_page_offset_windows(logical_w, logical_h, track, style)
     if cached is not None:

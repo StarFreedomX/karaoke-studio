@@ -979,6 +979,12 @@ class PropertyPanel(QWidget):
             self._allow_inter_page_line_overlap_check.setChecked(
                 self._style.allow_inter_page_line_overlap
             )
+            self._overlap_fallback_switch.setCurrentItem(
+                self._style.overlap_fallback_mode
+            )
+            self._overlap_fallback_switch.setEnabled(
+                not self._style.allow_inter_page_line_overlap
+            )
             self._refresh_layout_combo()
             self._sync_layout_editor_controls()
             timing = self._style.timing
@@ -2317,6 +2323,9 @@ class PropertyPanel(QWidget):
 
     def _make_vertical_layout_section(self) -> QFrame:
         return self._layout_page_builder.make_vertical_section()
+
+    def _make_overlap_section(self) -> QFrame:
+        return self._layout_page_builder.make_overlap_section()
 
     def _on_line_position_changed(self, _value: str = "") -> None:
         self._update_layout_field(

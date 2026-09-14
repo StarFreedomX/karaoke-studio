@@ -141,15 +141,23 @@ def display_schedule_from_items(
 ) -> DisplaySchedule:
     """Project resolved dual-line items to source-line lane/window schedules."""
     index_of = {id(line): index for index, line in enumerate(track.lines)}
-    return {
-        index_of[id(item.line)]: (
+    schedule: DisplaySchedule = {}
+    for item in items:
+        if id(item.line) not in index_of:
+            continue
+        end = int(item.display_end_ms)
+        if item.takeover_end_ms is not None:
+            # 「吃掉走字时长」的渲染期顶掉：手工消失时刻保持原值，仅在
+            # 渲染调度处截断可见终点。CPU 布局计划与 GPU IR 都经由本投影，
+            # 两条后端自动一致；轨道视图（display_windows_from_items）
+            # 不读本字段，时间数据与编辑器不受影响。
+            end = min(end, int(item.takeover_end_ms))
+        schedule[index_of[id(item.line)]] = (
             int(item.lane),
             int(item.display_start_ms),
-            int(item.display_end_ms),
+            end,
         )
-        for item in items
-        if id(item.line) in index_of
-    }
+    return schedule
 
 
 def single_line_display_schedule(
