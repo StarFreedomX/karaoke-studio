@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from .download_task import FormatOption
 
@@ -11,7 +12,7 @@ QUALITY_LABEL_PATTERN = re.compile(r"(\d{3,4})p(?:\d{2})?", flags=re.IGNORECASE)
 FPS_LABEL_PATTERN = re.compile(r"(\d{2,3})帧")
 
 
-def format_bytes(size: int | None) -> str:
+def format_bytes(size: int | None, *, estimated: bool = False) -> str:
     if size is None or size <= 0:
         return "-"
 
@@ -20,8 +21,8 @@ def format_bytes(size: int | None) -> str:
     for unit in units:
         if value < 1024 or unit == units[-1]:
             if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.1f} {unit}"
+                return f"{'约 ' if estimated else ''}{int(value)} {unit}"
+            return f"{'约 ' if estimated else ''}{value:.1f} {unit}"
         value /= 1024
     return "-"
 
@@ -62,22 +63,17 @@ class FormatParser:
             # HLS 变体重新顶回各档清晰度的代表位。
             video_size = self._coalesce_size(item)
             filesize = video_size or self._estimate_size(item, duration)
+            filesize_is_estimate = not self._has_exact_size(item)
             requires_merge = acodec == "none" and best_audio is not None
             if requires_merge:
                 audio_id = str(best_audio.get("format_id") or "")
                 if not audio_id:
                     continue
                 download_format = f"{format_id}+{audio_id}"
-                # 视频轨报不出体积时整条就是未知（显示「-」）。以前写成
-                # ``(video or 0) + (audio or 0)``，视频轨为 None 时会把**音频轨的
-                # 体积**当成整条的体积报出去 —— 每一档清晰度都显示同一个几 MB 的
-                # 数字，正是这个加法造成的。
-                video_display = video_size or self._estimate_size(item, duration)
-                filesize = (
-                    video_display + (self._coalesce_size(best_audio) or 0)
-                    if video_display
-                    else None
-                )
+                # 两轨都能确定或估算体积时才相加，避免把单轨体积当成总大小。
+                audio_size = self._coalesce_size(best_audio) or self._estimate_size(best_audio, duration)
+                filesize = filesize + audio_size if filesize and audio_size else None
+                filesize_is_estimate = filesize_is_estimate or not self._has_exact_size(best_audio)
                 audio_codec = str(best_audio.get("acodec") or "unknown")
                 format_label = f"{ext.upper() or '视频'} + 音频"
             else:
@@ -100,6 +96,7 @@ class FormatParser:
                 height=height,
                 width=width,
                 requires_merge=requires_merge,
+                filesize_is_estimate=bool(filesize and filesize_is_estimate),
             )
 
             # 同一档清晰度里选谁当代表：**能报出体积的优先**。
@@ -299,12 +296,46 @@ class FormatParser:
                 return int(value)
         return None
 
-    def _estimate_size(self, item: dict[str, Any], duration: float | None) -> int | None:
-        """按码率 × 时长估体积。
+    def _has_exact_size(self, item: dict[str, Any]) -> bool:
+        value = item.get("filesize")
+        return isinstance(value, (int, float)) and value > 0
 
-        YouTube 的 HLS 变体（含「Premium」高码率档）不带任何 filesize 字段，
-        但有 ``tbr``。宁可给个估算值，也好过整行显示「-」让人以为解析坏了。
-        """
+    def _youtube_hls_source_size(self, item: dict[str, Any]) -> int | None:
+        """YouTube HLS URL 中的源轨 clen；重新封装会有少量开销差异。"""
+        try:
+            url = urlsplit(str(item.get("url") or ""))
+        except ValueError:
+            return None
+        host = (url.hostname or "").lower()
+        if host != "googlevideo.com" and not host.endswith(".googlevideo.com"):
+            return None
+        parts = url.path.split("/")
+        keys = []
+        if str(item.get("vcodec") or "none") != "none":
+            keys.append("sgovp")
+        if str(item.get("acodec") or "none") != "none":
+            keys.append("sgoap")
+        if not keys:
+            return None
+        total = 0
+        for key in keys:
+            try:
+                metadata = unquote(parts[parts.index(key) + 1])
+            except (ValueError, IndexError):
+                return None
+            match = re.search(r"(?:^|;)clen=([0-9]{1,20})(?:;|$)", metadata)
+            if not match or int(match.group(1)) <= 0:
+                return None
+            total += int(match.group(1))
+        return total
+
+    def _estimate_size(self, item: dict[str, Any], duration: float | None) -> int | None:
+        """优先读取 HLS 源轨长度；普通格式可按码率 × 时长估体积。"""
+
+        if str(item.get("protocol") or "").startswith("m3u8"):
+            # HLS tbr 可能来自 BANDWIDTH（峰值且可能含外置音频），不能当
+            # 平均视频码率。取不到源轨长度就保持未知，不再制造成倍虚高的值。
+            return self._youtube_hls_source_size(item)
 
         if not duration or duration <= 0:
             return None

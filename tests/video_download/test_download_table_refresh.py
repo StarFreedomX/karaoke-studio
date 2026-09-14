@@ -162,3 +162,56 @@ def test_removing_a_task_rebinds_shifted_action_widget(page: VideoDownloadPage) 
     container = page.download_table.cellWidget(0, DOWNLOAD_TABLE_ACTION_COLUMN)
     container.layout().itemAt(0).widget().click()
     assert cancelled == ["task-2"]
+
+
+def test_estimated_size_is_labeled_across_download_views(page: VideoDownloadPage) -> None:
+    task = page._tasks[0]
+    page._current_task_id = task.task_id
+    option = task.info.formats[0]
+    option.filesize = 60_539_239
+    option.filesize_is_estimate = True
+    task.selected_format = option
+    task.available_formats = [option]
+    task.filesize = option.filesize
+    page._refresh_download_table()
+    page._refresh_preview()
+
+    assert page.download_table.item(0, 5).text() == "约 57.7 MB"
+    assert page.info_value_labels["filesize"].text() == "约 57.7 MB"
+    assert page.format_value_labels["filesize"].text() == "约 57.7 MB"
+    assert page.format_table.item(0, 5).text() == "约 57.7 MB"
+    assert "约 57.7 MB" in page.format_combo.currentText()
+
+
+def test_completed_size_replaces_estimate_in_details(page: VideoDownloadPage, tmp_path, monkeypatch) -> None:
+    task = page._tasks[0]
+    page._current_task_id = task.task_id
+    option = task.info.formats[0]
+    option.filesize = 60_539_239
+    option.filesize_is_estimate = True
+    task.selected_format = option
+    task.available_formats = [option]
+    task.filesize = option.filesize
+    task.local_file = tmp_path / "video.mp4"
+    task.local_file.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(page, "_start_pending_downloads", lambda: None)
+
+    page._handle_download_success(task.task_id)
+
+    assert task.filesize == 2048
+    assert page.download_table.item(0, 5).text() == "2.0 KB"
+    assert page.info_value_labels["filesize"].text() == "2.0 KB"
+    assert option.filesize == 60_539_239
+    assert "约 57.7 MB" in page.format_combo.currentText()
+
+
+def test_unknown_selected_size_does_not_use_another_format_size(page: VideoDownloadPage) -> None:
+    task = page._tasks[0]
+    page._current_task_id = task.task_id
+    task.selected_format = task.info.formats[0]
+    task.info.filesize = 3_817_312
+    page._refresh_download_table()
+    page._refresh_preview()
+
+    assert page.download_table.item(0, 5).text() == "-"
+    assert page.info_value_labels["filesize"].text() == "-"
