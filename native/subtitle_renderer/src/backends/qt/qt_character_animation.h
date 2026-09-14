@@ -32,7 +32,8 @@ std::optional<LineCharTransition> lineCharTransitionContext(
     const protocol::RenderConfig &cfg,
     const protocol::TimingLine &line,
     int tMs,
-    const std::vector<std::pair<int, int>> &intervals
+    const std::vector<std::pair<int, int>> &intervals,
+    bool zoomPulseEnabled
 );
 QTransform characterTransform(
     double centerX,
@@ -49,6 +50,8 @@ AnimationState transitionCharState(
     int tMs,
     int frameHeight,
     int followingDoneMs,
+    bool zoomPulseEnabled,
+    int zoomPulseCurveLevel,
     std::optional<std::pair<int, int>> overrideInterval = std::nullopt
 );
 

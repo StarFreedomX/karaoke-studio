@@ -486,6 +486,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal import (
     blit_tinted_run_glow_mask as _blit_tinted_run_glow_mask,
     char_fade_opacity as _char_fade_opacity,
     char_drip_char_transform as _char_drip_char_transform,
+    character_scale_origin as _character_scale_origin,
     character_transform as _character_transform,
     line_char_transition_context as _line_char_transition_context,
     aligned_x0 as _aligned_x0,
@@ -3932,6 +3933,9 @@ def _paint_role_line_with_character_transition(
         paint_left = left
         paint_width = width
         if transition.effect == "utopia":
+            scale_origin_x, scale_origin_y = _character_scale_origin(
+                style, left, baseline_y
+            )
             group_transform = _character_transform(
                 center_x=group_center_x,
                 center_y=group_center_y,
@@ -3941,8 +3945,8 @@ def _paint_role_line_with_character_transition(
                 scale_x=scale_x,
                 scale_y=scale_y,
                 skew_y=skew_y,
-                scale_origin_x=left,
-                scale_origin_y=baseline_y,
+                scale_origin_x=scale_origin_x,
+                scale_origin_y=scale_origin_y,
             )
             group_path = _glyph_run_path(group_glyphs, baseline_y)
             transformed_group_path = group_transform.map(group_path)
@@ -4226,6 +4230,9 @@ def _paint_line_with_character_transition(
             glow_transform: QTransform | None = None
             geometry_transform: QTransform | None = None
             if transition.effect == "utopia":
+                scale_origin_x, scale_origin_y = _character_scale_origin(
+                    style, left, baseline_y
+                )
                 transform = _character_transform(
                     center_x=left + width / 2,
                     center_y=baseline_y - metrics.ascent() + metrics.height() / 2,
@@ -4235,8 +4242,8 @@ def _paint_line_with_character_transition(
                     scale_x=scale_x,
                     scale_y=scale_y,
                     skew_y=skew_y,
-                    scale_origin_x=left,
-                    scale_origin_y=baseline_y,
+                    scale_origin_x=scale_origin_x,
+                    scale_origin_y=scale_origin_y,
                 )
                 paint_path = transform.map(path)
                 paint_rect = paint_path.boundingRect()
@@ -5029,6 +5036,9 @@ def _paint_ruby_text_units_with_transition(
             painter.save()
             try:
                 painter.setOpacity(painter.opacity() * opacity)
+                scale_origin_x, scale_origin_y = _character_scale_origin(
+                    style, unit_x, baseline_y
+                )
                 transform = _character_transform(
                     center_x=unit_x + unit_width / 2,
                     center_y=baseline_y - ruby_metrics.ascent() + ruby_metrics.height() / 2,
@@ -5038,8 +5048,8 @@ def _paint_ruby_text_units_with_transition(
                     scale_x=scale_x,
                     scale_y=scale_y,
                     skew_y=skew_y,
-                    scale_origin_x=unit_x,
-                    scale_origin_y=baseline_y,
+                    scale_origin_x=scale_origin_x,
+                    scale_origin_y=scale_origin_y,
                 )
                 _paint_ruby_text_fragment(
                     painter,

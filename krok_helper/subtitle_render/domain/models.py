@@ -1033,10 +1033,12 @@ class Style:
     """退场动画时长；在显示窗口结束前开始。"""
 
     karaoke_anim: KaraokeAnimation = "utopia"
-    """唱字动画：inherit（兼容旧 Utopia）/ none / utopia / scanline / utopia_scanline。
+    """唱字动画：inherit（兼容旧 Utopia）/ none / utopia / scanline / utopia_scanline
+    / zoom_pulse。
 
     ``scanline`` 与 ``utopia_scanline`` 分别在基础 Wipe / Utopia 动画之上叠加
-    「扫字线」锋面高亮，参数见 :attr:`scanline_width_px` 等字段。"""
+    「扫字线」锋面高亮，参数见 :attr:`scanline_width_px` 等字段。
+    ``zoom_pulse`` 整字放大：唱字期间持续缓出放大、唱字结束后缓入缩回。"""
 
     reverse_karaoke_anim: KaraokeAnimation = "inherit"
     """反向走字行的唱字动画；inherit 表示沿用普通唱字特效（也可选扫字线档位）。"""
@@ -1059,6 +1061,10 @@ class Style:
 
     scanline_glow_px: int = 8
     """扫字线字形内柔化范围；只改变带内透明度，不向字形外扩散。"""
+
+    zoom_pulse_curve_level: int = 3
+    """整字放大缓动档位（0~5）：0=线性；1~5 为缓出/缓入多项式阶数，越大峰值
+    停留越久（3 为初始默认）。纯绘制参数，不参与布局推导。"""
 
     section_edge_anim_enabled: bool = False
     """段首尾独立动画：开启后段首页/段尾页各行按下面两个动画替换入退场。"""
@@ -1240,10 +1246,16 @@ def effective_karaoke_animation(style: Style) -> Literal["none", "no_wipe", "uto
 
     扫字线是叠加特效，不改变基础动画：``scanline`` 按 ``none``（纯 Wipe）、
     ``utopia_scanline`` 按 ``utopia`` 渲染本体，高亮层另见
-    :func:`effective_karaoke_scanline`。
+    :func:`effective_karaoke_scanline`。整字放大（``zoom_pulse``）同样按
+    ``utopia`` 本体渲染（复用逐字变换管线），缩放曲线与原点另见
+    :func:`effective_karaoke_zoom_pulse`。
     """
     timing = style.timing
-    if timing.karaoke_anim == "utopia" or timing.karaoke_anim == "utopia_scanline":
+    if (
+        timing.karaoke_anim == "utopia"
+        or timing.karaoke_anim == "utopia_scanline"
+        or timing.karaoke_anim == "zoom_pulse"
+    ):
         return "utopia"
     if timing.karaoke_anim == "none":
         return "none"
@@ -1256,6 +1268,16 @@ def effective_karaoke_animation(style: Style) -> Literal["none", "no_wipe", "uto
         if "utopia" in {timing.entry_anim, timing.exit_anim}
         else "none"
     )
+
+
+def effective_karaoke_zoom_pulse(style: Style) -> bool:
+    """Return whether the whole-char zoom pulse wipe curve is active.
+
+    只认显式选择的 ``zoom_pulse`` 档位；``inherit`` 的旧项目推导与 utopia/
+    扫字线档位保持 False。反向行经 :func:`style_with_line_animation` 合成后
+    ``karaoke_anim`` 已是 reverse 档位，无需单独判断。
+    """
+    return style.timing.karaoke_anim == "zoom_pulse"
 
 
 def effective_karaoke_scanline(style: Style) -> bool:
@@ -1615,6 +1637,7 @@ def style_from_dict(payload: object) -> Style:
             "scanline_width_px",
             "scanline_glow_px",
             "scanline_brightness_pct",
+            "zoom_pulse_curve_level",
             "lit_number",
             "lit_size",
             "lit_offset_x",
@@ -1723,7 +1746,8 @@ def style_from_dict(payload: object) -> Style:
             changes[key] = (
                 value
                 if value in {
-                    "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline"
+                    "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline",
+                    "zoom_pulse"
                 }
                 else getattr(defaults, key)
             )

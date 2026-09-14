@@ -114,6 +114,9 @@ struct Direct2DGpuBackend::Impl {
         std::string karaokeAnimation = "none";
         // 扫字线叠加开关（来自 TextLine.scanlineEnabled，随行缓存）。
         bool scanlineEnabled = false;
+        // 整字放大（zoom_pulse）开关（来自 TextLine.zoomPulseEnabled，随行缓存）：
+        // 本体 karaokeAnimation 仍为 "utopia"，靠它切换缩放曲线与字符中心原点。
+        bool zoomPulseEnabled = false;
         std::vector<DisplayWindow> displayWindows;
         std::vector<PlacementWindow> placementWindows;
         TextStyle style;

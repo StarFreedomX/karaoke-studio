@@ -164,6 +164,8 @@ void applyGpuResolvedStyle(
     target.scanlineGlowRadius = static_cast<float>(
         std::max(source.scanlineGlowPx, 0) * scale
     );
+    // 整字放大缓动档位：无量纲，不随布局缩放。
+    target.zoomPulseCurveLevel = std::clamp(source.zoomPulseCurveLevel, 0, 5);
 
     const bool rubyUsesMainFont = source.rubyFontFollowMain
         && source.rubyFontFamily.isEmpty()
@@ -532,8 +534,9 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
             ? "none"
             : sourceLine.karaokeAnimation.toStdString();
         // 扫字线目前只有横排渲染路径（与 CPU Painter 同口径）；竖排行退回
-        // 基础 Wipe 语义，不叠加高亮带。
+        // 基础 Wipe 语义，不叠加高亮带。整字放大同为横排逐字变换，竖排一并关闭。
         line.scanlineEnabled = !config.vertical && sourceLine.scanlineEnabled;
+        line.zoomPulseEnabled = !config.vertical && sourceLine.zoomPulseEnabled;
         if (sourceLine.displayStartMs.has_value()
             && sourceLine.displayEndMs.has_value()) {
             line.displayWindows.push_back(krok::subtitle::native::DisplayWindow{

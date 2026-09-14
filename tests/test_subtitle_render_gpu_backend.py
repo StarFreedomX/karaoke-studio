@@ -7672,6 +7672,83 @@ def test_utopia_karaoke_bounce_is_independent_and_legacy_compatible(monkeypatch)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_zoom_pulse_wipe_follows_painter(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track, base_style = _g4_utopia_main_scene()
+    style = replace(
+        base_style,
+        entry_anim="none",
+        exit_anim="none",
+        karaoke_anim="zoom_pulse",
+    )
+    # 1_450："A" 唱字中缓出放大；1_800："A" 尾窗缩回 + "夢" 唱字中；
+    # 2_350："夢" 尾窗 + "想" 唱字中；3_400："B" 尾窗后段（快速落回）。
+    timestamps = (1_450, 1_800, 2_350, 3_400)
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, zoom_gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+        _, utopia_gpu = _render_g1_frames(
+            renderer,
+            replace(style, karaoke_anim="utopia"),
+            (1_450,),
+            force_warp=True,
+            track=track,
+        )
+
+    zoom_painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+    for t_ms, gpu_frame, painter_frame in zip(timestamps, zoom_gpu, zoom_painter):
+        assert all(
+            abs(actual - expected) <= 12
+            for actual, expected in zip(
+                _payload_alpha_bounds(gpu_frame),
+                _payload_alpha_bounds(painter_frame),
+            )
+        ), (t_ms, _payload_alpha_bounds(gpu_frame), _payload_alpha_bounds(painter_frame))
+
+    # 与 utopia 走字脉冲的画面必须可区分（1.25 中心生长 vs 1.15 右上生长）。
+    zoom_bounds = _payload_alpha_bounds(zoom_gpu[0])
+    utopia_bounds = _payload_alpha_bounds(utopia_gpu[0])
+    assert zoom_bounds != utopia_bounds
+    zoom_span = zoom_bounds[1] - zoom_bounds[0]
+    utopia_span = utopia_bounds[1] - utopia_bounds[0]
+    assert zoom_span > utopia_span
+
+    # 缓动档位（0=线性 / 5=强停留）随 style IR 下发，GPU 曲线必须与 Painter
+    # 同步参数化：两档都对照 Painter oracle，且彼此画面可区分。
+    linear_style = replace(style, zoom_pulse_curve_level=0)
+    steep_style = replace(style, zoom_pulse_curve_level=5)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, linear_gpu = _render_g1_frames(
+            renderer, linear_style, (1_450,), force_warp=True, track=track
+        )
+        _, steep_gpu = _render_g1_frames(
+            renderer, steep_style, (1_450,), force_warp=True, track=track
+        )
+    for curve_style, gpu_frame in (
+        (linear_style, linear_gpu[0]),
+        (steep_style, steep_gpu[0]),
+    ):
+        painter_frame = _render_painter_oracle(curve_style, t_ms=1_450, track=track)
+        assert all(
+            abs(actual - expected) <= 12
+            for actual, expected in zip(
+                _payload_alpha_bounds(gpu_frame),
+                _payload_alpha_bounds(painter_frame),
+            )
+        ), (
+            curve_style.zoom_pulse_curve_level,
+            _payload_alpha_bounds(gpu_frame),
+            _payload_alpha_bounds(painter_frame),
+        )
+    assert _payload_alpha_bounds(linear_gpu[0]) != _payload_alpha_bounds(steep_gpu[0])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_utopia_karaoke_bounce_uses_ruby_main_wipe_points(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track = TimingTrack(

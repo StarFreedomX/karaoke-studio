@@ -4985,12 +4985,12 @@ def test_property_panel_animation_controls_emit_style(qapp):
     assert [
         panel._karaoke_anim_combo.itemText(index)
         for index in range(panel._karaoke_anim_combo.count())
-    ] == ["无", "无 Wipe", "utopia", "扫字线", "utopia+扫字线"]
+    ] == ["无", "无 Wipe", "utopia", "扫字线", "utopia+扫字线", "整字放大"]
     assert [
         panel._reverse_karaoke_anim_combo.itemText(index)
         for index in range(panel._reverse_karaoke_anim_combo.count())
     ] == [
-        "跟随唱字特效", "Wipe", "无 Wipe", "Utopia", "扫字线", "utopia+扫字线"
+        "跟随唱字特效", "Wipe", "无 Wipe", "Utopia", "扫字线", "utopia+扫字线", "整字放大"
     ]
     # 扫字线参数永久激活；单独颜色模式显示颜色、隐藏亮度提升。
     assert panel._scanline_mode_combo.isEnabled()

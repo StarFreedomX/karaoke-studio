@@ -9,6 +9,7 @@ from PyQt6.QtGui import QTransform
 from krok_helper.subtitle_render.domain.models import (
     Style,
     effective_karaoke_animation,
+    effective_karaoke_zoom_pulse,
 )
 from krok_helper.subtitle_render.domain.timing import TimingLine
 from krok_helper.subtitle_render.engine.layout.line.style import (
@@ -31,6 +32,13 @@ UTOPIA_WIPE_OVER_RATIO = 1.15
 UTOPIA_WIPE_OVER_TIME_RATIO = 0.25
 UTOPIA_WIPE_OVER_TIME_LIMIT_MS = 100
 UTOPIA_FADE_OUT_TIME_MS = 750
+# 整字放大（zoom_pulse）：整个唱字期间缓出放大到峰值，唱字结束后
+# 固定 ZOOM_PULSE_SHRINK_MS 缓入缩回。曲线用多项式近似贝塞尔
+# （缓出 1-(1-p)^n / 缓入 1-q^n），峰值两侧导数为 0，停留感最强；
+# 阶数 n 由 Style.zoom_pulse_curve_level（0~5）调节，0/1 为线性。
+ZOOM_PULSE_PEAK_RATIO = 1.25
+ZOOM_PULSE_SHRINK_MS = 300
+ZOOM_PULSE_DEFAULT_CURVE_LEVEL = 3
 CHAR_FADE_INTRO_DELAY_MS = 350
 CHAR_FADE_IN_TIME_MS = 250
 CHAR_FADE_OUT_TIME_MS = 250
@@ -215,7 +223,11 @@ def transition_char_state(
             and t_ms is not None
             and char_start_ms is not None
             and char_end_ms is not None
-            and is_utopia_wiping(t_ms, char_start_ms, char_end_ms)
+            and (
+                is_zoom_pulse_active(t_ms, char_start_ms, char_end_ms)
+                if effective_karaoke_zoom_pulse(style)
+                else is_utopia_wiping(t_ms, char_start_ms, char_end_ms)
+            )
         ):
             wipe_transition = LineCharTransition(
                 phase="wipe",
@@ -300,7 +312,13 @@ def transition_char_state(
     if transition.phase == "wipe" and transition.effect == "utopia":
         if char_start_ms is None or char_end_ms is None or t_ms is None:
             return 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0
-        scale = utopia_wipe_scale(t_ms, char_start_ms, char_end_ms)
+        scale = (
+            zoom_pulse_wipe_scale(
+                t_ms, char_start_ms, char_end_ms, zoom_pulse_curve_level(style)
+            )
+            if effective_karaoke_zoom_pulse(style)
+            else utopia_wipe_scale(t_ms, char_start_ms, char_end_ms)
+        )
         return 1.0, 0.0, 0.0, 0.0, scale, scale, 0.0
 
     if transition.effect in {"char_fade", "char_drip", "spin_flip"}:
@@ -377,6 +395,22 @@ def character_transform(
     return transform
 
 
+def character_scale_origin(
+    style: Style,
+    left: float,
+    baseline_y: float,
+) -> tuple[float | None, float | None]:
+    """Pick the scale origin for Utopia-style character transforms.
+
+    整字放大（zoom_pulse）以字符中心为缩放原点四面对称生长；其余 utopia
+    相位维持 N3 语义的「字框左缘 + 基线」。相位边界处的缩放均为恒等，
+    原点切换不产生位置跳变。
+    """
+    if effective_karaoke_zoom_pulse(style):
+        return None, None
+    return left, baseline_y
+
+
 def utopia_intro_delay_step(count: int) -> int:
     if count <= 1:
         return 0
@@ -410,6 +444,42 @@ def utopia_wipe_scale(
         (UTOPIA_WIPE_OVER_RATIO - 1.0)
         * min(max(progress, 0.0), 1.0)
     )
+
+
+def is_zoom_pulse_active(t_ms: int, char_start_ms: int, char_end_ms: int) -> bool:
+    return (
+        char_start_ms != char_end_ms
+        and char_start_ms < t_ms < char_end_ms + ZOOM_PULSE_SHRINK_MS
+    )
+
+
+def zoom_pulse_curve_level(style: Style) -> int:
+    """Clamp the zoom-pulse easing order to the supported 0..5 range."""
+    try:
+        level = int(style.zoom_pulse_curve_level)
+    except (AttributeError, TypeError, ValueError):
+        return ZOOM_PULSE_DEFAULT_CURVE_LEVEL
+    return max(0, min(5, level))
+
+
+def zoom_pulse_wipe_scale(
+    t_ms: int,
+    char_start_ms: int,
+    char_end_ms: int,
+    curve_level: int = ZOOM_PULSE_DEFAULT_CURVE_LEVEL,
+) -> float:
+    if not is_zoom_pulse_active(t_ms, char_start_ms, char_end_ms):
+        return 1.0
+    level = max(0, min(5, int(curve_level)))
+    if t_ms < char_end_ms:
+        # 缓出：起点快速离开 1.0，逼近峰值时导数→0（峰值停留）。
+        progress = (t_ms - char_start_ms) / (char_end_ms - char_start_ms)
+        eased = progress if level <= 0 else 1.0 - (1.0 - progress) ** level
+        return 1.0 + (ZOOM_PULSE_PEAK_RATIO - 1.0) * eased
+    # 缓入：刚唱完时导数≈0（继续停留在峰值附近），结尾快速落回 1.0。
+    shrink = (t_ms - char_end_ms) / ZOOM_PULSE_SHRINK_MS
+    eased = 1.0 - shrink if level <= 0 else 1.0 - shrink**level
+    return 1.0 + (ZOOM_PULSE_PEAK_RATIO - 1.0) * eased
 
 
 def utopia_following_done_time(

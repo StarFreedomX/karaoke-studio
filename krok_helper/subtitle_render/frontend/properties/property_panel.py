@@ -1024,7 +1024,7 @@ class PropertyPanel(QWidget):
                     self._karaoke_anim_combo.findData(
                         timing.karaoke_anim
                         if timing.karaoke_anim
-                        in {"none", "no_wipe", "utopia", "scanline", "utopia_scanline"}
+                        in {"none", "no_wipe", "utopia", "scanline", "utopia_scanline", "zoom_pulse"}
                         else effective_karaoke_animation(self._style)
                     ),
                 )
@@ -1049,6 +1049,24 @@ class PropertyPanel(QWidget):
                 min(max(int(self._style.scanline_brightness_pct), 0), 100)
             )
             self._scanline_color_btn.set_color(self._style.scanline_color)
+            self._zoom_pulse_curve_combo.setCurrentIndex(
+                max(
+                    0,
+                    self._zoom_pulse_curve_combo.findData(
+                        min(
+                            max(
+                                int(
+                                    getattr(
+                                        self._style, "zoom_pulse_curve_level", 3
+                                    )
+                                ),
+                                0,
+                            ),
+                            5,
+                        )
+                    ),
+                )
+            )
             self._sync_scanline_controls()
             self._reverse_karaoke_anim_combo.setCurrentIndex(
                 max(

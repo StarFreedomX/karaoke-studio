@@ -30,6 +30,7 @@ from krok_helper.subtitle_render.domain.models import (
     TitleOverlay,
     effective_karaoke_animation,
     effective_karaoke_scanline,
+    effective_karaoke_zoom_pulse,
     title_overlay_to_dict,
 )
 from krok_helper.subtitle_render.serialization.timing import guide_symbol_to_dict
@@ -152,8 +153,10 @@ def gpu_unsupported_features(
         reasons.append("line_animation")
     # 扫字线档位（scanline / utopia_scanline）由 GPU sidecar 原生渲染：
     # 主文字与 ruby 的锋面高亮带在 d2d_backend_render 里与 Wipe/Utopia 同路绘制。
+    # 整字放大（zoom_pulse）同样原生渲染：本体按 utopia 逐字变换管线走，
+    # 曲线/原点由行级 zoom_pulse 标记在 C++ 侧切换。
     karaoke_effects = {
-        "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline"
+        "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline", "zoom_pulse"
     }
     if (
         style.karaoke_anim not in karaoke_effects
@@ -274,6 +277,7 @@ def timing_line_to_ir(
     exit_duration_ms: int = 0,
     karaoke_anim: str = "none",
     scanline: bool = False,
+    zoom_pulse: bool = False,
     layout_offset_x: float = 0.0,
     layout_offset_y: float = 0.0,
     layout_offset_windows: list[tuple[int, int, float, float]] | None = None,
@@ -328,6 +332,9 @@ def timing_line_to_ir(
         "karaoke_anim": str(karaoke_anim),
         # 扫字线叠加开关（仅显式档位为 True）；参数（粗细/颜色/发光）走 style IR。
         "scanline": bool(scanline),
+        # 整字放大开关：本体 karaoke_anim 仍发降维后的 "utopia"，C++ 侧靠这个
+        # 行级标记切换缩放曲线与原点（字符中心）。
+        "zoom_pulse": bool(zoom_pulse),
         "layout_offset_x": float(layout_offset_x),
         "layout_offset_y": float(layout_offset_y),
         "layout_offset_windows": [
@@ -517,6 +524,11 @@ def track_to_ir(
                 ),
                 scanline=(
                     effective_karaoke_scanline(animation_styles[index])
+                    if style is not None
+                    else False
+                ),
+                zoom_pulse=(
+                    effective_karaoke_zoom_pulse(animation_styles[index])
                     if style is not None
                     else False
                 ),

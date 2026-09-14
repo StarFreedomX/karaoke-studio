@@ -34,7 +34,9 @@ void paintLine(QPainter &painter, const RenderConfig &cfg, const TimingLine &lin
 
     const QRectF lineRect(layout.x, layout.baselineY - layout.ascent, layout.width, layout.height);
     const auto intervals = lineIntervals(line);
-    const auto transition = lineCharTransitionContext(cfg, line, tMs, intervals);
+    const auto transition = lineCharTransitionContext(
+        cfg, line, tMs, intervals, line.zoomPulseEnabled
+    );
     const auto rubyDiagnostics = rubyDiagnosticsForLine(cfg, lineStyle, line, layout, tMs);
     const bool useUtopiaMainText = transition.has_value()
         && transition->effect == QStringLiteral("utopia")

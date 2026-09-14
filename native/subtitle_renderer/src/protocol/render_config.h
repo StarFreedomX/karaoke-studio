@@ -87,6 +87,10 @@ struct TimingLine {
     // 扫字线叠加开关：Python 按该行烘焙后的 karaoke_anim 显式档位打标；
     // 缺省 false 兼容旧 IR。参数在 ResolvedStyle（全局样式）。
     bool scanlineEnabled = false;
+    // 整字放大（zoom_pulse）开关：本体 karaokeAnimation 仍是降维后的
+    // "utopia"，靠这个行级标记切换缩放曲线（唱字期间缓出放大、唱字结束
+    // 后 300ms 缓入缩回）并把缩放原点换成字符中心。缺省 false 兼容旧 IR。
+    bool zoomPulseEnabled = false;
     ResolvedLineLayout layout;
 };
 
@@ -257,6 +261,9 @@ struct ResolvedStyle {
     QString scanlineColor = QStringLiteral("#FFFFFF");
     int scanlineBrightnessPct = 60;
     int scanlineGlowPx = 8;
+    // 整字放大缓动档位（0~5，0=线性）来自全局 Style；仅显式选择 zoom_pulse
+    // 档位的行会置位 TimingLine::zoomPulseEnabled。
+    int zoomPulseCurveLevel = 3;
     bool hasMainKaraokeColors = false;
     bool hasRubyKaraokeColors = false;
 };

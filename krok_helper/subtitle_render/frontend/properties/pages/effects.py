@@ -239,11 +239,13 @@ class EffectsPropertyPageBuilder:
             ("utopia", "utopia"),
             ("扫字线", "scanline"),
             ("utopia+扫字线", "utopia_scanline"),
+            ("整字放大", "zoom_pulse"),
         ):
             host._karaoke_anim_combo.addItem(label, value)
         host._karaoke_anim_combo.setToolTip(
             "控制歌词正在着色时的逐字动画；旧项目的 Utopia 入退场会自动兼容。"
-            "扫字线在走字锋面处按设定粗细高亮发光（主文字与注音同效）"
+            "扫字线在走字锋面处按设定粗细高亮发光（主文字与注音同效）；"
+            "整字放大在唱字期间持续放大、唱字结束后缓慢缩回"
         )
         host._karaoke_anim_combo.currentIndexChanged.connect(
             lambda _index: host._update_style(
@@ -260,6 +262,7 @@ class EffectsPropertyPageBuilder:
             ("Utopia", "utopia"),
             ("扫字线", "scanline"),
             ("utopia+扫字线", "utopia_scanline"),
+            ("整字放大", "zoom_pulse"),
         ):
             host._reverse_karaoke_anim_combo.addItem(label, value)
         host._reverse_karaoke_anim_combo.setToolTip(
@@ -324,8 +327,30 @@ class EffectsPropertyPageBuilder:
             host._scanline_brightness_spin,
             host._scanline_glow_spin,
         )
+        host._zoom_pulse_curve_combo = WheelFocusedComboBox(section)
+        compact_property_control(host._zoom_pulse_curve_combo)
+        for label, value in (
+            ("0级（线性）", 0),
+            ("1级（匀速）", 1),
+            ("2级（稍快）", 2),
+            ("3级（较快·默认）", 3),
+            ("4级（快）", 4),
+            ("5级（极快）", 5),
+        ):
+            host._zoom_pulse_curve_combo.addItem(label, value)
+        host._zoom_pulse_curve_combo.setToolTip(
+            "整字放大速度等级：0=线性（匀速放大缩小）；1~5 为缓出/缓入曲线阶数，"
+            "等级越高放大越快贴近峰值、在峰值附近停留越久（默认 3；"
+            "1 级画面与 0 级相同）"
+        )
+        host._zoom_pulse_curve_combo.currentIndexChanged.connect(
+            lambda _index: host._update_style(
+                zoom_pulse_curve_level=host._zoom_pulse_curve_combo.currentData()
+            )
+        )
         # 网格行序：第 1 行 = 入场/退场，第 2 行 = 唱字对 + 段首尾区块，
-        # 第 3 行 = 扫字线整行（参数永久可编辑，颜色/亮度按模式互换启用态）。
+        # 第 3 行 = 扫字线整行（参数永久可编辑，颜色/亮度按模式互换启用态），
+        # 第 4 行 = 整字放大速度等级。
 
         host._section_edge_check = CheckBox("段首尾独立动画", section)
         host._section_edge_check.toggled.connect(host._on_section_edge_toggled)
@@ -364,6 +389,7 @@ class EffectsPropertyPageBuilder:
             "扫字线 / 模式 · 粗细 · 颜色/亮度 · 柔化半径",
             host._scanline_row,
         )
+        host._animation_grid.add_field("整字放大速度等级", host._zoom_pulse_curve_combo)
         layout.addWidget(host._animation_grid)
         return section
 

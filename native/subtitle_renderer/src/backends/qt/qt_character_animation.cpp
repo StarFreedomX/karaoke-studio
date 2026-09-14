@@ -23,6 +23,10 @@ constexpr double kUtopiaWipeOverRatio = 1.15;
 constexpr double kUtopiaWipeOverTimeRatio = 0.25;
 constexpr int kUtopiaWipeOverTimeLimitMs = 100;
 constexpr int kUtopiaFadeOutTimeMs = 750;
+// 整字放大（zoom_pulse）：与 Python transitions.zoom_pulse_wipe_scale 同曲线
+// ——唱字期间三次缓出放大到 1.25，唱字结束后 300ms 三次缓入缩回。
+constexpr double kZoomPulsePeakRatio = 1.25;
+constexpr int kZoomPulseShrinkMs = 300;
 
 }  // namespace
 
@@ -126,6 +130,39 @@ bool isUtopiaWiping(int tMs, int charStartMs, int charEndMs) {
     return charStartMs < tMs && tMs < charEndMs && charStartMs != charEndMs;
 }
 
+bool isZoomPulseActive(int tMs, int charStartMs, int charEndMs) {
+    return charStartMs != charEndMs
+        && charStartMs < tMs
+        && tMs < charEndMs + kZoomPulseShrinkMs;
+}
+
+double zoomPulseScale(int tMs, int charStartMs, int charEndMs, int curveLevel) {
+    if (!isZoomPulseActive(tMs, charStartMs, charEndMs)) {
+        return 1.0;
+    }
+    const int level = std::clamp(curveLevel, 0, 5);
+    if (tMs < charEndMs) {
+        // 缓出：起点快速离开 1.0，逼近峰值时导数→0（峰值停留）。
+        const double one = 1.0
+            - static_cast<double>(tMs - charStartMs)
+                / static_cast<double>(charEndMs - charStartMs);
+        double powered = one;
+        for (int i = 1; i < level; ++i) {
+            powered *= one;
+        }
+        const double eased = level <= 0 ? 1.0 - one : 1.0 - powered;
+        return 1.0 + (kZoomPulsePeakRatio - 1.0) * eased;
+    }
+    // 缓入：刚唱完时导数≈0（继续停留在峰值附近），结尾快速落回 1.0。
+    const double q = static_cast<double>(tMs - charEndMs) / kZoomPulseShrinkMs;
+    double powered = q;
+    for (int i = 1; i < level; ++i) {
+        powered *= q;
+    }
+    const double eased = level <= 0 ? 1.0 - q : 1.0 - powered;
+    return 1.0 + (kZoomPulsePeakRatio - 1.0) * eased;
+}
+
 double utopiaWipeScale(int tMs, int charStartMs, int charEndMs) {
     if (!isUtopiaWiping(tMs, charStartMs, charEndMs)) {
         return 1.0;
@@ -163,7 +200,8 @@ std::optional<LineCharTransition> lineCharTransitionContext(
     const RenderConfig &cfg,
     const TimingLine &line,
     int tMs,
-    const std::vector<std::pair<int, int>> &intervals
+    const std::vector<std::pair<int, int>> &intervals,
+    bool zoomPulseEnabled
 ) {
     if (line.chars.empty()) {
         return std::nullopt;
@@ -184,7 +222,12 @@ std::optional<LineCharTransition> lineCharTransitionContext(
     bool inWipe = false;
     if (utopiaKaraokeEnabled(cfg)) {
         for (const auto &interval : intervals) {
-            if (isUtopiaWiping(tMs, interval.first, interval.second)) {
+            // 整字放大的缩小尾窗延伸到唱字结束后 300ms：行尾字还在缩回时
+            // 即便没有别的字符在唱，transition 也必须存在，否则字形跳回原位。
+            const bool active = zoomPulseEnabled
+                ? isZoomPulseActive(tMs, interval.first, interval.second)
+                : isUtopiaWiping(tMs, interval.first, interval.second);
+            if (active) {
                 inWipe = true;
                 break;
             }
@@ -256,6 +299,8 @@ AnimationState transitionCharState(
     int tMs,
     int frameHeight,
     int followingDoneMs,
+    bool zoomPulseEnabled,
+    int zoomPulseCurveLevel,
     std::optional<std::pair<int, int>> overrideInterval
 ) {
     if (transition.effect == QStringLiteral("utopia") && transition.phase == QStringLiteral("utopia")) {
@@ -304,8 +349,15 @@ AnimationState transitionCharState(
             const auto interval = overrideInterval.has_value()
                 ? overrideInterval.value()
                 : intervals[static_cast<std::size_t>(index)];
-            if (isUtopiaWiping(tMs, interval.first, interval.second)) {
-                const double scale = utopiaWipeScale(tMs, interval.first, interval.second);
+            const bool active = zoomPulseEnabled
+                ? isZoomPulseActive(tMs, interval.first, interval.second)
+                : isUtopiaWiping(tMs, interval.first, interval.second);
+            if (active) {
+                const double scale = zoomPulseEnabled
+                    ? zoomPulseScale(
+                        tMs, interval.first, interval.second, zoomPulseCurveLevel
+                    )
+                    : utopiaWipeScale(tMs, interval.first, interval.second);
                 return AnimationState{1.0, 0.0, 0.0, 0.0, scale, scale, 0.0};
             }
         }

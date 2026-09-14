@@ -452,7 +452,9 @@ def normalize_exit_animation(value: object) -> ExitAnimation:
 
 
 def normalize_karaoke_animation(value: object) -> KaraokeAnimation:
-    if value in {"inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline"}:
+    if value in {
+        "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline", "zoom_pulse"
+    }:
         return value  # type: ignore[return-value]
     return "inherit"
 

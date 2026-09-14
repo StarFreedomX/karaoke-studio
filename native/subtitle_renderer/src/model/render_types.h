@@ -268,6 +268,9 @@ struct TextLine {
     // 扫字线叠加开关：Python 按该行烘焙后的 karaoke_anim 显式档位打标；
     // 缺省 false 兼容旧 IR。参数在 TextStyle（随行样式一起下发）。
     bool scanlineEnabled = false;
+    // 整字放大（zoom_pulse）开关：本体 karaokeAnimation 仍是降维后的
+    // "utopia"，靠这个行级标记切换缩放曲线并把缩放原点换成字符中心。
+    bool zoomPulseEnabled = false;
     std::vector<DisplayWindow> displayWindows;
     std::vector<PlacementWindow> placementWindows;
     bool operator==(const TextLine &) const = default;
@@ -408,6 +411,9 @@ struct TextStyle {
     RgbaColor scanlineColor{255, 255, 255, 255};
     float scanlineBrightness = 0.6f;
     float scanlineGlowRadius = 8.0f;
+    // Whole-char zoom pulse easing order (0..5; 0 = linear).  Whether the
+    // effect is active is a per-line flag (TextLine::zoomPulseEnabled).
+    int zoomPulseCurveLevel = 3;
     bool operator==(const TextStyle &) const = default;
 };
 

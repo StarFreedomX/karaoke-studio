@@ -787,6 +787,45 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         const auto wipeEndMs = [](const Impl::CachedChar &ch) {
             return ch.wipePoints.empty() ? ch.endMs : ch.wipePoints.back().timeMs;
         };
+        // 整字放大（zoom_pulse）：与 Python transitions.zoom_pulse_wipe_scale
+        // 同曲线——唱字期间缓出放大到 1.25，唱字结束后 300ms 缓入缩回。
+        // 缓动阶数 level（0~5，0=线性）来自 TextStyle.zoomPulseCurveLevel；
+        // 峰值两侧导数为 0（停留感），幂用循环连乘近似避免 pow。
+        const auto zoomPulseActive = [](int tMs, int startMs, int endMs) {
+            constexpr int kShrinkMs = 300;
+            return startMs != endMs
+                && startMs < tMs
+                && tMs < endMs + kShrinkMs;
+        };
+        const auto zoomPulsePowi = [](double base, int exponent) {
+            double result = 1.0;
+            for (int i = 0; i < exponent; ++i) {
+                result *= base;
+            }
+            return result;
+        };
+        const auto zoomPulseScale = [&](
+            int tMs, int startMs, int endMs, int curveLevel
+        ) {
+            constexpr double kPeak = 1.25;
+            constexpr int kShrinkMs = 300;
+            if (startMs == endMs || tMs <= startMs || tMs >= endMs + kShrinkMs) {
+                return 1.0f;
+            }
+            const int level = std::clamp(curveLevel, 0, 5);
+            if (tMs < endMs) {
+                const double one = 1.0
+                    - static_cast<double>(tMs - startMs)
+                        / static_cast<double>(endMs - startMs);
+                const double eased = level <= 0
+                    ? 1.0 - one
+                    : 1.0 - zoomPulsePowi(one, level);
+                return static_cast<float>(1.0 + (kPeak - 1.0) * eased);
+            }
+            const double q = static_cast<double>(tMs - endMs) / kShrinkMs;
+            const double eased = level <= 0 ? 1.0 - q : 1.0 - zoomPulsePowi(q, level);
+            return static_cast<float>(1.0 + (kPeak - 1.0) * eased);
+        };
         auto characterAnimationAt = [&](std::size_t charIndex) {
             CharacterAnimationState state;
             if (charIndex >= line->chars.size()) {
@@ -863,6 +902,15 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 scaleX = shrink * std::cos(pi * local);
                 scaleY = shrink;
             } else if (line->karaokeAnimation == "utopia"
+                && line->zoomPulseEnabled
+                && zoomPulseActive(tMs, wipeStartMs(ch), wipeEndMs(ch))) {
+                // 整字放大：窗口延伸到唱字结束后 300ms 的缓入缩回段；
+                // intro/exit 相位在链上更早命中，退场照常接管。
+                scaleX = scaleY = zoomPulseScale(
+                    tMs, wipeStartMs(ch), wipeEndMs(ch),
+                    line->style.zoomPulseCurveLevel
+                );
+            } else if (line->karaokeAnimation == "utopia"
                 && tMs > wipeStartMs(ch) && tMs < wipeEndMs(ch)
                 && wipeStartMs(ch) != wipeEndMs(ch)) {
                 const int overMs = std::min(
@@ -882,10 +930,15 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             if (state.opacity <= 0.0f) {
                 return state;
             }
-            state.matrix = utopiaMatrix(
-                dxValue, dyValue, rotation, scaleX, scaleY,
-                ch.layoutLeft, 0.0f, ch.pivotX, ch.pivotY
-            );
+            state.matrix = line->zoomPulseEnabled
+                ? utopiaMatrix(
+                    dxValue, dyValue, rotation, scaleX, scaleY,
+                    ch.pivotX, ch.pivotY, ch.pivotX, ch.pivotY
+                )
+                : utopiaMatrix(
+                    dxValue, dyValue, rotation, scaleX, scaleY,
+                    ch.layoutLeft, 0.0f, ch.pivotX, ch.pivotY
+                );
             state.transformed = dxValue != 0.0f || dyValue != 0.0f
                 || rotation != 0.0f || scaleX != 1.0f || scaleY != 1.0f;
             return state;
@@ -980,6 +1033,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 scaleX = shrink * std::cos(pi * local);
                 scaleY = shrink;
             } else if (line->karaokeAnimation == "utopia"
+                && line->zoomPulseEnabled
+                && zoomPulseActive(tMs, unit.startMs, unit.endMs)) {
+                scaleX = scaleY = zoomPulseScale(
+                    tMs, unit.startMs, unit.endMs,
+                    line->style.zoomPulseCurveLevel
+                );
+            } else if (line->karaokeAnimation == "utopia"
                 && tMs > unit.startMs && tMs < unit.endMs
                 && unit.startMs != unit.endMs) {
                 const int overMs = std::min(
@@ -999,11 +1059,16 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             if (state.opacity <= 0.0f) {
                 return state;
             }
-            state.matrix = utopiaMatrix(
-                dxValue, dyValue, rotation, scaleX, scaleY,
-                unit.layoutLeft, ruby.baselineOffset,
-                unit.pivotX, unit.pivotY
-            );
+            state.matrix = line->zoomPulseEnabled
+                ? utopiaMatrix(
+                    dxValue, dyValue, rotation, scaleX, scaleY,
+                    unit.pivotX, unit.pivotY, unit.pivotX, unit.pivotY
+                )
+                : utopiaMatrix(
+                    dxValue, dyValue, rotation, scaleX, scaleY,
+                    unit.layoutLeft, ruby.baselineOffset,
+                    unit.pivotX, unit.pivotY
+                );
             state.transformed = dxValue != 0.0f || dyValue != 0.0f
                 || rotation != 0.0f || scaleX != 1.0f || scaleY != 1.0f;
             return state;

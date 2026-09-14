@@ -717,6 +717,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         cached.exitDurationMs = sourceLine.exitDurationMs;
         cached.karaokeAnimation = sourceLine.karaokeAnimation;
         cached.scanlineEnabled = sourceLine.scanlineEnabled;
+        cached.zoomPulseEnabled = sourceLine.zoomPulseEnabled;
         cached.displayWindows = sourceLine.displayWindows;
         cached.placementWindows = sourceLine.placementWindows;
         DWRITE_FONT_METRICS laneMetrics{};

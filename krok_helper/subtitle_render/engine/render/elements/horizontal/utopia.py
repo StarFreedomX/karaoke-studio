@@ -76,6 +76,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.ruby import (
     ruby_text_path_and_rect,
 )
 from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions import (
+    character_scale_origin,
     character_transform,
     transition_char_state,
     utopia_following_done_time,
@@ -285,6 +286,9 @@ def utopia_main_scope_layers(
         right = max(layout.char_x_ranges[candidate][1] for candidate in indices)
         width = max(right - left, 1)
         group_rect = glyph_run_rect(group_glyphs, layout.baseline_y)
+        scale_origin_x, scale_origin_y = character_scale_origin(
+            style, left, layout.baseline_y
+        )
         transform = character_transform(
             center_x=left + width / 2,
             center_y=group_rect.top() + group_rect.height() / 2,
@@ -294,8 +298,8 @@ def utopia_main_scope_layers(
             scale_x=scale_x,
             scale_y=scale_y,
             skew_y=skew_y,
-            scale_origin_x=left,
-            scale_origin_y=layout.baseline_y,
+            scale_origin_x=scale_origin_x,
+            scale_origin_y=scale_origin_y,
         )
         rect = transform.map(
             glyph_run_path(group_glyphs, layout.baseline_y)
@@ -445,6 +449,9 @@ def utopia_ruby_scope_rect(
             style,
             base_text=layout.ruby.kanji,
         )
+        scale_origin_x, scale_origin_y = character_scale_origin(
+            style, layout.x, layout.baseline_y
+        )
         transform = character_transform(
             center_x=layout.x + layout.reading_width / 2,
             center_y=(
@@ -458,8 +465,8 @@ def utopia_ruby_scope_rect(
             scale_x=scale_x,
             scale_y=scale_y,
             skew_y=skew_y,
-            scale_origin_x=layout.x,
-            scale_origin_y=layout.baseline_y,
+            scale_origin_x=scale_origin_x,
+            scale_origin_y=scale_origin_y,
         )
         return transform.map(path).boundingRect()
 
@@ -510,6 +517,9 @@ def utopia_ruby_scope_rect(
             continue
         path = QPainterPath()
         path.addText(float(unit_x), float(layout.baseline_y), ruby_font, unit)
+        scale_origin_x, scale_origin_y = character_scale_origin(
+            style, unit_x, layout.baseline_y
+        )
         transform = character_transform(
             center_x=unit_x + unit_width / 2,
             center_y=(
@@ -523,8 +533,8 @@ def utopia_ruby_scope_rect(
             scale_x=scale_x,
             scale_y=scale_y,
             skew_y=skew_y,
-            scale_origin_x=unit_x,
-            scale_origin_y=layout.baseline_y,
+            scale_origin_x=scale_origin_x,
+            scale_origin_y=scale_origin_y,
         )
         unit_rect = transform.map(path).boundingRect()
         rect = unit_rect if rect is None else rect.united(unit_rect)

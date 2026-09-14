@@ -64,7 +64,9 @@ void paintRubyUtopiaText(
             count,
             tMs,
             cfg.height,
-            followingDoneMs
+            followingDoneMs,
+            line.zoomPulseEnabled,
+            style.zoomPulseCurveLevel
         );
         if (state.opacity <= 0.0) {
             continue;
@@ -99,7 +101,9 @@ void paintRubyUtopiaText(
                 centerX,
                 centerY,
                 state,
-                QPointF(x, rubyBaselineY)
+                line.zoomPulseEnabled
+                    ? std::optional<QPointF>()
+                    : std::optional<QPointF>(QPointF(x, rubyBaselineY))
             );
             QPainterPath path = transform.map(uprightPath);
             const QRectF rect = path.boundingRect();
@@ -137,6 +141,8 @@ void paintRubyUtopiaText(
                 tMs,
                 cfg.height,
                 followingDoneMs,
+                line.zoomPulseEnabled,
+                style.zoomPulseCurveLevel,
                 unit.interval
             );
             if (unitState.opacity <= 0.0) {
@@ -156,7 +162,9 @@ void paintRubyUtopiaText(
                 centerX,
                 centerY,
                 unitState,
-                QPointF(unit.x, rubyBaselineY)
+                line.zoomPulseEnabled
+                    ? std::optional<QPointF>()
+                    : std::optional<QPointF>(QPointF(unit.x, rubyBaselineY))
             );
             QPainterPath path = transform.map(uprightPath);
             const QRectF rect = path.boundingRect();
@@ -237,6 +245,8 @@ void paintUtopiaMainText(
             tMs,
             cfg.height,
             followingDoneMs,
+            line.zoomPulseEnabled,
+            style.zoomPulseCurveLevel,
             wipeWindow
         );
         if (state.opacity <= 0.0) {
@@ -262,11 +272,14 @@ void paintUtopiaMainText(
         const QRectF sourceRect(left, layout.baselineY - metrics.ascent(), width, metrics.height());
         const double centerX = left + width / 2.0;
         const double centerY = layout.baselineY - metrics.ascent() + metrics.height() / 2.0;
+        // 整字放大以字符中心为缩放原点（与 Python character_scale_origin 同口径）。
         const QTransform transform = characterTransform(
             centerX,
             centerY,
             state,
-            QPointF(left, layout.baselineY)
+            line.zoomPulseEnabled
+                ? std::optional<QPointF>()
+                : std::optional<QPointF>(QPointF(left, layout.baselineY))
         );
         const QPainterPath paintPath = transform.map(path);
         const QRectF paintRect = paintPath.boundingRect();

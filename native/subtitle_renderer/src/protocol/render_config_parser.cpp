@@ -1075,6 +1075,15 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
         0,
         intValue(style, QStringLiteral("scanline_glow_px"), base.scanlineGlowPx)
     );
+    base.zoomPulseCurveLevel = std::clamp(
+        intValue(
+            style,
+            QStringLiteral("zoom_pulse_curve_level"),
+            base.zoomPulseCurveLevel
+        ),
+        0,
+        5
+    );
     cfg.timingOffsetMs = intValue(style, QStringLiteral("timing_offset_ms"), cfg.timingOffsetMs);
     const bool hasMainKaraokeColors = style.value(QStringLiteral("karaoke_colors")).isObject();
     const bool hasRubyKaraokeColors = style.value(QStringLiteral("ruby_karaoke_colors")).isObject();
@@ -1216,6 +1225,9 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
             );
             line.scanlineEnabled = lineObject.value(
                 QStringLiteral("scanline")
+            ).toBool(false);
+            line.zoomPulseEnabled = lineObject.value(
+                QStringLiteral("zoom_pulse")
             ).toBool(false);
             const QJsonObject layoutObject = lineObject.value(
                 QStringLiteral("layout")
