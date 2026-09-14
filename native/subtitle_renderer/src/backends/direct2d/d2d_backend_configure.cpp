@@ -1464,18 +1464,52 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 cellHeight * static_cast<float>(cached.chars.size())
             );
         } else if (hasFirstSlot) {
-            const float drawBottom = firstSlotDescent + std::floor(
-                firstSlotEdge / layoutScale / 2.0f
-            ) * layoutScale;
-            const float inset = std::floor(
-                (firstSlotEdge + firstSlotEdge2) / layoutScale / 2.0f
-            ) * layoutScale;
-            cached.fillBounds = D2D1::RectF(
-                0.0f,
-                drawBottom - maxDrawHeight + inset,
-                std::max(cursor, 1.0f),
-                std::max(drawBottom - inset, drawBottom - maxDrawHeight + inset + layoutScale)
-            );
+            // Glyph-ink vertical anchor, mirroring the Painter's ink-based
+            // n3_main_fill_rect: the metric em box systematically displaced
+            // MilleFeuille / vertical-gradient bands on faces whose ink is
+            // taller than the em, and the wrapping band texture then painted
+            // glyph tops in the bottom band colour.  Union the placed glyph
+            // bounds (bitmap guides through their content box) and pad
+            // symmetrically by the maximal stroke extent so widened outlines
+            // do not wrap either; lines without visible ink keep the metric
+            // box.
+            bool inkHasBounds = false;
+            D2D1_RECT_F inkBounds{};
+            for (const Impl::CachedChar &ch : cached.chars) {
+                if (ch.bitmapGuide.has_value()) {
+                    if (ch.bitmapRect.right > ch.bitmapRect.left
+                        && ch.bitmapRect.bottom > ch.bitmapRect.top) {
+                        extendBounds(inkBounds, inkHasBounds, ch.bitmapRect);
+                    }
+                } else if (ch.geometry) {
+                    extendBounds(
+                        inkBounds,
+                        inkHasBounds,
+                        D2D1::RectF(ch.left, ch.top, ch.right, ch.bottom)
+                    );
+                }
+            }
+            if (inkHasBounds) {
+                cached.fillBounds = D2D1::RectF(
+                    0.0f,
+                    inkBounds.top - cached.maxVisualPad,
+                    std::max(cursor, 1.0f),
+                    inkBounds.bottom + cached.maxVisualPad
+                );
+            } else {
+                const float drawBottom = firstSlotDescent + std::floor(
+                    firstSlotEdge / layoutScale / 2.0f
+                ) * layoutScale;
+                const float inset = std::floor(
+                    (firstSlotEdge + firstSlotEdge2) / layoutScale / 2.0f
+                ) * layoutScale;
+                cached.fillBounds = D2D1::RectF(
+                    0.0f,
+                    drawBottom - maxDrawHeight + inset,
+                    std::max(cursor, 1.0f),
+                    std::max(drawBottom - inset, drawBottom - maxDrawHeight + inset + layoutScale)
+                );
+            }
         }
 
         if (!cached.hasRubyAnchor) {
@@ -1878,6 +1912,16 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     WipePoint{glyph.source->startMs, 0.0f},
                     WipePoint{glyph.source->endMs, 1.0f},
                 };
+            }
+            if (!style.vertical && rubyHasBounds) {
+                // Same glyph-ink vertical anchor as the main text (see the
+                // horizontal fillBounds pass above): ruby bands follow the
+                // reading's placed ink instead of the metric em box.
+                const float rubyInkPad = static_cast<float>(
+                    (rubyDrawEdge + rubyDrawEdge2 + 1) / 2
+                ) * layoutScale;
+                ruby.fillBounds.top = ruby.bounds.top - rubyInkPad;
+                ruby.fillBounds.bottom = ruby.bounds.bottom + rubyInkPad;
             }
             if (style.vertical && rubyHasBounds && !ruby.geometries.empty()) {
                 const float mainCellWidth = std::max(style.fontSize, 1.0f);

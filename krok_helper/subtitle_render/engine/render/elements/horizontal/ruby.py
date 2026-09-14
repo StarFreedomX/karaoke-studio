@@ -690,6 +690,14 @@ def layout_rubies(
         if not ruby_ink.isEmpty():
             gradient_rect.setLeft(float(ruby_ink.left()))
             gradient_rect.setRight(float(ruby_ink.right()))
+            # 与 n3_main_fill_rect 同口径：纵向按注音墨水并集锤定（加对称
+            # 描边余量），避免 em 盒位移 + 色带 wrap 把字顶涂成底色。
+            ruby_pad = visual_stroke_extent(
+                ruby_stroke_width(ruby_style),
+                ruby_stroke2_width(ruby_style),
+            )
+            gradient_rect.setTop(float(ruby_ink.top()) - ruby_pad)
+            gradient_rect.setBottom(float(ruby_ink.bottom()) + ruby_pad)
         wipe_segments, wipe_left, wipe_right, geometry_signature = (
             ports.ruby_wipe_geometry(
                 paint_ruby,

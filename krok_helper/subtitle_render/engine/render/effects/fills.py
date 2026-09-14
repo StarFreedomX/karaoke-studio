@@ -143,9 +143,16 @@ def linear_gradient_brush(fill: PaintFill, rect: QRectF, angle_deg: int) -> QBru
 
 
 def split_vertical_brush(fill: PaintFill, rect: QRectF) -> QBrush:
-    """Return an exact hard-band texture, cached by height and stop values."""
+    """Return an exact hard-band texture, cached by height and stop values.
+
+    The texture extends ``margin`` rows of the first/last band colour beyond
+    the box on both sides (clamp semantics): transient overshoot — the active
+    karaoke glyph lifts a few pixels during its wipe — then keeps the nearest
+    band colour instead of wrapping to the opposite end.
+    """
     stops = split_gradient_stops(fill)
     height = max(int(math.ceil(rect.height())), 1)
+    margin = max(64, height // 2)
     stop_key = tuple(
         (position, valid_color(color, fill.color).rgba())
         for position, color in stops
@@ -156,25 +163,32 @@ def split_vertical_brush(fill: PaintFill, rect: QRectF) -> QBrush:
         if base is not None:
             HARD_BAND_BRUSH_CACHE.move_to_end(key)
         else:
-            image = QImage(1, height, QImage.Format.Format_ARGB32_Premultiplied)
+            band_count = height + margin * 2
+            image = QImage(1, band_count, QImage.Format.Format_ARGB32_Premultiplied)
             band_index = 0
-            for y in range(height):
-                position = (y + 0.5) * 100.0 / height
-                while (
-                    band_index + 1 < len(stops)
-                    and stops[band_index + 1][0] <= position
-                ):
-                    band_index += 1
-                image.setPixelColor(
-                    0,
-                    y,
-                    valid_color(stops[band_index][1], fill.color),
-                )
+            for y in range(band_count):
+                position = (y - margin + 0.5) * 100.0 / height
+                if position < 0.0:
+                    color = stops[0][1]
+                elif position > 100.0:
+                    color = stops[-1][1]
+                else:
+                    while (
+                        band_index + 1 < len(stops)
+                        and stops[band_index + 1][0] <= position
+                    ):
+                        band_index += 1
+                    color = stops[band_index][1]
+                image.setPixelColor(0, y, valid_color(color, fill.color))
             base = QBrush(image)
             HARD_BAND_BRUSH_CACHE[key] = base
             while len(HARD_BAND_BRUSH_CACHE) > HARD_BAND_BRUSH_CACHE_MAX:
                 HARD_BAND_BRUSH_CACHE.popitem(last=False)
-    return anchor_texture_brush(base, rect)
+    anchored = QBrush(base)
+    transform = QTransform()
+    transform.translate(rect.left(), rect.top() - margin)
+    anchored.setTransform(transform)
+    return anchored
 
 
 def split_gradient_stops(fill: PaintFill) -> list[tuple[float, str]]:

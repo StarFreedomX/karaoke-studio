@@ -210,12 +210,22 @@ void paintGlyphRunTextLayer(
     const LineLayout &layout,
     const GlyphRunRef &run,
     const ResolvedStyle &style,
-    bool after
+    bool after,
+    qreal lineInkTop,
+    qreal lineInkBottom
 ) {
     const QPainterPath path = glyphRunPath(line, layout, run);
-    const QRectF rect = glyphRunRect(line, layout, run);
+    QRectF rect = glyphRunRect(line, layout, run);
     if (path.isEmpty() || rect.isEmpty()) {
         return;
+    }
+    // Glyph-ink vertical anchor shared by every run of the line (mirrors the
+    // Painter's ink-based n3_main_fill_rect): MilleFeuille and vertical
+    // gradient bands stay glued to the drawn glyphs instead of the metric
+    // box, which displaced them on faces whose ink is taller than the em.
+    if (std::isfinite(lineInkTop) && std::isfinite(lineInkBottom)) {
+        rect.setTop(lineInkTop);
+        rect.setBottom(lineInkBottom);
     }
     const PaintFillSpec &fill = after ? style.afterFill : style.baseFill;
     const PaintFillSpec &stroke = after ? style.afterStrokeFill : style.beforeStrokeFill;
@@ -266,12 +276,39 @@ void paintGlyphRunTextLayers(
     bool after
 ) {
     const auto runs = glyphRunsForLayout(line, layout, lineStyle);
+    qreal inkTop = std::numeric_limits<qreal>::infinity();
+    qreal inkBottom = -std::numeric_limits<qreal>::infinity();
+    int strokePad = 0;
     for (const GlyphRunRef &run : runs) {
         if (run.start >= run.end) {
             continue;
         }
         const ResolvedStyle &style = layoutCharStyle(layout, lineStyle, run.start);
-        paintGlyphRunTextLayer(painter, line, layout, run, style, after);
+        strokePad = std::max(
+            strokePad,
+            (std::max(style.strokeWidthPx, 0) + std::max(style.stroke2WidthPx, 0) + 1) / 2
+        );
+        const QPainterPath path = glyphRunPath(line, layout, run);
+        if (path.isEmpty()) {
+            continue;
+        }
+        const QRectF bounds = path.boundingRect();
+        if (bounds.isEmpty()) {
+            continue;
+        }
+        inkTop = std::min(inkTop, bounds.top());
+        inkBottom = std::max(inkBottom, bounds.bottom());
+    }
+    if (std::isfinite(inkTop) && std::isfinite(inkBottom)) {
+        inkTop -= strokePad;
+        inkBottom += strokePad;
+    }
+    for (const GlyphRunRef &run : runs) {
+        if (run.start >= run.end) {
+            continue;
+        }
+        const ResolvedStyle &style = layoutCharStyle(layout, lineStyle, run.start);
+        paintGlyphRunTextLayer(painter, line, layout, run, style, after, inkTop, inkBottom);
     }
 }
 

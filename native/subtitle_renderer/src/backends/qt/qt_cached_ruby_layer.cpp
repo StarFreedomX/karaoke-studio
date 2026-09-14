@@ -67,12 +67,21 @@ RubyLayerImage buildRubyTextLayer(
         localBaseline,
         ruby.targetWidth
     );
-    const QRectF localRect(
+    QRectF localRect(
         padLeft,
         localBaseline - rubyMetrics.ascent(),
         ruby.readingWidth,
         rubyMetrics.height()
     );
+    // Glyph-ink vertical anchor shared with the Painter path (see the ruby
+    // gradient rect): vertical bands follow the reading's actual ink instead
+    // of the metric box.
+    const QRectF localInk = localPath.boundingRect();
+    if (!localInk.isEmpty()) {
+        const double rubyPad = visualStrokeExtentForWidths(strokeWidth, stroke2Width);
+        localRect.setTop(localInk.top() - rubyPad);
+        localRect.setBottom(localInk.bottom() + rubyPad);
+    };
 
     QPainter layerPainter(&image);
     layerPainter.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);

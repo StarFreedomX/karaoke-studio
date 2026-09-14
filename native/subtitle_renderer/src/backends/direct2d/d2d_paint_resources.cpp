@@ -145,9 +145,11 @@ Microsoft::WRL::ComPtr<ID2D1Brush> createPaintBrush(
             stops.data(),
             static_cast<UINT32>(stops.size()),
             D2D1_GAMMA_2_2,
-            paint.mode == "split_vertical"
-                ? D2D1_EXTEND_MODE_WRAP
-                : D2D1_EXTEND_MODE_CLAMP,
+            // Split bands clamp outside the fill rect: the active karaoke
+            // glyph transiently lifts beyond the ink-anchored box during its
+            // wipe, and wrapping would paint that overshoot in the opposite
+            // band's colour.
+            D2D1_EXTEND_MODE_CLAMP,
             collection.ReleaseAndGetAddressOf()
         ),
         "Create paint gradient stops",

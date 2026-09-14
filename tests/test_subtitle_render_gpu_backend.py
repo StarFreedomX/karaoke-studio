@@ -9642,6 +9642,12 @@ def test_gpu_vertical_gradient_is_not_retargeted_by_matching_ruby_glow(
     payload = frames[0]
     bounds = _payload_alpha_bounds(payload)
     main_top = (bounds[1] + bounds[3]) // 2
+    top_half_pixels = [
+        payload[y * 640 * 4 + x * 4 : y * 640 * 4 + x * 4 + 4]
+        for y in range(bounds[1], main_top)
+        for x in range(bounds[0], bounds[2] + 1)
+        if payload[y * 640 * 4 + x * 4 + 3] >= 240
+    ]
     opaque_main_pixels = [
         payload[y * 640 * 4 + x * 4 : y * 640 * 4 + x * 4 + 4]
         for y in range(main_top, bounds[3] + 1)
@@ -9650,14 +9656,21 @@ def test_gpu_vertical_gradient_is_not_retargeted_by_matching_ruby_glow(
     ]
     red_pixels = sum(
         pixel[0] > pixel[1] + 80 and pixel[0] > pixel[2] + 80
-        for pixel in opaque_main_pixels
+        for pixel in top_half_pixels
     )
     green_pixels = sum(
         pixel[1] > pixel[0] + 50 and pixel[1] > pixel[2] + 50
         for pixel in opaque_main_pixels
     )
+    blue_pixels = sum(
+        pixel[2] > pixel[0] + 80 and pixel[2] > pixel[1] + 80
+        for pixel in opaque_main_pixels
+    )
+    # 墨水锚定后红带位于字形上半（含注音顶部），绿/蓝带覆盖下半区；
+    # 三段都有足量像素即证明主渐变没有被 ruby 画刷钳成单端色。
     assert red_pixels > 100
     assert green_pixels > 1_000
+    assert blue_pixels > 100
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
@@ -9717,15 +9730,16 @@ def test_gpu_g3_split_vertical_preserves_painter_hard_bands(monkeypatch) -> None
         index for index in range(1, len(painter_rows))
         if painter_rows[index] != painter_rows[index - 1]
     ]
-    # Painter's one-pixel hard-band texture and N3's bitmap brush both wrap
-    # outside the shared fill rectangle. Direct2D must begin in the same tail
-    # band and hit the three visible boundaries at the same scanlines.
-    assert gpu_rows[0] == painter_rows[0] == 2
-    assert len(gpu_transitions) >= 3
-    assert len(painter_transitions) >= 3
-    assert gpu_transitions[:3] == pytest.approx(painter_transitions[:3], abs=1)
-    assert [gpu_rows[index] for index in gpu_transitions[:3]] == [0, 1, 2]
-    assert [painter_rows[index] for index in painter_transitions[:3]] == [0, 1, 2]
+    # Both anchors follow the glyph ink union (padded by the symmetric stroke
+    # extent), so the band texture never wraps outside the fill rectangle:
+    # the ink starts in the top band and the 30% / 65% hard boundaries must
+    # hit the same scanlines on both backends.
+    assert gpu_rows[0] == painter_rows[0] == 0
+    assert len(gpu_transitions) >= 2
+    assert len(painter_transitions) >= 2
+    assert gpu_transitions[:2] == pytest.approx(painter_transitions[:2], abs=1)
+    assert [gpu_rows[index] for index in gpu_transitions[:2]] == [1, 2]
+    assert [painter_rows[index] for index in painter_transitions[:2]] == [1, 2]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")

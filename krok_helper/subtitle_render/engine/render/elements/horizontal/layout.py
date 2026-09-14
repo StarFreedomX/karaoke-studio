@@ -607,47 +607,98 @@ def glyph_run_rect(glyphs: list[GlyphLayout], baseline_y: int) -> QRectF:
     )
 
 
-def glyph_ink_x_bounds(
+def glyph_ink_bounds(
     glyphs: list[GlyphLayout], baseline_y: int
-) -> tuple[float, float] | None:
-    """Return the visible horizontal ink union for a glyph collection."""
+) -> tuple[float, float, float, float] | None:
+    """Return the visible ink union (left, right, top, bottom) for glyphs."""
 
     ink_left: float | None = None
     ink_right: float | None = None
+    ink_top: float | None = None
+    ink_bottom: float | None = None
     for glyph in glyphs:
         if glyph_is_bitmap_guide(glyph):
             symbol = glyph.vector_glyph
-            content_width, _content_height = bitmap_guide_content_size(
+            content_width, content_height = bitmap_guide_content_size(
                 symbol, glyph.style
             )
             left = float(glyph.left + int(symbol.bitmap_margin_left_px))
             right = left + float(max(int(content_width), 1))
+            bottom = float(
+                baseline_y
+                + bitmap_guide_anchor_descent(glyph)
+                - int(symbol.bitmap_margin_bottom_px)
+            )
+            top = bottom - float(max(int(content_height), 1))
         else:
             bounds = glyph_path(glyph, baseline_y).boundingRect()
             if bounds.isEmpty():
                 continue
             left = float(bounds.left())
             right = float(bounds.right())
+            top = float(bounds.top())
+            bottom = float(bounds.bottom())
         ink_left = left if ink_left is None else min(ink_left, left)
         ink_right = right if ink_right is None else max(ink_right, right)
-    if ink_left is None or ink_right is None or ink_right <= ink_left:
+        ink_top = top if ink_top is None else min(ink_top, top)
+        ink_bottom = bottom if ink_bottom is None else max(ink_bottom, bottom)
+    if (
+        ink_left is None
+        or ink_right is None
+        or ink_top is None
+        or ink_bottom is None
+        or ink_right <= ink_left
+    ):
         return None
-    return ink_left, ink_right
+    return ink_left, ink_right, ink_top, ink_bottom
+
+
+def glyph_ink_x_bounds(
+    glyphs: list[GlyphLayout], baseline_y: int
+) -> tuple[float, float] | None:
+    """Return the visible horizontal ink union for a glyph collection."""
+
+    bounds = glyph_ink_bounds(glyphs, baseline_y)
+    if bounds is None:
+        return None
+    return bounds[0], bounds[1]
 
 
 def n3_main_fill_rect(layout: TextLayout, baseline_y: int) -> QRectF:
     """Return the shared brush area for one main-text line.
 
-    The vertical extent keeps the established N3 ``DrawLineInfo`` semantics,
-    while the horizontal extent follows the union of visible glyph ink.  The
-    latter deliberately excludes advances, whitespace, and letter spacing;
-    inline SVG guide symbols participate through :func:`glyph_path`, and
-    bitmap guides use their visible content box.
+    Both extents follow the union of visible glyph ink so vertical gradients
+    and MilleFeuille splits stay aligned with the drawn glyphs: anchoring to
+    the em-box metric box systematically displaced the bands for faces whose
+    ink is taller than the em (Meiryo, Noto Sans JP, ...), and the wrapping
+    band texture then painted the glyph tops in the bottom band colour.  The
+    union is padded by the maximal symmetric stroke extent so widened
+    outlines do not wrap the band texture; advances, whitespace, and letter
+    spacing stay excluded, and bitmap guides participate through their
+    visible content box.  Lines without visible ink fall back to the N3
+    ``DrawLineInfo`` metric box.
     """
     glyphs = layout.glyphs
     if not glyphs:
         return QRectF(layout.line_rect)
 
+    ink = glyph_ink_bounds(glyphs, baseline_y)
+    if ink is None:
+        return _n3_main_metrics_fill_rect(layout, baseline_y)
+    ink_left, ink_right, ink_top, ink_bottom = ink
+    pad = role_visual_text_padding(layout)
+    return QRectF(
+        ink_left,
+        ink_top - pad,
+        max(ink_right - ink_left, 1.0),
+        float(max(ink_bottom - ink_top + pad * 2, 1.0)),
+    )
+
+
+def _n3_main_metrics_fill_rect(layout: TextLayout, baseline_y: int) -> QRectF:
+    """Metric fallback of :func:`n3_main_fill_rect` for ink-free lines."""
+
+    glyphs = layout.glyphs
     first = glyphs[0]
     font_size = max(int(first.font.pixelSize()), 1)
     metric_total = max(first.metrics.ascent() + first.metrics.descent(), 1)
@@ -667,16 +718,10 @@ def n3_main_fill_rect(layout: TextLayout, baseline_y: int) -> QRectF:
     top = draw_top + inset
     bottom = draw_bottom - inset
 
-    ink_bounds = glyph_ink_x_bounds(glyphs, baseline_y)
-    if ink_bounds is None:
-        ink_left = float(layout.line_rect.left())
-        ink_right = float(layout.line_rect.right())
-    else:
-        ink_left, ink_right = ink_bounds
     return QRectF(
-        ink_left,
+        float(layout.line_rect.left()),
         top,
-        max(ink_right - ink_left, 1.0),
+        max(float(layout.line_rect.width()), 1.0),
         float(max(bottom - top, 1.0)),
     )
 

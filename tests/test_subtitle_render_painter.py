@@ -2400,7 +2400,7 @@ def test_n3_vertical_gradient_uses_render_target_local_height(qapp):
     )
 
 
-def test_main_fill_rect_uses_glyph_ink_x_and_n3_vertical_box(qapp):
+def test_main_fill_rect_uses_glyph_ink_x_and_ink_vertical_box(qapp):
     from krok_helper.subtitle_render.engine.render.elements.horizontal import (
         layout as horizontal_layout,
     )
@@ -2441,25 +2441,17 @@ def test_main_fill_rect_uses_glyph_ink_x_and_n3_vertical_box(qapp):
     assert first.style.stroke_width_px == 11
     assert first.brush_style is not None
     assert first.brush_style.stroke_width_px == 3
-    font_size = first.font.pixelSize()
-    metric_total = first.metrics.ascent() + first.metrics.descent()
-    descent = font_size * first.metrics.descent() // metric_total
-    draw_bottom = layout.baseline_y + descent + first.style.stroke_width_px // 2
-    draw_height = max(
-        glyph.font.pixelSize() + glyph.style.stroke_width_px
-        for glyph in layout.text_layout.glyphs
-    )
-    inset = (
-        first.brush_style.stroke_width_px + first.brush_style.stroke2_width_px
-    ) // 2
 
-    assert fill_rect.top() == pytest.approx(draw_bottom - draw_height + inset)
-    assert fill_rect.bottom() == pytest.approx(draw_bottom - inset)
-    assert fill_rect.height() == pytest.approx(draw_height - inset * 2)
+    # 纵向按字形墨水并集锚定，外加整行最大对称描边余量：拼色/纵渐变的
+    # 色带不再被 em 盒位移，wrap 纹理也不会把超出盒顶的墨水涂成底色。
+    pad = horizontal_layout.role_visual_text_padding(layout.text_layout)
+    assert pad == max((11 + 0 + 1) // 2, (7 + 5 + 1) // 2)
     ink = QPainterPath()
     for glyph in layout.text_layout.glyphs:
         ink.addPath(subtitle_painter._glyph_path(glyph, layout.baseline_y))
     ink_bounds = ink.boundingRect()
+    assert fill_rect.top() == pytest.approx(ink_bounds.top() - pad)
+    assert fill_rect.bottom() == pytest.approx(ink_bounds.bottom() + pad)
     assert fill_rect.left() == pytest.approx(ink_bounds.left())
     assert fill_rect.right() == pytest.approx(ink_bounds.right())
     assert fill_rect.left() > layout.line_rect.left()
@@ -5844,7 +5836,7 @@ def test_ruby_target_width_uses_main_draw_width_not_ink_bounds(qapp):
     assert ruby_layouts[0].reading_width > ruby_layouts[0].target_width
 
 
-def test_ruby_gradient_reference_uses_n3_ruby_line_box(qapp):
+def test_ruby_gradient_reference_uses_reading_ink_box(qapp):
     line = TimingLine(
         chars=[
             TimingChar(text="A", start_ms=1000),
@@ -5883,13 +5875,6 @@ def test_ruby_gradient_reference_uses_n3_ruby_line_box(qapp):
     assert ruby_layers
     ruby_layout = ruby_layers[0].ruby_layout
 
-    vertical_expected = subtitle_painter._n3_ruby_fill_rect(
-        ruby_layout.x,
-        ruby_layout.target_width,
-        ruby_layout.baseline_y,
-        layout.ruby_metrics,
-        ruby_layout.style,
-    )
     ruby_path, _layout_rect = horizontal_ruby.ruby_text_path_and_rect(
         ruby_layout.ruby.reading,
         ruby_layout.font,
@@ -5901,8 +5886,17 @@ def test_ruby_gradient_reference_uses_n3_ruby_line_box(qapp):
         ruby_layout.ruby.kanji,
     )
     ink_bounds = ruby_path.boundingRect()
-    assert ruby_layout.gradient_rect.top() == pytest.approx(vertical_expected.top())
-    assert ruby_layout.gradient_rect.bottom() == pytest.approx(vertical_expected.bottom())
+    # 与主文字同口径：纵向按注音墨水并集（加对称描边余量）锚定。
+    ruby_pad = horizontal_ruby.visual_stroke_extent(
+        horizontal_ruby.ruby_stroke_width(ruby_layout.style),
+        horizontal_ruby.ruby_stroke2_width(ruby_layout.style),
+    )
+    assert ruby_layout.gradient_rect.top() == pytest.approx(
+        ink_bounds.top() - ruby_pad
+    )
+    assert ruby_layout.gradient_rect.bottom() == pytest.approx(
+        ink_bounds.bottom() + ruby_pad
+    )
     assert ruby_layout.gradient_rect.left() == pytest.approx(ink_bounds.left())
     assert ruby_layout.gradient_rect.right() == pytest.approx(ink_bounds.right())
     assert ruby_layout.gradient_rect.height() < layout.line_rect.height()

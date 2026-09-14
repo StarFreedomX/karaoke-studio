@@ -60,6 +60,15 @@ from krok_helper.subtitle_render.frontend.widgets.theme import palette
 from krok_helper.subtitle_render.n3.font_catalog import resolve_qt_font_family
 
 
+def _ink_fill_rect(path: QPainterPath, fallback: QRectF, pad: int) -> QRectF:
+    """Glyph-ink fill anchor mirroring ``n3_main_fill_rect`` for the sample."""
+
+    ink = path.boundingRect()
+    if ink.isEmpty():
+        return fallback
+    return QRectF(ink).adjusted(-pad, -pad, pad, pad)
+
+
 def _resolve_font_preview_families(style: Style) -> Style:
     """Materialize Qt runtime family names before crossing the worker boundary.
 
@@ -347,7 +356,13 @@ class _FontSampleCanvas(QWidget):
                 style=main_style,
                 ratio=0.5,
                 clip_rect=main_rect,
-                fill_rect=main_rect,
+                # 与主渲染 n3_main_fill_rect 同口径：拼色/纵渐变按墨水并集
+                # 锚定，预览所见即成片所得。
+                fill_rect=_ink_fill_rect(
+                    main_path,
+                    main_rect,
+                    math.ceil((stroke + stroke2) / 2),
+                ),
             )
             _paint_ruby_karaoke_fragment(
                 painter,
@@ -355,7 +370,11 @@ class _FontSampleCanvas(QWidget):
                 ruby_rect,
                 0.5,
                 ruby_style,
-                fill_rect=ruby_rect,
+                fill_rect=_ink_fill_rect(
+                    ruby_path,
+                    ruby_rect,
+                    math.ceil((ruby_stroke + ruby_stroke2) / 2),
+                ),
                 horizontal_fill_rect=main_rect,
             )
         finally:
