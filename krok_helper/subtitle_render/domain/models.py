@@ -1097,7 +1097,12 @@ class Style:
     """段边缘页替换用的退场动画。"""
 
     # 指示灯（Sayatoo SignalsLits.sx：lit.* / signals.duration）
+    # 形状指示灯与音量柱是两个独立模块。lit_enabled 只控制悬浮形状灯；
+    # volume_enabled 控制会插入字幕行首、参与行宽布局的音量柱。
     lit_enabled: bool = False
+    volume_enabled: bool = False
+    # Keep the serialized/default discriminator for source compatibility with
+    # direct Style(lit_enabled=True) callers; the new UI always writes a shape.
     lit_style: LitStyle = "volume"
     lit_number: int = 4
     lit_size: int = 32
@@ -1121,6 +1126,11 @@ class Style:
     lit_transition_angle_deg: int = 0
     lit_transition_distance: int = 0
     signals_duration_ms: int = 4000
+    volume_duration_ms: int = 4000
+    volume_waiting_time_ms: int = 0
+    volume_time_offset_ms: int = 0
+    volume_stroke_width: int = 2
+    volume_opacity_pct: int = 100
     volume_size: int = 48
     volume_offset_x: int = 0
     volume_offset_y: int = 0
@@ -1676,6 +1686,11 @@ def style_from_dict(payload: object) -> Style:
             "lit_transition_angle_deg",
             "lit_transition_distance",
             "signals_duration_ms",
+            "volume_duration_ms",
+            "volume_waiting_time_ms",
+            "volume_time_offset_ms",
+            "volume_stroke_width",
+            "volume_opacity_pct",
             "volume_size",
             "volume_offset_x",
             "volume_offset_y",
@@ -1713,6 +1728,7 @@ def style_from_dict(payload: object) -> Style:
             "section_edge_anim_enabled",
             "section_edge_both_animations",
             "lit_enabled",
+            "volume_enabled",
             "lit_shadow",
         }:
             changes[key] = bool(value)
@@ -1845,6 +1861,17 @@ def style_from_dict(payload: object) -> Style:
         changes["ruby_colors_follow_main"] = (
             changes.get("ruby_karaoke_colors") is None
         )
+    # 旧工程用 lit_enabled + lit_style=volume 表示音量柱。新版把两个模块
+    # 分开；只有缺少新字段时才迁移，避免覆盖新版工程的显式组合。
+    if "volume_enabled" not in payload and changes.get("lit_style") == "volume":
+        changes["volume_enabled"] = bool(changes.get("lit_enabled", False))
+        changes["lit_enabled"] = False
+        changes["lit_style"] = "circle"
+        changes["volume_duration_ms"] = changes.get("signals_duration_ms", 4000)
+        changes["volume_waiting_time_ms"] = changes.get("lit_waiting_time_ms", 0)
+        changes["volume_time_offset_ms"] = changes.get("lit_time_offset_ms", 0)
+        changes["volume_stroke_width"] = changes.get("lit_stroke_width", 2)
+        changes["volume_opacity_pct"] = changes.get("lit_opacity_pct", 100)
     _migrate_title_references(changes)
     return ensure_page_layout_defaults(Style(**changes))
 

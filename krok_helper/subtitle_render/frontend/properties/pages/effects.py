@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import CheckBox
 
 from krok_helper.subtitle_render.frontend.properties.controls.inputs import (
+    CanvasSliderSpinBox,
     WheelFocusedComboBox,
 )
 from krok_helper.subtitle_render.frontend.properties.controls.layout import (
@@ -55,21 +56,19 @@ class EffectsPropertyPageBuilder:
         self._host = host
         self._spin_factory = spin_factory
 
-    def make_lit_section(self) -> QFrame:
+    def make_volume_section(self) -> QFrame:
+        """Build the line-leading volume-bar module as an independent card."""
         host = self._host
-        section, layout = property_section("指示灯", switch=True)
-        host._lit_section = section
-        host._lit_enabled_switch = section.header_switch
-        host._lit_enabled_switch.toggled.connect(
-            lambda checked: host._update_style(lit_enabled=checked)
+        section, layout = property_section("音量柱", switch=True)
+        host._volume_section = section
+        host._volume_enabled_switch = section.header_switch
+        host._volume_enabled_switch.toggled.connect(
+            lambda checked: host._update_style(volume_enabled=checked)
         )
-        host._lit_volume_groups = []
-        host._lit_shape_groups = []
-        host._lit_group_grids = {}
+        host._volume_group_grids = {}
 
         def group(
             title: str,
-            category: str | None,
             *,
             collapsed: bool = False,
             min_column_width: int = 135,
@@ -77,10 +76,74 @@ class EffectsPropertyPageBuilder:
         ):
             box = SubGroup(title, collapsed=collapsed, parent=section)
             layout.addWidget(box)
-            if category == "volume":
-                host._lit_volume_groups.append(box)
-            elif category == "shape":
-                host._lit_shape_groups.append(box)
+            fields = ResponsiveFieldGrid(
+                box,
+                min_column_width=min_column_width,
+                max_columns=max_columns,
+            )
+            box.grid.addWidget(fields, 0, 0, 1, 2)
+            host._volume_group_grids[title] = fields
+
+            def add(label: str | None, control: QWidget) -> None:
+                fields.add_widget(property_field(label, control) if label is not None else control)
+            return add
+
+        add = group("时序", max_columns=3)
+        self._add_spin(add, "_volume_duration_spin", "持续时间", 0, 60_000, "volume_duration_ms", suffix=" ms")
+        self._add_spin(add, "_volume_waiting_time_spin", "结束等待", 0, 60_000, "volume_waiting_time_ms", suffix=" ms")
+        self._add_spin(add, "_volume_time_offset_spin", "时间偏移", -60_000, 60_000, "volume_time_offset_ms", suffix=" ms")
+
+        add = group("布局", min_column_width=220, max_columns=2)
+        self._add_canvas_spin(add, "_volume_size_spin", "整体高度", 4, 240, "volume_size", "short_quarter", suffix=" px")
+        self._add_canvas_spin(add, "_volume_column_width_spin", "柱宽", 1, 120, "volume_column_width", "short_twelfth", suffix=" px")
+        self._add_canvas_spin(add, "_volume_column_count_spin", "柱数", 1, 16, "volume_column_count", "hard")
+        self._add_canvas_spin(add, "_volume_column_spacing_spin", "柱间距", 0, 120, "volume_column_spacing", "short_twelfth", suffix=" px")
+        self._add_canvas_spin(add, "_volume_ratio_spin", "首尾高度比", 1, 20, "volume_ratio", "hard", transform=float)
+        host._volume_align_combo = self._combo(section, (("顶部", 0), ("居中", 1), ("底部", 2)), "volume_align", transform=int)
+        add("垂直对齐", host._volume_align_combo)
+        self._add_canvas_spin(add, "_volume_x_spin", "水平偏移", -4000, 4000, "volume_offset_x", "x", suffix=" px")
+        self._add_canvas_spin(add, "_volume_y_spin", "垂直偏移", -4000, 4000, "volume_offset_y", "y", suffix=" px")
+        add = group("动画", collapsed=True, max_columns=3)
+        self._add_spin(add, "_volume_flash_times_spin", "闪烁次数", 1, 20, "volume_flash_times")
+        self._add_spin(add, "_volume_flash_duration_spin", "闪烁占比", 0, 100, "volume_flash_duration_ratio", suffix=" %", transform=lambda value: value / 100.0)
+        self._add_spin(add, "_volume_transition_ratio_spin", "覆盖过渡", 0, 100, "volume_transition_ratio_pct", suffix=" %")
+
+        add = group("外观", max_columns=3)
+        self._add_spin(add, "_volume_stroke_width_spin", "描边宽度", 0, 40, "volume_stroke_width", suffix=" px")
+        self._add_spin(add, "_volume_opacity_spin", "透明度", 0, 100, "volume_opacity_pct", suffix=" %")
+        self._add_color(add, "_volume_fill_btn", "柱填充色", "volume_fill_color")
+        self._add_color(add, "_volume_stroke_btn", "柱描边色", "volume_stroke_color")
+        self._add_color(add, "_volume_overlay_fill_btn", "覆盖填充色", "volume_overlay_fill_color")
+        self._add_color(add, "_volume_overlay_stroke_btn", "覆盖描边色", "volume_overlay_stroke_color")
+        section.set_expanded(False)
+        return section
+
+    def make_lit_section(self) -> QFrame:
+        host = self._host
+        section, layout = property_section("指示灯", switch=True)
+        host._lit_section = section
+        host._lit_enabled_switch = section.header_switch
+        host._lit_enabled_switch.toggled.connect(
+            lambda checked: host._update_style(
+                lit_enabled=checked,
+                **(
+                    {"lit_style": host._lit_style_combo.currentData() or "circle"}
+                    if checked
+                    else {}
+                ),
+            )
+        )
+        host._lit_group_grids = {}
+
+        def group(
+            title: str,
+            *,
+            collapsed: bool = False,
+            min_column_width: int = 135,
+            max_columns: int = 4,
+        ):
+            box = SubGroup(title, collapsed=collapsed, parent=section)
+            layout.addWidget(box)
             fields = ResponsiveFieldGrid(
                 box,
                 min_column_width=min_column_width,
@@ -99,66 +162,29 @@ class EffectsPropertyPageBuilder:
         host._lit_style_combo = self._combo(
             section,
             (
-                ("音量柱", "volume"),
                 ("圆形", "circle"),
                 ("方形", "square"),
                 ("圆角", "rounded"),
             ),
             "lit_style",
         )
-        add = group("通用", None, min_column_width=130, max_columns=5)
-        add("样式", host._lit_style_combo)
-        self._add_spin(add, "_lit_duration_spin", "持续", 0, 60_000, "signals_duration_ms", suffix=" ms")
-        self._add_spin(add, "_lit_waiting_time_spin", "等待", 0, 60_000, "lit_waiting_time_ms", suffix=" ms")
-        self._add_spin(add, "_lit_stroke_width_spin", "描边宽度", 0, 40, "lit_stroke_width", suffix=" px")
-        self._add_spin(add, "_lit_opacity_spin", "透明度", 0, 100, "lit_opacity_pct", suffix=" %")
+        add = group("布局", min_column_width=220, max_columns=2)
+        add("形状", host._lit_style_combo)
+        self._add_canvas_spin(add, "_lit_number_spin", "数量", 1, 8, "lit_number", "hard")
+        self._add_canvas_spin(add, "_lit_size_spin", "大小", 4, 160, "lit_size", "short_quarter", suffix=" px")
+        self._add_canvas_spin(add, "_lit_tracking_spin", "间距", 0, 200, "lit_tracking", "short_twelfth", suffix=" px")
+        self._add_canvas_spin(add, "_lit_x_spin", "水平偏移", -4000, 4000, "lit_offset_x", "x", suffix=" px")
+        self._add_canvas_spin(add, "_lit_y_spin", "垂直偏移", -4000, 4000, "lit_offset_y", "y", suffix=" px")
 
-        add = group("音量柱 · 布局", "volume", max_columns=4)
-        self._add_spin(add, "_volume_size_spin", "整体大小", 4, 240, "volume_size", suffix=" px")
-        self._add_spin(add, "_volume_column_width_spin", "柱条宽度", 1, 120, "volume_column_width", suffix=" px")
-        self._add_spin(add, "_volume_column_count_spin", "柱条数量", 1, 16, "volume_column_count")
-        self._add_spin(add, "_volume_column_spacing_spin", "柱条间距", 0, 120, "volume_column_spacing", suffix=" px")
-        self._add_spin(add, "_volume_ratio_spin", "前后比率", 1, 20, "volume_ratio", transform=float)
-        host._volume_align_combo = self._combo(
-            section,
-            (("顶部", 0), ("居中", 1), ("底部", 2)),
-            "volume_align",
-            transform=int,
-        )
-        add("柱条对齐", host._volume_align_combo)
-        self._add_spin(add, "_volume_x_spin", "X", -4000, 4000, "volume_offset_x")
-        self._add_spin(add, "_volume_y_spin", "Y", -4000, 4000, "volume_offset_y")
-
-        add = group("音量柱 · 动画", "volume", collapsed=True, max_columns=3)
-        self._add_spin(add, "_volume_flash_times_spin", "闪烁次数", 1, 20, "volume_flash_times")
-        self._add_spin(
-            add,
-            "_volume_flash_duration_spin",
-            "闪烁占比",
-            0,
-            100,
-            "volume_flash_duration_ratio",
-            suffix=" %",
-            transform=lambda value: value / 100.0,
-        )
-        self._add_spin(add, "_volume_transition_ratio_spin", "覆盖过渡", 0, 100, "volume_transition_ratio_pct", suffix=" %")
-
-        add = group("音量柱 · 颜色", "volume", max_columns=4)
-        self._add_color(add, "_volume_fill_btn", "柱填充色", "volume_fill_color")
-        self._add_color(add, "_volume_stroke_btn", "柱描边色", "volume_stroke_color")
-        self._add_color(add, "_volume_overlay_fill_btn", "覆盖填充色", "volume_overlay_fill_color")
-        self._add_color(add, "_volume_overlay_stroke_btn", "覆盖描边色", "volume_overlay_stroke_color")
-
-        add = group("形状灯 · 布局", "shape", max_columns=5)
-        self._add_spin(add, "_lit_number_spin", "数量", 1, 8, "lit_number")
-        self._add_spin(add, "_lit_size_spin", "大小", 4, 160, "lit_size", suffix=" px")
-        self._add_spin(add, "_lit_tracking_spin", "间距", 0, 200, "lit_tracking", suffix=" px")
-        self._add_spin(add, "_lit_x_spin", "X", -4000, 4000, "lit_offset_x")
-        self._add_spin(add, "_lit_y_spin", "Y", -4000, 4000, "lit_offset_y")
-
-        add = group("形状灯 · 外观", "shape", max_columns=5)
+        add = group("时序", max_columns=3)
+        self._add_spin(add, "_lit_duration_spin", "持续时间", 0, 60_000, "signals_duration_ms", suffix=" ms")
+        self._add_spin(add, "_lit_waiting_time_spin", "结束等待", 0, 60_000, "lit_waiting_time_ms", suffix=" ms")
+        self._add_spin(add, "_lit_time_offset_spin", "时间偏移", -60_000, 60_000, "lit_time_offset_ms", suffix=" ms")
+        add = group("外观", max_columns=4)
         self._add_color(add, "_lit_fill_btn", "填充颜色", "lit_fill_color")
         self._add_color(add, "_lit_stroke_btn", "描边颜色", "lit_stroke_color")
+        self._add_spin(add, "_lit_stroke_width_spin", "描边宽度", 0, 40, "lit_stroke_width", suffix=" px")
+        self._add_spin(add, "_lit_opacity_spin", "透明度", 0, 100, "lit_opacity_pct", suffix=" %")
         self._add_spin(add, "_lit_edge_brightness_spin", "边缘亮度", 0, 100, "lit_edge_brightness_pct", suffix=" %")
         self._add_spin(add, "_lit_stroke_soften_spin", "描边柔化", 0, 40, "lit_stroke_soften", suffix=" px")
         host._lit_shadow_check = CheckBox("启用", section)
@@ -167,7 +193,7 @@ class EffectsPropertyPageBuilder:
         )
         add("阴影", host._lit_shadow_check)
 
-        add = group("形状灯 · 转场", "shape", collapsed=True, max_columns=4)
+        add = group("转场", collapsed=True, min_column_width=220, max_columns=2)
         host._lit_transition_mode_combo = self._combo(
             section,
             (("无", "none"), ("淡入淡出", "fade"), ("滑动", "slide")),
@@ -176,9 +202,8 @@ class EffectsPropertyPageBuilder:
         add("类型", host._lit_transition_mode_combo)
         self._add_spin(add, "_lit_transition_ratio_spin", "时长比例", 0, 100, "lit_transition_ratio_pct", suffix=" %")
         self._add_spin(add, "_lit_transition_angle_spin", "角度", -360, 360, "lit_transition_angle_deg", suffix=" °")
-        self._add_spin(add, "_lit_transition_distance_spin", "距离", 0, 800, "lit_transition_distance", suffix=" px")
+        self._add_canvas_spin(add, "_lit_transition_distance_spin", "距离", 0, 800, "lit_transition_distance", "short", suffix=" px")
 
-        host._sync_lit_style_visibility()
         section.set_expanded(False)
         return section
 
@@ -432,6 +457,41 @@ class EffectsPropertyPageBuilder:
             )
         )
         return combo
+
+    def _add_canvas_spin(
+        self,
+        add: Callable[[str | None, QWidget], None],
+        attribute: str,
+        label: str,
+        minimum: int,
+        maximum: int,
+        model_field: str,
+        range_kind: str,
+        *,
+        suffix: str = "",
+        transform: Callable[[int], Any] = lambda value: value,
+    ) -> None:
+        host = self._host
+        control = CanvasSliderSpinBox(
+            self._spin_factory(minimum, maximum, suffix=suffix)
+        )
+        setattr(host, attribute, control)
+        if range_kind == "hard":
+            # 无量纲参数（柱数/比例/数量）：滑块直接覆盖整个硬范围，
+            # 不随画布尺寸缩放，也无需注册画布刷新。
+            control.set_slider_range(minimum, maximum)
+        else:
+            register = getattr(host, "_register_canvas_slider", None)
+            if callable(register):
+                register(control, range_kind)
+            else:
+                control.set_slider_range(minimum, maximum)
+        control.valueChanged.connect(
+            lambda value, field=model_field, convert=transform: host._update_style(
+                **{field: convert(value)}
+            )
+        )
+        add(label, control)
 
     def _add_spin(
         self,

@@ -988,6 +988,7 @@ def test_signal_volume_uses_sayatoo_default_shape_and_line_anchor(qapp):
         dual_line_layout=False,
         line_lead_in_ms=0,
         lit_enabled=True,
+        lit_style="volume",
         lit_shadow=False,
         signals_duration_ms=1000,
     )

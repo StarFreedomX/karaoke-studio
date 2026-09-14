@@ -307,6 +307,12 @@ void applyGpuResolvedStyle(
     target.litTransitionAngleDeg = static_cast<float>(source.litTransitionAngleDeg);
     target.litTransitionDistance = static_cast<float>(source.litTransitionDistance * scale);
     target.signalsDurationMs = source.signalsDurationMs;
+    target.volumeEnabled = source.volumeEnabled;
+    target.volumeDurationMs = source.volumeDurationMs;
+    target.volumeWaitingTimeMs = source.volumeWaitingTimeMs;
+    target.volumeTimeOffsetMs = source.volumeTimeOffsetMs;
+    target.volumeStrokeWidth = static_cast<float>(source.volumeStrokeWidth * scale);
+    target.volumeOpacity = static_cast<float>(source.volumeOpacityPct) / 100.0f;
     target.volumeSize = static_cast<float>(source.volumeSize * scale);
     target.volumeOffsetX = static_cast<float>(source.volumeOffsetX * scale);
     target.volumeOffsetY = static_cast<float>(source.volumeOffsetY * scale);

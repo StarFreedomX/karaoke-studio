@@ -1238,7 +1238,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     }
                 }
             }
-            if (charIndex + 1 < sourceLine.chars.size()) {
+            if (layoutWidth <= 0.0f) {
+                // A cell collapsed to zero width (negative-margin bitmap
+                // guides) is fully invisible in layout; it must not consume
+                // letter spacing either, or the following text drifts by one
+                // spacing relative to the Python layout.
+            } else if (charIndex + 1 < sourceLine.chars.size()) {
                 // N3's AlignOneLine never lets a sufficiently negative
                 // LyricsInterval move the next character back past this one.
                 cursor += std::max(layoutWidth + charStyle.letterSpacing, 0.0f);

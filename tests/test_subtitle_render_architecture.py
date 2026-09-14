@@ -4858,6 +4858,21 @@ def test_subtitle_property_panel_delegates_indicator_construction() -> None:
     }
     assert calls == {"make_lit_section"}
 
+    volume_method = next(
+        node
+        for node in panel_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_make_volume_section"
+    )
+    volume_calls = {
+        node.func.attr
+        for node in ast.walk(volume_method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "_effects_page_builder"
+    }
+    assert volume_calls == {"make_volume_section"}
+
 
 def test_subtitle_property_panel_delegates_viewport_construction() -> None:
     panel_path = ROOT / "frontend" / "properties" / "property_panel.py"

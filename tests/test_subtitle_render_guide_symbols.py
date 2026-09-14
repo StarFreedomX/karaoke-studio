@@ -1587,6 +1587,77 @@ def test_extreme_negative_margin_keeps_ordered_layout_and_wipe(tmp_path):
     assert any(frame.constBits().asstring(frame.sizeInBytes()))
 
 
+def test_collapsed_zero_width_cell_consumes_no_letter_spacing(tmp_path):
+    """零宽（负余白压瘪）guide 单元格不占字间距（用户拍板口径）。
+
+    行内有字间距时，压瘪的占位不能让行宽凭空多出一份 spacing，
+    后续文字要直接贴上前一个可见字符——与纯文本行完全同宽。
+    line_text_width / char_left_positions / build_text_layout 三处同口径。
+    """
+    from krok_helper.subtitle_render.engine.render.elements.horizontal.positioning import (
+        line_total_width,
+    )
+    from krok_helper.subtitle_render.engine.text import (
+        char_left_positions,
+        line_text_width,
+    )
+
+    avatar = _write_png(tmp_path / "avatar.png", "#00FF00")
+    symbol = GuideSymbol(
+        kind="bitmap",
+        bitmap_before_path=avatar,
+        bitmap_margin_right_px=-400,
+    )
+    collapsed = TimingLine(
+        chars=[
+            TimingChar("i", 1000),
+            TimingChar("歌", 1500),
+            TimingChar("詞", 2000),
+        ],
+        end_ms=2500,
+        inline_guide_symbols={0: symbol},
+    )
+    plain = TimingLine(
+        chars=[TimingChar("歌", 1000), TimingChar("詞", 1500)],
+        end_ms=2000,
+    )
+    track = TimingTrack(lines=[collapsed])
+    style = Style(
+        font_family="Arial",
+        font_size_px=48,
+        letter_spacing_px=7,
+        layout_semantics="n3_1074",
+    )
+
+    # 度量层：零宽单元格不贡献 spacing——与不含占位的纯文本行同宽。
+    assert line_text_width([50, 0, 50], style) == line_text_width([50, 50], style)
+    legacy = replace(style, layout_semantics="legacy")
+    assert line_text_width([50, 0, 50], legacy) == line_text_width(
+        [50, 50], legacy
+    )
+
+    # 光标层：零宽单元格后面的字符直接贴住零宽单元格起点。
+    lefts = char_left_positions([50, 0, 50], 0, False, 7)
+    assert lefts[1] == lefts[0] + 50 + 7
+    assert lefts[2] == lefts[1]
+    rtl_lefts = char_left_positions([50, 0, 50], 0, True, 7)
+    assert rtl_lefts[0] - rtl_lefts[1] == 7
+    assert rtl_lefts[1] - rtl_lefts[2] == 50
+
+    # 布局层：分色占位行与去掉占位的纯文本行同宽、区间同起点。
+    collapsed_layout = _layout_line_uncached(
+        track, collapsed, style, 640, 360
+    )
+    plain_layout = _layout_line_uncached(
+        TimingTrack(lines=[plain]), plain, style, 640, 360
+    )
+    assert collapsed_layout.char_x_ranges[1][0] == collapsed_layout.char_x_ranges[0][0]
+    assert line_total_width(collapsed, style) == line_total_width(plain, style)
+    collapsed_w = collapsed_layout.char_x_ranges[2][1] - collapsed_layout.char_x_ranges[1][0]
+    plain_w = plain_layout.char_x_ranges[1][1] - plain_layout.char_x_ranges[0][0]
+    assert collapsed_w == plain_w
+
+
 def test_char_role_dialog_restores_selected_svg_replacements_only(tmp_path):
     prefix_symbol = _symbol(tmp_path)
     first_symbol = replace(_symbol(tmp_path), name="first")

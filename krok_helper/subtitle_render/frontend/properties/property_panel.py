@@ -336,6 +336,7 @@ def _supports_synthetic_bold(family: str, physical_weights: tuple[int, ...]) -> 
 
 _LIT_FIELDS = {
     "lit_enabled",
+    "volume_enabled",
     "lit_style",
     "lit_number",
     "lit_size",
@@ -359,6 +360,11 @@ _LIT_FIELDS = {
     "lit_transition_angle_deg",
     "lit_transition_distance",
     "signals_duration_ms",
+    "volume_duration_ms",
+    "volume_waiting_time_ms",
+    "volume_time_offset_ms",
+    "volume_stroke_width",
+    "volume_opacity_pct",
     "volume_size",
     "volume_offset_x",
     "volume_offset_y",
@@ -651,6 +657,7 @@ class PropertyPanel(QWidget):
         self._pending_style_relayout_scope: Optional[str] = None
         # 控件是否已按 _style 完整同步过一次；未同步前不能走 set_style 的等值快路径。
         self._style_synced = False
+        self._canvas_slider_controls: list[tuple[Any, str]] = []
         self._title_text_pending: set[int] = set()
         self._title_text_change_timer = QTimer(self)
         self._title_text_change_timer.setSingleShot(True)
@@ -782,6 +789,7 @@ class PropertyPanel(QWidget):
         )
         for page, (route_key, label) in zip(pages, self._PAGE_SPECS):
             self._add_navigation_page(page, route_key, label)
+        self._refresh_canvas_slider_ranges()
         self.setCurrentIndex(0)
         self.set_roles([])
         self.set_style(self._style, emit=False)
@@ -1758,10 +1766,40 @@ class PropertyPanel(QWidget):
         self._background_detail_stack.setCurrentIndex(index)
         self._image_fit_group.setVisible(kind in {"image", "image_sequence"})
 
+    def _register_canvas_slider(self, control: Any, range_kind: str) -> None:
+        self._canvas_slider_controls.append((control, str(range_kind)))
+
+    def _refresh_canvas_slider_ranges(self) -> None:
+        if not self._canvas_slider_controls or not hasattr(self, "_screen_size_width_spin"):
+            return
+        width, height, _fps = self.screen_size()
+        short_side = max(min(width, height), 1)
+        for control, range_kind in self._canvas_slider_controls:
+            hard_minimum, hard_maximum = control.input_range()
+            if range_kind == "x":
+                # 偏移类只给画布宽高的 ±10% 拖拽范围：日常微调足够灵敏，
+                # 更远的位置由数值输入完成（输入仍保留原硬范围）。
+                extent = max(width // 10, 1)
+                minimum, maximum = -extent, extent
+            elif range_kind == "y":
+                extent = max(height // 10, 1)
+                minimum, maximum = -extent, extent
+            elif range_kind == "short_quarter":
+                minimum, maximum = hard_minimum, max(hard_minimum, short_side // 4)
+            elif range_kind == "short_twelfth":
+                minimum, maximum = hard_minimum, max(hard_minimum, short_side // 12)
+            else:
+                minimum, maximum = hard_minimum, short_side
+            control.set_slider_range(
+                max(minimum, hard_minimum),
+                min(maximum, hard_maximum),
+            )
+
     def _make_screen_size_section(self) -> QFrame:
         return self._background_page_builder.make_screen_size_section()
 
     def _on_panel_screen_size_changed(self, *_args) -> None:
+        self._refresh_canvas_slider_ranges()
         if self._syncing:
             return
         self.screenSizeChanged.emit()
@@ -1786,6 +1824,7 @@ class PropertyPanel(QWidget):
             )
         finally:
             self._syncing = False
+        self._refresh_canvas_slider_ranges()
 
     def set_background_state(self, source: BackgroundSource) -> None:
         """宿主在背景源变化后回填：类型胶囊、详情页、图片策略与音频可用态。"""
@@ -2175,15 +2214,8 @@ class PropertyPanel(QWidget):
     def _make_lit_section(self) -> QFrame:
         return self._effects_page_builder.make_lit_section()
 
-    def _sync_lit_style_visibility(self) -> None:
-        """按当前指示灯样式整组显隐：音量柱组只在音量柱样式下显示，形状灯组反之。"""
-        if not hasattr(self, "_lit_volume_groups"):
-            return
-        is_volume = self._style.lit_style == "volume"
-        for box in self._lit_volume_groups:
-            box.setVisible(is_volume)
-        for box in self._lit_shape_groups:
-            box.setVisible(not is_volume)
+    def _make_volume_section(self) -> QFrame:
+        return self._effects_page_builder.make_volume_section()
 
     def _make_animation_section(self) -> QFrame:
         return self._effects_page_builder.make_animation_section()
@@ -4005,6 +4037,7 @@ class PropertyPanel(QWidget):
         if not hasattr(self, "_lit_enabled_switch"):
             return
         self._lit_enabled_switch.setChecked(self._style.lit_enabled)
+        self._volume_enabled_switch.setChecked(self._style.volume_enabled)
         self._lit_style_combo.setCurrentIndex(
             max(0, self._lit_style_combo.findData(self._style.lit_style))
         )
@@ -4022,6 +4055,7 @@ class PropertyPanel(QWidget):
         self._lit_edge_brightness_spin.setValue(self._style.lit_edge_brightness_pct)
         self._lit_shadow_check.setChecked(self._style.lit_shadow)
         self._lit_waiting_time_spin.setValue(self._style.lit_waiting_time_ms)
+        self._lit_time_offset_spin.setValue(self._style.lit_time_offset_ms)
         self._lit_transition_mode_combo.setCurrentIndex(
             max(0, self._lit_transition_mode_combo.findData(self._style.lit_transition_mode))
         )
@@ -4029,6 +4063,11 @@ class PropertyPanel(QWidget):
         self._lit_transition_angle_spin.setValue(self._style.lit_transition_angle_deg)
         self._lit_transition_distance_spin.setValue(self._style.lit_transition_distance)
         self._volume_size_spin.setValue(self._style.volume_size)
+        self._volume_duration_spin.setValue(self._style.volume_duration_ms)
+        self._volume_waiting_time_spin.setValue(self._style.volume_waiting_time_ms)
+        self._volume_time_offset_spin.setValue(self._style.volume_time_offset_ms)
+        self._volume_stroke_width_spin.setValue(self._style.volume_stroke_width)
+        self._volume_opacity_spin.setValue(self._style.volume_opacity_pct)
         self._volume_x_spin.setValue(self._style.volume_offset_x)
         self._volume_y_spin.setValue(self._style.volume_offset_y)
         self._volume_column_width_spin.setValue(self._style.volume_column_width)
@@ -4047,7 +4086,6 @@ class PropertyPanel(QWidget):
         self._volume_stroke_btn.set_color(self._style.volume_stroke_color)
         self._volume_overlay_fill_btn.set_color(self._style.volume_overlay_fill_color)
         self._volume_overlay_stroke_btn.set_color(self._style.volume_overlay_stroke_color)
-        self._sync_lit_style_visibility()
 
     def _update_style(self, _force_global: bool = False, **changes) -> None:
         if self._syncing:

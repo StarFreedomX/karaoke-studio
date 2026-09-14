@@ -15,8 +15,25 @@ from krok_helper.subtitle_render.engine.timing.show_time import (
     compute_show_times,
     protect_time_ms,
 )
+from krok_helper.subtitle_render.engine.layout.display.signal import signal_lead_in_ms
+from krok_helper.subtitle_render.domain.models import Style
 
 PRE, POST, INTERVAL = 1800, 1000, 300
+
+
+def test_independent_signal_modules_use_the_longer_lead_window():
+    style = Style(
+        lit_enabled=True,
+        lit_style="circle",
+        signals_duration_ms=1200,
+        lit_waiting_time_ms=100,
+        volume_enabled=True,
+        volume_duration_ms=2400,
+        volume_waiting_time_ms=300,
+        volume_time_offset_ms=200,
+    )
+
+    assert signal_lead_in_ms(style) == 2500
 
 
 def _pages(*specs: tuple[int, int, ...]) -> list[ShowTimePage]:

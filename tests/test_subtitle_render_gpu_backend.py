@@ -20,6 +20,7 @@ from krok_helper.subtitle_render.native.backend import (
     SharedFrameRingReader,
     resolve_native_renderer_path,
 )
+from krok_helper.subtitle_render.native.protocol import gpu_unsupported_features
 from krok_helper.subtitle_render.domain.models import (
     GuideSymbol,
     KaraokeColors,
@@ -7974,6 +7975,91 @@ def test_gpu_g4_utopia_ruby_units_and_group_outro_follow_painter(monkeypatch) ->
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g4_volume_and_shape_signals_render_together_without_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("Signal", 4_000)], end_ms=5_000)]
+    )
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=64,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        lit_enabled=True,
+        lit_style="circle",
+        lit_number=4,
+        lit_size=28,
+        lit_offset_y=-16,
+        signals_duration_ms=3_000,
+        volume_enabled=True,
+        volume_duration_ms=4_000,
+        volume_stroke_width=3,
+        volume_opacity_pct=75,
+        volume_size=44,
+        volume_column_width=12,
+        volume_column_count=4,
+    )
+    timestamps = (500, 2_000, 3_500)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+    painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+
+    assert "dual_signal_modules" not in gpu_unsupported_features(track, style)
+    for t_ms, gpu_frame, painter_frame in zip(timestamps, gpu, painter):
+        assert all(
+            abs(actual - expected) <= 14
+            for actual, expected in zip(
+                _payload_alpha_bounds(gpu_frame),
+                _payload_alpha_bounds(painter_frame),
+            )
+        ), (t_ms, _payload_alpha_bounds(gpu_frame), _payload_alpha_bounds(painter_frame))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g4_signal_slider_reconfiguration_stays_alive(monkeypatch) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("Signal", 4_000)], end_ms=5_000)]
+    )
+    base_style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        dual_line_layout=False,
+        lit_enabled=True,
+        lit_style="circle",
+        volume_enabled=True,
+    )
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        for index in range(12):
+            style = replace(
+                base_style,
+                lit_offset_x=index * 12,
+                volume_offset_y=-index * 4,
+            )
+            configured, frames = _render_g1_frames(
+                renderer,
+                style,
+                (1_500,),
+                force_warp=True,
+                track=track,
+                width=640,
+                height=360,
+            )
+            assert configured["ok"] is True
+            assert frames[0]
+
 def test_gpu_g4_volume_signal_timing_union_layout_and_colors_follow_painter(
     monkeypatch,
 ) -> None:

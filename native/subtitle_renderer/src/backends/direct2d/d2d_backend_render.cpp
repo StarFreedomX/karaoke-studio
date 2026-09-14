@@ -1389,13 +1389,22 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             line->startMs, style, tMs, displayEndMs, line->signalHead
         );
         const ShapeSignalGeometry shapeGeometry = shapeSignalGeometry(style);
+        const bool independentVolume = style.volumeEnabled;
+        const bool legacyVolume = style.litEnabled && style.litStyle == "volume";
         const int signalActiveDuration = std::max(
-            style.signalsDurationMs - std::max(style.litWaitingTimeMs, 0), 0
+            (independentVolume ? style.volumeDurationMs : style.signalsDurationMs)
+                - std::max(
+                    independentVolume ? style.volumeWaitingTimeMs : style.litWaitingTimeMs,
+                    0
+                ),
+            0
         );
-        const int signalEndMs = line->startMs + style.litTimeOffsetMs;
+        const int signalEndMs = line->startMs + (
+            independentVolume ? style.volumeTimeOffsetMs : style.litTimeOffsetMs
+        );
         // Every lit style (volume bars and shape lamps) attaches only to each
         // section's first page's first line (signalHead).
-        const bool signalLayoutActive = style.litEnabled
+        const bool signalLayoutActive = (independentVolume || legacyVolume)
             && !style.vertical
             && signalActiveDuration > 0
             && line->signalHead
@@ -1427,7 +1436,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         // DrawLineLeft/Right, so mixed-role lines keep the glyph box as well.
         float unionLeft = lyricLeft;
         float unionRight = lyricRight;
-        if (signalLayoutActive && style.litStyle == "volume") {
+        if (signalLayoutActive) {
             // Painter aligns the offset-free union of the text and signal
             // module throughout the guide window, including flash-off frames.
             // The volume offset moves only the bars afterwards.
@@ -1456,6 +1465,10 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             line->hasInlineStyles ? lyricRight : unionRight
         ) + placementOffsetX;
         float signalDx = alignedDx(unionLeft, unionRight) + placementOffsetX;
+        // 形状灯悬浮在文字实际起点上：跟随文字变换（音量柱 union 生效时
+        // 文字已被右移），而不是按无音量柱的歌词盒单独对齐——这与 Painter
+        // 双模块时 text_x + lit_offset_x 的锚定语义一致。
+        float shapeDx = dx;
         // N3 applies SmartHorizon after ordinary lane alignment.  Page ids
         // come from the same assign_lanes result used by the Painter oracle,
         // so invisible siblings still contribute to page-wide width maxima.
@@ -1555,6 +1568,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             dx += smartDx;
             signalDx += smartDx;
+            shapeDx += smartDx;
         }
         // The title is a standalone block with no lane grid to hold steady, so
         // its box comes from the glyphs it actually draws.  Sizing it from the
@@ -5380,7 +5394,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         }
         restoreRealizationBaseTransform();
         if (signalState.visible
-            && style.litOpacity > 0.0f
+            && (style.volumeEnabled ? style.volumeOpacity : style.litOpacity) > 0.0f
             && signalState.opacity > 0.0f) {
             context->SetTransform(withViewport(D2D1::Matrix3x2F::Translation(signalDx, dy)));
             auto signalBrush = [&](const RgbaColor &color) {
@@ -5391,7 +5405,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     paint, line->fillBounds, color
                 );
                 brush->SetOpacity(
-                    std::clamp(style.litOpacity * signalState.opacity, 0.0f, 1.0f)
+                    std::clamp(
+                        (style.volumeEnabled ? style.volumeOpacity : style.litOpacity)
+                            * signalState.opacity,
+                        0.0f,
+                        1.0f
+                    )
                 );
                 return brush;
             };
@@ -5433,9 +5452,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 const RgbaColor &strokeColor = overlay
                     ? style.volumeOverlayStroke
                     : style.volumeStroke;
-                if (style.litStrokeWidth > 0.0f && strokeColor.alpha > 0) {
+                const float volumeStrokeWidth = style.volumeEnabled
+                    ? style.volumeStrokeWidth
+                    : style.litStrokeWidth;
+                if (volumeStrokeWidth > 0.0f && strokeColor.alpha > 0) {
                     context->DrawRoundedRectangle(
-                        rect, stroke, style.litStrokeWidth
+                        rect, stroke, volumeStrokeWidth
                     );
                 }
             };
@@ -5451,7 +5473,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         if (shapeState.visible
             && shapeState.activeIndex >= 0
             && style.litOpacity > 0.0f) {
-            context->SetTransform(withViewport(D2D1::Matrix3x2F::Translation(signalDx, dy)));
+            context->SetTransform(withViewport(D2D1::Matrix3x2F::Translation(shapeDx, dy)));
             auto shapeBrush = [&](const RgbaColor &color, float opacity) {
                 PaintStyle paint;
                 paint.mode = "solid";

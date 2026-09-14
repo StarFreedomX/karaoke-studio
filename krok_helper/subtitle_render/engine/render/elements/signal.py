@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Hashable, Protocol
 
 from PyQt6.QtCore import QRectF, Qt
@@ -94,6 +94,20 @@ SignalLineMeasurer = Callable[
     [TimingTrack, DisplayLine, Mapping[int, int], int, Style],
     SignalLineMeasurement,
 ]
+
+
+def volume_style(style: Style) -> Style:
+    """Project independent volume controls onto the legacy signal renderer."""
+    return replace(
+        style,
+        lit_enabled=True,
+        lit_style="volume",
+        signals_duration_ms=style.volume_duration_ms,
+        lit_waiting_time_ms=style.volume_waiting_time_ms,
+        lit_time_offset_ms=style.volume_time_offset_ms,
+        lit_stroke_width=style.volume_stroke_width,
+        lit_opacity_pct=style.volume_opacity_pct,
+    )
 
 
 def signal_stroke_extent(style: Style, *, is_volume: bool) -> float:
@@ -721,6 +735,7 @@ def resolve_signal_lit_groups(
     measure_line: SignalLineMeasurer,
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
+    text_anchor: bool = False,
 ) -> list[SignalLitGroup]:
     del item_width
     duration = max(int(style.signals_duration_ms), 0)
@@ -791,22 +806,44 @@ def resolve_signal_lit_groups(
             )
             opacity = 1.0
 
-        x = (
-            line_layout.signal_x
-            if line_layout.signal_x is not None
-            else signal_lit_x(img_w, group_width, line_style, stroke_extent)
-        )
-        y = (
-            line_layout.signal_y
-            if line_layout.signal_y is not None
-            else signal_lit_y(
+        if (
+            not text_anchor
+            and line_layout is not None
+            and line_layout.signal_x is not None
+        ):
+            x = line_layout.signal_x
+        elif text_anchor and line_layout is not None:
+            text_x = getattr(line_layout, "text_x", None)
+            if text_x is not None:
+                # 双模块时形状灯悬浮在文字实际起点（union 已被音量柱右移）。
+                # 不借属于音量柱的 signal_x，也不退到视口左边距。
+                x = float(text_x) + float(line_style.lit_offset_x)
+            else:
+                x = signal_lit_x(
+                    img_w, group_width, line_style, stroke_extent
+                )
+        else:
+            x = signal_lit_x(img_w, group_width, line_style, stroke_extent)
+        if text_anchor:
+            # signal_y 同样属于音量柱（高度/垂直公式不同），形状灯按自身
+            # 悬浮语义重算 y，只借 baseline 与字体度量。
+            y = signal_lit_y(
                 baseline_y,
                 metrics,
                 size,
                 line_style,
                 stroke_extent,
             )
-        )
+        elif line_layout.signal_y is not None:
+            y = line_layout.signal_y
+        else:
+            y = signal_lit_y(
+                baseline_y,
+                metrics,
+                size,
+                line_style,
+                stroke_extent,
+            )
         offset_x, offset_y = (
             line_offsets.get(id(line), (0.0, 0.0))
             if line_offsets is not None
@@ -842,27 +879,41 @@ def resolve_signal_layers(
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
 ) -> list[SignalLitsLayer]:
-    if not style.lit_enabled:
-        return []
-    metrics = signal_layout_metrics(style)
-    groups = resolve_signal_lit_groups(
-        track,
-        display_lines,
-        baselines,
-        img_w,
-        img_h,
-        t_ms,
-        style,
-        metrics.count,
-        metrics.size,
-        metrics.item_width,
-        metrics.tracking,
-        metrics.stroke_extent,
-        measure_line=measure_line,
-        line_layouts=line_layouts,
-        line_offsets=line_offsets,
-    )
-    return build_signal_layers(groups, style)
+    styles: list[Style] = []
+    legacy_volume = style.lit_enabled and style.lit_style == "volume"
+    if style.volume_enabled or legacy_volume:
+        styles.append(volume_style(style) if style.volume_enabled else style)
+    if style.lit_enabled and not legacy_volume:
+        styles.append(style)
+    layers: list[SignalLitsLayer] = []
+    for active_style in styles:
+        metrics = signal_layout_metrics(active_style)
+        # 双模块时主布局的 signal 坐标属于会参与 union 的音量柱；形状灯
+        # 改按文字实际起点锚定（text_anchor），避免借到音量柱坐标或退到
+        # 视口左边距。
+        shape_over_volume = (
+            active_style.lit_style != "volume" and style.volume_enabled
+        )
+        groups = resolve_signal_lit_groups(
+            track,
+            display_lines,
+            baselines,
+            img_w,
+            img_h,
+            t_ms,
+            active_style,
+            metrics.count,
+            metrics.size,
+            metrics.item_width,
+            metrics.tracking,
+            metrics.stroke_extent,
+            measure_line=measure_line,
+            line_layouts=line_layouts,
+            line_offsets=line_offsets,
+            text_anchor=shape_over_volume,
+        )
+        layers.extend(build_signal_layers(groups, active_style))
+    return layers
 
 
 def paint_signal_lits(

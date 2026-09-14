@@ -2137,24 +2137,134 @@ def test_property_panel_set_style_populates_controls(qapp):
     assert panel._ruby_gap_spin.value() == 9
 
 
-def test_lit_section_shows_only_active_style_controls(qapp):
+def test_effect_spatial_sliders_follow_canvas_without_clamping_input(qapp):
+    panel = PropertyPanel()
+    panel.set_screen_size(640, 360, 60)
+
+    # 偏移类滑块只覆盖画布宽高的 ±10%；输入框仍保留完整硬范围。
+    assert panel._lit_x_spin.slider_range() == (-64, 64)
+    assert panel._lit_y_spin.slider_range() == (-36, 36)
+    assert panel._lit_size_spin.slider_range() == (4, 90)
+    assert panel._volume_column_width_spin.slider_range() == (1, 30)
+    # 无量纲参数：滑块覆盖整个硬范围，且不随画布尺寸变化。
+    assert panel._lit_number_spin.slider_range() == (1, 8)
+    assert panel._volume_column_count_spin.slider_range() == (1, 16)
+    assert panel._volume_ratio_spin.slider_range() == (1, 20)
+    assert panel._lit_x_spin.minimumWidth() >= 190
+
+    committed: list[int] = []
+    panel._lit_x_spin.valueChanged.connect(committed.append)
+    blocked = panel._lit_x_spin._slider.blockSignals(True)
+    panel._lit_x_spin._slider.setValue(30)
+    panel._lit_x_spin._slider.blockSignals(blocked)
+    panel._lit_x_spin._on_slider_moved(30)
+    assert panel._lit_x_spin.value() == 30
+    assert committed == []
+    panel._lit_x_spin._commit_slider_value()
+    assert committed == [30]
+
+    panel._lit_x_spin.setValue(900)
+    panel._lit_size_spin.setValue(150)
+    assert panel._lit_x_spin.value() == 900
+    assert panel._lit_x_spin._slider.value() == 64
+    assert panel._lit_size_spin.value() == 150
+    assert panel._lit_size_spin._slider.value() == 90
+
+    panel.set_screen_size(1920, 1080, 60)
+    assert panel._lit_x_spin.slider_range() == (-192, 192)
+    assert panel._lit_y_spin.slider_range() == (-108, 108)
+    assert panel._lit_x_spin.value() == 900
+    assert panel._lit_x_spin._slider.value() == 192
+    assert panel._lit_size_spin.value() == 150
+    assert panel._lit_size_spin._slider.value() == 150
+    assert panel._lit_number_spin.slider_range() == (1, 8)
+
+
+def test_canvas_slider_handle_follows_input_and_ignores_wheel(qapp):
+    from qfluentwidgets.components.widgets.slider import SliderHandle
+
+    panel = PropertyPanel()
+    panel.set_screen_size(1920, 1080, 60)
+    control = panel._lit_x_spin
+    slider = control._slider
+    handle = slider.findChild(SliderHandle)
+    assert handle is not None
+
+    control.setValue(0)
+    handle_x_before = handle.x()
+    control.setValue(1500)
+    # 输入后滑块取值与把手位置都要跟随（把手由 _adjustHandlePos 驱动，
+    # 阻塞信号更新时不会自动刷新）；超出滑块范围时钳制到端点。
+    assert control.value() == 1500
+    assert slider.value() == 192
+    assert handle.x() != handle_x_before
+
+    control.setValue(100)
+    assert slider.value() == 100
+
+    # 滚轮/触摸板不调值：事件被忽略，值保持不变。
+    wheel = QWheelEvent(
+        QPointF(slider.width() / 2, slider.height() / 2),
+        QPointF(0, 0),
+        QPoint(0, 120),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QApplication.sendEvent(slider, wheel)
+    QApplication.sendEvent(
+        slider,
+        QWheelEvent(
+            QPointF(slider.width() / 2, slider.height() / 2),
+            QPointF(0, 0),
+            QPoint(0, -240),
+            QPoint(0, -240),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        ),
+    )
+    assert slider.value() == 100  # 滚轮/触摸板不调值
+
+    # 拖拽语义：按压/移动只刷新显示，松手才提交一次。
+    committed: list[int] = []
+    control.valueChanged.connect(committed.append)
+    center = QPointF(slider.width() * 0.75, slider.height() / 2)
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress, center, QPointF(), Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(slider, press)
+    move = QMouseEvent(
+        QEvent.Type.MouseMove, center, QPointF(), Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(slider, move)
+    assert committed == []
+    assert slider.isSliderDown()
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, center, QPointF(), Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(slider, release)
+    assert not slider.isSliderDown()
+    assert len(committed) == 1
+
+
+def test_volume_and_lit_sections_are_independently_switchable(qapp):
     panel = PropertyPanel()
 
-    # Volume style: the volume.* groups apply, the shape lit.* groups do not.
-    panel.set_style(Style(lit_enabled=True, lit_style="volume"))
-    assert all(not w.isHidden() for w in panel._lit_volume_groups)
-    assert all(w.isHidden() for w in panel._lit_shape_groups)
+    panel.set_style(Style(volume_enabled=True, lit_enabled=False, lit_style="square"))
+    assert panel._volume_enabled_switch.isChecked()
+    assert not panel._lit_enabled_switch.isChecked()
+    assert panel._lit_style_combo.findData("volume") == -1
 
-    # Shape style: the opposite — shape groups apply, volume groups do not.
-    panel.set_style(Style(lit_enabled=True, lit_style="circle"))
-    assert all(not w.isHidden() for w in panel._lit_shape_groups)
-    assert all(w.isHidden() for w in panel._lit_volume_groups)
-
-    # Switching the style live (via the combo) flips visibility too.
-    panel._lit_style_combo.setCurrentIndex(panel._lit_style_combo.findData("volume"))
-    assert panel._style.lit_style == "volume"
-    assert all(not w.isHidden() for w in panel._lit_volume_groups)
-    assert all(w.isHidden() for w in panel._lit_shape_groups)
+    panel._lit_enabled_switch.setChecked(True)
+    assert panel._style.volume_enabled is True
+    assert panel._style.lit_enabled is True
 
 
 def test_property_panel_does_not_shadow_qwidget_style(qapp):
@@ -2239,6 +2349,7 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.exit_anim == "fade"
     assert style.exit_fade_ms == 300
     assert style.lit_enabled is False
+    assert style.volume_enabled is False
     assert style.lit_style == "volume"
     assert style.lit_number == 4
     assert style.lit_size == 32
@@ -2277,6 +2388,32 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.volume_flash_times == 3
     assert style.volume_flash_duration_ratio == 1.0
     assert style.volume_transition_ratio_pct == 67
+
+
+def test_legacy_volume_indicator_migrates_to_independent_module():
+    restored = style_from_dict({
+        "lit_enabled": True,
+        "lit_style": "volume",
+        "signals_duration_ms": 2500,
+        "lit_waiting_time_ms": 300,
+        "lit_time_offset_ms": 40,
+        "lit_stroke_width": 5,
+        "lit_opacity_pct": 80,
+    })
+
+    assert restored.volume_enabled is True
+    assert restored.lit_enabled is False
+    assert restored.lit_style == "circle"
+    assert restored.volume_duration_ms == 2500
+    assert restored.volume_waiting_time_ms == 300
+    assert restored.volume_time_offset_ms == 40
+    assert restored.volume_stroke_width == 5
+    assert restored.volume_opacity_pct == 80
+    roundtrip = style_from_dict(style_to_dict(restored))
+    assert roundtrip.volume_enabled is True
+    assert roundtrip.lit_enabled is False
+    assert roundtrip.lit_style == "circle"
+    assert roundtrip.volume_duration_ms == 2500
 
 
 def test_property_panel_subtitle_page_has_no_horizontal_scroll(qapp):
@@ -2339,18 +2476,20 @@ def test_effects_page_uses_compact_responsive_groups(qapp):
     qapp.processEvents()
 
     assert not panel._lit_section.header.isChecked()
+    assert not panel._volume_section.header.isChecked()
     assert not panel._lit_section.is_expanded()
     assert panel._lit_section.header.arrowType() == Qt.ArrowType.RightArrow
 
     panel._lit_section.set_expanded(True)
+    panel._volume_section.set_expanded(True)
     qapp.processEvents()
     assert panel._animation_grid._columns == 2
     assert panel._entry_anim_combo.parentWidget() is panel._entry_animation_row
     assert panel._entry_lead_spin.parentWidget() is panel._entry_animation_row
     assert panel._exit_anim_combo.parentWidget() is panel._exit_animation_row
     assert panel._exit_fade_spin.parentWidget() is panel._exit_animation_row
-    assert panel._lit_group_grids["通用"]._columns >= 4
-    assert panel._lit_group_grids["音量柱 · 布局"]._columns == 4
+    assert panel._lit_group_grids["布局"]._columns == 2
+    assert panel._volume_group_grids["布局"]._columns == 2
 
     subgroup_titles = [
         label.text()
@@ -2360,8 +2499,7 @@ def test_effects_page_uses_compact_responsive_groups(qapp):
     assert "音量柱 · 位置" not in subgroup_titles
     assert "形状灯 · 尺寸" not in subgroup_titles
     assert "形状灯 · 位置" not in subgroup_titles
-    assert "音量柱 · 布局" in subgroup_titles
-    assert "形状灯 · 布局" in subgroup_titles
+    assert "布局" in subgroup_titles
 
     panel.resize(360, 820)
     qapp.processEvents()

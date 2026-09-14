@@ -468,7 +468,7 @@ def track_to_ir(
         section_indices = {}
         page_offset_windows = {}
     signal_heads: frozenset[int] = frozenset()
-    if style is not None and style.lit_enabled and not style.vertical:
+    if style is not None and (style.lit_enabled or style.volume_enabled) and not style.vertical:
         signal_heads = section_head_line_indices(
             track, style, section_gap_ms=max(style.section_gap_ms, 0)
         )

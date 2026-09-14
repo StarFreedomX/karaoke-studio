@@ -59,16 +59,19 @@ def char_left_positions(
     n3_no_backtracking: bool = False,
 ) -> list[int]:
     """Return each character's left edge for LTR or RTL text flow."""
+    # 零宽单元格（负余白压瘪的 guide 占位）不占字间距：它后面的字符
+    # 直接贴上前一个可见字符，与 line_text_width 的口径保持一致。
     lefts: list[int] = []
-    total_width = sum(char_widths) + letter_spacing_px * max(
-        len(char_widths) - 1,
-        0,
+    total_width = sum(char_widths) + letter_spacing_px * sum(
+        1 for width in char_widths[:-1] if int(width) > 0
     )
     if rtl:
         cursor = base_x + total_width
         for width in char_widths:
             cursor -= width
             lefts.append(cursor)
+            if int(width) <= 0:
+                continue
             advance = width + letter_spacing_px
             cursor -= (
                 max(advance, 0) - width
@@ -81,6 +84,8 @@ def char_left_positions(
             if char_gaps is not None and index < len(char_gaps):
                 cursor += char_gaps[index]
             lefts.append(cursor)
+            if int(width) <= 0:
+                continue
             advance = width + letter_spacing_px
             cursor += max(advance, 0) if n3_no_backtracking else advance
     return lefts
@@ -244,7 +249,13 @@ def build_text_layout(
                 glyph_style,
             )
         )
-        spacing_after = letter_spacing(role_style) if index < len(line.chars) - 1 else 0
+        # 零宽单元格（负余白压瘪的 guide 占位）不占字间距，与
+        # char_left_positions / line_text_width 的口径一致。
+        spacing_after = (
+            letter_spacing(role_style)
+            if index < len(line.chars) - 1 and width > 0
+            else 0
+        )
         measured.append(
             (
                 index,

@@ -239,6 +239,12 @@ struct ResolvedStyle {
     int litTransitionAngleDeg = 0;
     int litTransitionDistance = 0;
     int signalsDurationMs = 4000;
+    bool volumeEnabled = false;
+    int volumeDurationMs = 4000;
+    int volumeWaitingTimeMs = 0;
+    int volumeTimeOffsetMs = 0;
+    int volumeStrokeWidth = 2;
+    int volumeOpacityPct = 100;
     int volumeSize = 48;
     int volumeOffsetX = 0;
     int volumeOffsetY = 0;

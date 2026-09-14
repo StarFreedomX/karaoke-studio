@@ -385,6 +385,12 @@ struct TextStyle {
     float litTransitionAngleDeg = 0.0f;
     float litTransitionDistance = 0.0f;
     int signalsDurationMs = 4000;
+    bool volumeEnabled = false;
+    int volumeDurationMs = 4000;
+    int volumeWaitingTimeMs = 0;
+    int volumeTimeOffsetMs = 0;
+    float volumeStrokeWidth = 2.0f;
+    float volumeOpacity = 1.0f;
     float volumeSize = 48.0f;
     float volumeOffsetX = 0.0f;
     float volumeOffsetY = 0.0f;

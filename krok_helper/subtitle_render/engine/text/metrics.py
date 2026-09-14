@@ -397,13 +397,18 @@ def line_text_width(char_widths: list[int], style: Style) -> int:
     if not char_widths:
         return 0
     spacing = letter_spacing(style)
-    if style.layout_semantics == "n3_1074":
-        return max(
-            0,
-            sum(max(int(width) + spacing, 0) for width in char_widths[:-1])
-            + int(char_widths[-1]),
+    total = int(char_widths[-1])
+    for width in char_widths[:-1]:
+        # 零宽单元格（负余白压瘪的 guide 占位）在布局里完全隐形，
+        # 不占字间距——否则分色行比纯文本行凭空多出一份 spacing。
+        if int(width) <= 0:
+            continue
+        total += (
+            max(int(width) + spacing, 0)
+            if style.layout_semantics == "n3_1074"
+            else int(width) + spacing
         )
-    return max(0, sum(char_widths) + spacing * (len(char_widths) - 1))
+    return max(0, total)
 
 
 __all__ = [

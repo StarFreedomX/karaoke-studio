@@ -14,7 +14,6 @@ from krok_helper.subtitle_render.frontend.properties.pages.effects import (
 class _Host:
     def __init__(self) -> None:
         self.updates: list[dict[str, object]] = []
-        self.visibility_syncs = 0
         self._style = SimpleNamespace(
             volume_fill_color="#101010",
             volume_stroke_color="#202020",
@@ -41,10 +40,6 @@ class _Host:
         button = QPushButton(color)
         button.setObjectName(field)
         return button
-
-    def _sync_lit_style_visibility(self) -> None:
-        self.visibility_syncs += 1
-
 
 def test_effects_animation_builder_preserves_options_and_layout(qapp) -> None:
     host = _Host()
@@ -209,30 +204,31 @@ def test_effects_lit_builder_preserves_groups_ranges_and_initial_state(qapp) -> 
     assert section.header.text() == "指示灯"
     assert section.header_switch is host._lit_enabled_switch
     assert not section.is_expanded()
-    assert list(host._lit_group_grids) == [
-        "通用",
-        "音量柱 · 布局",
-        "音量柱 · 动画",
-        "音量柱 · 颜色",
-        "形状灯 · 布局",
-        "形状灯 · 外观",
-        "形状灯 · 转场",
-    ]
-    assert len(host._lit_volume_groups) == 3
-    assert len(host._lit_shape_groups) == 3
-    assert host._lit_style_combo.count() == 4
-    assert host._volume_column_count_spin.maximum() == 16
+    assert list(host._lit_group_grids) == ["布局", "时序", "外观", "转场"]
+    assert host._lit_style_combo.count() == 3
     assert host._lit_transition_angle_spin.minimum() == -360
     assert host._lit_transition_distance_spin.maximum() == 800
-    assert host._volume_fill_btn.objectName() == "volume_fill_color"
     assert host._lit_stroke_btn.objectName() == "lit_stroke_color"
-    assert host.visibility_syncs == 1
+
+
+def test_effects_volume_builder_is_independent_and_compact(qapp) -> None:
+    host = _Host()
+    section = EffectsPropertyPageBuilder(host).make_volume_section()
+
+    assert section.header.text() == "音量柱"
+    assert section.header_switch is host._volume_enabled_switch
+    assert list(host._volume_group_grids) == ["时序", "布局", "动画", "外观"]
+    assert host._volume_column_count_spin.maximum() == 16
+    assert host._volume_fill_btn.objectName() == "volume_fill_color"
 
 
 def test_effects_lit_builder_routes_transformed_values(qapp) -> None:
     host = _Host()
-    EffectsPropertyPageBuilder(host).make_lit_section()
+    builder = EffectsPropertyPageBuilder(host)
+    builder.make_volume_section()
+    builder.make_lit_section()
 
+    host._volume_enabled_switch.setChecked(True)
     host._lit_enabled_switch.setChecked(True)
     host._volume_ratio_spin.setValue(3)
     host._volume_flash_duration_spin.setValue(25)
@@ -240,7 +236,8 @@ def test_effects_lit_builder_routes_transformed_values(qapp) -> None:
     host._lit_shadow_check.setChecked(True)
 
     assert host.updates == [
-        {"lit_enabled": True},
+        {"volume_enabled": True},
+        {"lit_enabled": True, "lit_style": "circle"},
         {"volume_ratio": 3.0},
         {"volume_flash_duration_ratio": 0.25},
         {"lit_transition_mode": "slide"},

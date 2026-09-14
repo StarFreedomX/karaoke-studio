@@ -274,6 +274,14 @@ void applySignalStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     cfg.litTransitionAngleDeg = intValue(style, QStringLiteral("lit_transition_angle_deg"), cfg.litTransitionAngleDeg);
     cfg.litTransitionDistance = std::max(0, intValue(style, QStringLiteral("lit_transition_distance"), cfg.litTransitionDistance));
     cfg.signalsDurationMs = std::max(0, intValue(style, QStringLiteral("signals_duration_ms"), cfg.signalsDurationMs));
+    if (hasNonNull(style, QStringLiteral("volume_enabled"))) {
+        cfg.volumeEnabled = style.value(QStringLiteral("volume_enabled")).toBool(cfg.volumeEnabled);
+    }
+    cfg.volumeDurationMs = std::max(0, intValue(style, QStringLiteral("volume_duration_ms"), cfg.volumeDurationMs));
+    cfg.volumeWaitingTimeMs = std::max(0, intValue(style, QStringLiteral("volume_waiting_time_ms"), cfg.volumeWaitingTimeMs));
+    cfg.volumeTimeOffsetMs = intValue(style, QStringLiteral("volume_time_offset_ms"), cfg.volumeTimeOffsetMs);
+    cfg.volumeStrokeWidth = std::max(0, intValue(style, QStringLiteral("volume_stroke_width"), cfg.volumeStrokeWidth));
+    cfg.volumeOpacityPct = std::clamp(intValue(style, QStringLiteral("volume_opacity_pct"), cfg.volumeOpacityPct), 0, 100);
     cfg.volumeSize = std::max(1, intValue(style, QStringLiteral("volume_size"), cfg.volumeSize));
     cfg.volumeOffsetX = intValue(style, QStringLiteral("volume_offset_x"), cfg.volumeOffsetX);
     cfg.volumeOffsetY = intValue(style, QStringLiteral("volume_offset_y"), cfg.volumeOffsetY);

@@ -20,13 +20,14 @@ from PyQt6.QtGui import (
     QRegularExpressionValidator,
     QValidator,
 )
-from PyQt6.QtWidgets import QSizePolicy, QStackedWidget, QStyle, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QStyle, QWidget
 from qfluentwidgets import (
     BodyLabel,
     ComboBox as FluentComboBox,
     DoubleSpinBox as FluentDoubleSpinBox,
     LineEdit as FluentLineEdit,
     PlainTextEdit as FluentPlainTextEdit,
+    Slider,
     SpinBox as FluentSpinBox,
 )
 from qfluentwidgets.components.widgets.combo_box import ComboBoxMenu
@@ -156,7 +157,7 @@ class TimecodeEdit(FluentLineEdit):
         self.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.setMinimumWidth(0)
+        self.setMinimumWidth(190)
         self.setFixedHeight(32)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -819,3 +820,183 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
             menu.exec(pd, aniType=MenuAnimationType.DROP_DOWN)
         else:
             menu.exec(pu, aniType=MenuAnimationType.PULL_UP)
+
+class _CommitOnReleaseSlider(Slider):
+    """Fluent slider with drag-commit-on-release semantics and no wheel input.
+
+    qfluentwidgets 的 Slider 重写了鼠标交互：拖拽的每一帧都直接 ``setValue``
+    并发出 ``valueChanged``（与 QSlider 的 ``tracking`` 无关），释放信号也只
+    在把手上按起才发。这里接管按压状态，恢复标准滑块语义：
+    - 按下即进入 ``sliderDown`` 态，期间值变化只刷新显示，不提交；
+    - 释放（含槽点击跳变）统一补发 ``sliderReleased``，由宿主提交一次；
+    - 滚轮/触摸板滚动不调值——面板内极易误触，事件交回外层滚动区。
+    """
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event.ignore()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self.setSliderDown(True)
+        super().mousePressEvent(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().mouseMoveEvent(event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().mouseReleaseEvent(event)
+        if self.isSliderDown():
+            self.setSliderDown(False)
+            self.sliderReleased.emit()
+        event.accept()
+
+
+class CanvasSliderSpinBox(QWidget):
+    """Compact slider paired with an unrestricted precise integer editor.
+
+    The editor owns the real value and keeps its original hard range. The
+    slider is only a canvas-scaled visual/dragging range, so out-of-range
+    values remain editable while the thumb rests at the nearest endpoint.
+    """
+
+    valueChanged = Signal(int)
+
+    def __init__(
+        self,
+        spin: WheelFocusedSpinBox,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._spin = spin
+        self._slider = _CommitOnReleaseSlider(Qt.Orientation.Horizontal, self)
+        self._slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._slider.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._spin.setParent(self)
+        # 工厂（timing_spin 等）可能给 spin 施加 compact_property_control 的
+        # Ignored 水平策略——那是给面板网格用的；放进复合控件的 hbox 里会让
+        # 布局把数值框挤出控件边界，这里恢复常规策略。
+        self._spin.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        # 只设上限：WheelFocusedSpinBox 会按文本内容自适应最小宽度，
+        # setFixedWidth 会和 _sync_text_minimum 的 setMinimumWidth 互相覆盖。
+        self._spin.setMaximumWidth(92)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._slider, 1)
+        layout.addWidget(self._spin, 0)
+        # setParent() 隐藏了 spin；不重新 show 的话父控件显示时数值框
+        # 会一直保持显式隐藏，只剩滑块可见。
+        self._spin.show()
+
+        self.setMinimumWidth(190)
+        self.setFixedHeight(self._spin.height())
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # 拖拽期间只刷新数值显示，松手才提交一次（见 _CommitOnReleaseSlider）；
+        # 逐帧提交会在拖动时反复重配 native 渲染器，曾导致 GPU 回退与崩溃。
+        self._committed_value = int(self._spin.value())
+        self._slider.valueChanged.connect(self._on_slider_value_changed)
+        self._slider.sliderMoved.connect(self._on_slider_moved)
+        self._slider.sliderReleased.connect(self._commit_slider_value)
+        self._spin.valueChanged.connect(self._on_spin_value_changed)
+
+    def value(self) -> int:
+        return int(self._spin.value())
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        self._force_layout_distribution()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._force_layout_distribution()
+
+    def _force_layout_distribution(self) -> None:
+        # 控件在隐藏或更宽尺寸阶段（面板默认 640px）布局过一次后，收缩到
+        # 真实宽度时 hbox 不会按新宽度重算，数值框会被排到控件外。这里
+        # 绕过脏标记，在显示/尺寸变化时直接按当前矩形强制重分配。
+        layout = self.layout()
+        if layout is not None:
+            layout.setGeometry(self.rect())
+
+    def setValue(self, value: int) -> None:  # noqa: N802 - Qt-style compatibility
+        self._spin.setValue(int(value))
+        self._sync_slider()
+
+    def set_slider_range(self, minimum: int, maximum: int) -> None:
+        minimum = int(minimum)
+        maximum = max(int(maximum), minimum)
+        blocked = self._slider.blockSignals(True)
+        try:
+            self._slider.setRange(minimum, maximum)
+            self._slider.setValue(max(min(self.value(), maximum), minimum))
+        finally:
+            self._slider.blockSignals(blocked)
+        self._sync_handle_position()
+
+    def slider_range(self) -> tuple[int, int]:
+        return self._slider.minimum(), self._slider.maximum()
+
+    def input_range(self) -> tuple[int, int]:
+        return self._spin.minimum(), self._spin.maximum()
+
+    def minimum(self) -> int:
+        return int(self._spin.minimum())
+
+    def maximum(self) -> int:
+        return int(self._spin.maximum())
+
+    def setToolTip(self, text: str) -> None:  # noqa: N802 - Qt API
+        super().setToolTip(text)
+        self._slider.setToolTip(text)
+        self._spin.setToolTip(text)
+
+    def _on_slider_value_changed(self, _value: int) -> None:
+        # 拖拽/按压期间（sliderDown）只刷新显示不提交；键盘等非按压值变化
+        # 没有释放信号，立即提交。
+        if not self._slider.isSliderDown():
+            self._commit_slider_value()
+    def _on_slider_moved(self, value: int) -> None:
+        blocked = self._spin.blockSignals(True)
+        try:
+            self._spin.setValue(int(value))
+        finally:
+            self._spin.blockSignals(blocked)
+
+    def _commit_slider_value(self) -> None:
+        value = int(self._slider.value())
+        blocked = self._spin.blockSignals(True)
+        try:
+            self._spin.setValue(value)
+        finally:
+            self._spin.blockSignals(blocked)
+        if value != self._committed_value:
+            self._committed_value = value
+            self.valueChanged.emit(value)
+
+    def _on_spin_value_changed(self, value: int) -> None:
+        self._committed_value = int(value)
+        self._sync_slider()
+        self.valueChanged.emit(int(value))
+
+    def _sync_slider(self) -> None:
+        minimum, maximum = self.slider_range()
+        clamped = max(min(self.value(), maximum), minimum)
+        blocked = self._slider.blockSignals(True)
+        try:
+            self._slider.setValue(clamped)
+        finally:
+            self._slider.blockSignals(blocked)
+        self._sync_handle_position()
+
+    def _sync_handle_position(self) -> None:
+        # qfluentwidgets 的把手是子控件，位置只随 valueChanged 信号刷新；
+        # 阻塞信号更新值后必须手动补一次，否则输入数值时把手不跟随。
+        adjust = getattr(self._slider, "_adjustHandlePos", None)
+        if callable(adjust):
+            adjust()

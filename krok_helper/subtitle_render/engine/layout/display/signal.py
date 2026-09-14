@@ -35,7 +35,7 @@ def display_style_for_signal_window(style: Style) -> Style:
 
 def lit_signal_active(style: Style) -> bool:
     """Return whether a horizontal guide signal participates in layout."""
-    return bool(style.lit_enabled) and not style.vertical
+    return bool(style.lit_enabled or style.volume_enabled) and not style.vertical
 
 
 def signal_head_context(
@@ -66,15 +66,12 @@ def signal_head_context(
 
 def signal_lead_in_ms(style: Style) -> int:
     """Return how far before singing a configured signal must become visible."""
-    duration = max(int(style.signals_duration_ms), 0)
-    if duration <= 0:
-        return 0
-    return max(
-        0,
-        duration
-        + max(int(style.lit_waiting_time_ms), 0)
-        - int(style.lit_time_offset_ms),
-    )
+    leads = []
+    if style.lit_enabled:
+        leads.append(max(0, int(style.signals_duration_ms) + max(int(style.lit_waiting_time_ms), 0) - int(style.lit_time_offset_ms)))
+    if style.volume_enabled:
+        leads.append(max(0, int(style.volume_duration_ms) + max(int(style.volume_waiting_time_ms), 0) - int(style.volume_time_offset_ms)))
+    return max(leads, default=0)
 
 
 def resolve_signal_display_lines(

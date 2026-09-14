@@ -46,7 +46,11 @@ VolumeSignalGeometry volumeSignalGeometry(const TextStyle &style) {
     geometry.size = std::max(style.volumeSize, 1.0f);
     geometry.columnWidth = std::max(style.volumeColumnWidth, 1.0f);
     geometry.columnSpacing = std::max(style.volumeColumnSpacing, 0.0f);
-    geometry.strokeExtent = std::max(style.litStrokeWidth, 0.0f);
+    const bool independentVolume = style.volumeEnabled;
+    geometry.strokeExtent = std::max(
+        independentVolume ? style.volumeStrokeWidth : style.litStrokeWidth,
+        0.0f
+    );
     geometry.pitch = geometry.columnWidth + geometry.columnSpacing;
     geometry.groupWidth = geometry.count * geometry.pitch
         - geometry.columnSpacing + geometry.strokeExtent * 2.0f;
@@ -163,17 +167,26 @@ VolumeSignalState volumeSignalState(
     if (!signalHead) {
         return state;
     }
-    if (style.vertical || !style.litEnabled || style.litStyle != "volume") {
+    const bool legacyVolume = style.litEnabled && style.litStyle == "volume";
+    if (style.vertical || (!style.volumeEnabled && !legacyVolume)) {
         return state;
     }
-    const int duration = std::max(style.signalsDurationMs, 0);
+    const int duration = std::max(
+        style.volumeEnabled ? style.volumeDurationMs : style.signalsDurationMs, 0
+    );
     const int activeDuration = std::max(
-        duration - std::max(style.litWaitingTimeMs, 0), 0
+        duration - std::max(
+            style.volumeEnabled ? style.volumeWaitingTimeMs : style.litWaitingTimeMs,
+            0
+        ),
+        0
     );
     if (activeDuration <= 0) {
         return state;
     }
-    const int signalEnd = lineStartMs + style.litTimeOffsetMs;
+    const int signalEnd = lineStartMs + (
+        style.volumeEnabled ? style.volumeTimeOffsetMs : style.litTimeOffsetMs
+    );
     const int activeStart = signalEnd - activeDuration;
     if (tMs < activeStart || tMs >= displayEndMs) {
         return state;

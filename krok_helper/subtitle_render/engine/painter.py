@@ -428,6 +428,7 @@ from krok_helper.subtitle_render.engine.render.elements.signal import (
     volume_signal_column_rects as _volume_signal_column_rects,
     volume_signal_geometry as _volume_signal_geometry,
     volume_signal_state as _volume_signal_state,
+    volume_style as _volume_style,
 )
 from krok_helper.subtitle_render.engine.render.elements.title import (
     TitleGlyphLayout as _TitleGlyphLayout,
@@ -2096,7 +2097,17 @@ def _resolve_sayatoo_line_layouts(
         if hit is not None:
             return hit
     layouts: dict[int, _SayatooLineLayout] = {}
-    signal_metrics = _signal_layout_metrics(style) if style.lit_enabled else None
+    # 只有音量柱插入字幕行首并参与 union；形状灯悬浮，不改变文字布局。
+    signal_layout_style = (
+        _volume_style(style)
+        if style.volume_enabled
+        else style
+    )
+    signal_metrics = (
+        _signal_layout_metrics(signal_layout_style)
+        if style.volume_enabled or style.lit_enabled
+        else None
+    )
     signal_head_ids = _signal_head_context(track, style) if signal_metrics else None
     index_of_signal_lines = (
         {id(line): index for index, line in enumerate(track.lines)}
@@ -2152,12 +2163,20 @@ def _resolve_sayatoo_line_layouts(
         text_line_w = max(int(round(text_w)) + left_ext + right_ext, 1)
         center_line = _line_center_override(track, line, line_style)
         signal_x: float | None = None
+        # 独立音量柱参与 union 的窗口必须跟随音量柱时序（volume_* 投影后的
+        # signals_duration_ms 等字段）；直接传 line_style 会读到形状灯的
+        # signals_duration_ms，闪烁熄灭帧 union 失效，文字错误回到单独居中。
+        active_signal_style = (
+            _volume_style(line_style)
+            if style.volume_enabled
+            else line_style
+        )
         if (
             signal_metrics is not None
             and _line_has_active_signal(
                 line,
                 t_ms,
-                line_style,
+                active_signal_style,
                 is_signal_head=(
                     signal_head_ids is None
                     or index_of_signal_lines.get(id(line)) in signal_head_ids
@@ -2180,9 +2199,9 @@ def _resolve_sayatoo_line_layouts(
             # anchored line box.  Shape lamps float above the text start, so
             # they never contribute horizontal room: their span stays outside
             # the union and they overhang freely at ``lit_offset_x``.
-            draw_left = _signal_local_x(signal_metrics, line_style)
+            draw_left = _signal_local_x(signal_metrics, active_signal_style)
             if signal_metrics.is_volume:
-                natural_left = draw_left - _signal_offset_x(line_style)
+                natural_left = draw_left - _signal_offset_x(active_signal_style)
                 natural_right = natural_left + signal_metrics.group_width
                 union_left = min(-float(left_ext), natural_left)
                 union_right = max(float(text_w) + right_ext, natural_right)
@@ -2225,7 +2244,7 @@ def _resolve_sayatoo_line_layouts(
                     baseline_y,
                     metrics,
                     signal_metrics.size,
-                    line_style,
+                    active_signal_style,
                     signal_metrics.stroke_extent,
                 )
                 if signal_metrics is not None and signal_x is not None
