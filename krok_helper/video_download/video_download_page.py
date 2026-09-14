@@ -2316,11 +2316,23 @@ class VideoDownloadPage(QWidget):
         return video_identity_keys(*urls)
 
     def _preferred_task_filesize(self, task: DownloadTask) -> int | None:
-        if task.selected_format and task.selected_format.filesize:
+        if task.status == TASK_STATUS_COMPLETED and task.filesize:
+            return task.filesize
+        if task.selected_format:
             return task.selected_format.filesize
         if task.info and task.info.filesize:
             return task.info.filesize
         return task.filesize
+
+    def _task_filesize_text(self, task: DownloadTask) -> str:
+        size = self._preferred_task_filesize(task)
+        estimated = bool(task.selected_format and task.selected_format.filesize_is_estimate)
+        if task.status == TASK_STATUS_COMPLETED:
+            estimated = False
+        elif size is None and task.downloaded_bytes > 0:
+            size = task.filesize
+            estimated = True
+        return format_bytes(size, estimated=estimated)
 
     def _create_download_task(self, info: VideoInfo, selected_option_id: str = "") -> DownloadTask:
         available_formats = list(info.formats)
@@ -2528,7 +2540,7 @@ class VideoDownloadPage(QWidget):
 
         selected_format = task.selected_format
         resolution = selected_format.resolution if selected_format else (f"{info.height}p" if info.height else "-")
-        size_text = format_bytes(self._preferred_task_filesize(task))
+        size_text = self._task_filesize_text(task)
         self._set_info_value_text("title", info.title or "-")
         self._set_info_value_text("uploader", info.uploader or "-")
         self.info_value_labels["duration"].setText(format_duration(info.duration))
@@ -2570,7 +2582,7 @@ class VideoDownloadPage(QWidget):
             self.format_table.setItem(row, 2, QTableWidgetItem(option.resolution))
             self.format_table.setItem(row, 3, QTableWidgetItem(option.video_codec))
             self.format_table.setItem(row, 4, QTableWidgetItem(option.audio_codec))
-            self.format_table.setItem(row, 5, QTableWidgetItem(format_bytes(option.filesize)))
+            self.format_table.setItem(row, 5, QTableWidgetItem(format_bytes(option.filesize, estimated=option.filesize_is_estimate)))
         self.format_hint_label.setText("解析完成后可在这里切换当前任务的下载格式。")
         self._format_table_updating = False
 
@@ -2630,7 +2642,7 @@ class VideoDownloadPage(QWidget):
             self.format_table.setItem(row, 2, QTableWidgetItem(option.resolution))
             self.format_table.setItem(row, 3, QTableWidgetItem(option.video_codec))
             self.format_table.setItem(row, 4, QTableWidgetItem(option.audio_codec))
-            self.format_table.setItem(row, 5, QTableWidgetItem(format_bytes(option.filesize)))
+            self.format_table.setItem(row, 5, QTableWidgetItem(format_bytes(option.filesize, estimated=option.filesize_is_estimate)))
             self.format_combo.addItem(self._format_option_text(option))
             if is_selected:
                 selected_index = row
@@ -2689,7 +2701,7 @@ class VideoDownloadPage(QWidget):
         parts = [option.format_label or "默认格式", option.resolution or "-"]
         if codecs:
             parts.append(codecs)
-        size_text = format_bytes(option.filesize)
+        size_text = format_bytes(option.filesize, estimated=option.filesize_is_estimate)
         if size_text != "-":
             parts.append(size_text)
         text = " | ".join(parts)
@@ -2708,7 +2720,7 @@ class VideoDownloadPage(QWidget):
         self.format_value_labels["resolution"].setText(option.resolution or "-")
         self.format_value_labels["video_codec"].setText(option.video_codec or "-")
         self.format_value_labels["audio_codec"].setText(option.audio_codec or "-")
-        self.format_value_labels["filesize"].setText(format_bytes(option.filesize))
+        self.format_value_labels["filesize"].setText(format_bytes(option.filesize, estimated=option.filesize_is_estimate))
 
     def _refresh_download_table(self) -> None:
         """Rebuild the whole table: row count, every cell, action widgets and selection.
@@ -2773,7 +2785,7 @@ class VideoDownloadPage(QWidget):
         self._write_task_cell(row, 2, task.source, center)
         self._write_task_cell(row, 3, resolution, center, resolution)
         self._write_task_cell(row, 4, progress_text, center, progress_tooltip)
-        self._write_task_cell(row, 5, format_bytes(task.filesize), center)
+        self._write_task_cell(row, 5, self._task_filesize_text(task), center)
         self._sync_task_action_widget(row, task)
 
     def _write_task_cell(
@@ -3173,6 +3185,7 @@ class VideoDownloadPage(QWidget):
             except OSError:
                 task.filesize = self._preferred_task_filesize(task)
         self.parse_status_label.setText(f"下载完成：{task.title}")
+        self._refresh_preview()
         self._refresh_download_table()
         self._start_pending_downloads()
 

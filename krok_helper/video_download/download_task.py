@@ -40,6 +40,7 @@ class FormatOption:
     width: int = 0
     is_recommended: bool = False
     requires_merge: bool = False
+    filesize_is_estimate: bool = False
 
 
 @dataclass(slots=True)
