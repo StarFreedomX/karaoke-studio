@@ -1,10 +1,21 @@
 """Focused contracts for role fill-editor pages."""
 
+from PyQt6.QtCore import QEvent, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QPushButton
 
 from krok_helper.subtitle_render.frontend.properties.roles.fills import (
     RoleFillPagesBuilder,
 )
+
+
+def _mouse_event(event_type, point, buttons, modifiers=Qt.KeyboardModifier.NoModifier):
+    pressed = (
+        Qt.MouseButton.LeftButton
+        if event_type is QEvent.Type.MouseButtonPress
+        else Qt.MouseButton.NoButton
+    )
+    return QMouseEvent(event_type, point, buttons, pressed, modifiers)
 
 
 class _Host:
@@ -144,3 +155,304 @@ def test_image_fill_page_preserves_path_and_scale_contracts(qapp) -> None:
         {"image_scale_pct": 125},
     ]
     assert page.layout().columnStretch(0) == 1
+
+
+def test_moving_stop_through_another_keeps_both_and_keeps_drag(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops(
+        [(0, "#111111"), (40, "#222222"), (80, "#333333"), (100, "#444444")]
+    )
+
+    # Dragging the #333333 stop exactly onto the 40 stop must not delete it:
+    # equal positions are legal while the drag merely passes over them.
+    editor._selected = 2
+    editor._begin_drag()
+    editor._apply_drag_position(40)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (40, "#333333"),
+        (100, "#444444"),
+    ]
+
+    # The dragged marker (not the equal-position neighbour) keeps following.
+    editor._apply_drag_position(30)
+    assert editor._stops == [
+        (0, "#111111"),
+        (30, "#333333"),
+        (40, "#222222"),
+        (100, "#444444"),
+    ]
+    assert editor._stops[editor._selected] == (30, "#333333")
+
+    # Releasing at 30 hits nothing: no merge, all four stops survive.
+    editor._end_drag(merge=True)
+    assert len(editor._stops) == 4
+
+
+def test_moving_endpoint_anchor_spawns_stop_that_merges_back(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops([(0, "#111111"), (40, "#222222"), (100, "#444444")])
+
+    editor._selected = 2  # the 100 endpoint anchor
+    editor._begin_drag()
+    editor._apply_drag_position(70)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (70, "#444444"),
+        (100, "#444444"),
+    ]
+    assert editor._stops[editor._selected] == (70, "#444444")
+
+    # Dragging the spawned marker back onto the endpoint simply restores the
+    # frozen baseline: the anchor never moved, so nothing needs merging.
+    editor._apply_drag_position(100)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (100, "#444444"),
+    ]
+    editor._end_drag(merge=True)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (100, "#444444"),
+    ]
+
+
+def test_dropping_stop_onto_interior_stop_merges(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops(
+        [(0, "#111111"), (40, "#222222"), (80, "#333333"), (100, "#444444")]
+    )
+
+    editor._selected = 2
+    editor.set_selected_position(40)  # dropped exactly onto the 40 stop
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#333333"),
+        (100, "#444444"),
+    ]
+    assert editor._stops[editor._selected] == (40, "#333333")
+
+
+def test_dragging_through_endpoint_does_not_pin_visitor(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops([(0, "#111111"), (40, "#222222"), (100, "#444444")])
+
+    # Touching the 0 edge mid-drag neither merges nor converts the dragged
+    # stop into the anchor: it must keep following the pointer afterwards.
+    editor._selected = 1
+    editor._begin_drag()
+    editor._apply_drag_position(0)
+    assert editor._stops == [(0, "#111111"), (0, "#222222"), (100, "#444444")]
+    editor._apply_drag_position(25)
+    assert editor._stops == [
+        (0, "#111111"),
+        (25, "#222222"),
+        (100, "#444444"),
+    ]
+    assert editor._stops[editor._selected] == (25, "#222222")
+
+    # Releasing exactly at the endpoint edge is a deliberate drop: it merges
+    # into the endpoint anchor and the moved marker wins.
+    editor._apply_drag_position(0)
+    editor._end_drag(merge=True)
+    assert editor._stops == [(0, "#222222"), (100, "#444444")]
+
+
+def test_release_without_movement_keeps_colocated_stops(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    stops = [(0, "#111111"), (40, "#222222"), (40, "#333333"), (100, "#444444")]
+    editor = GradientStopsEditor()
+    editor.set_stops(stops)
+    editor._selected = 2
+    editor._begin_drag()
+
+    editor.mouseReleaseEvent(None)  # click without movement must not merge
+    assert editor._stops == stops
+
+
+def test_mouse_drag_merges_only_on_release_drop(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_horizontal")
+    editor.resize(240, editor.sizeHint().height())
+    editor.set_stops(
+        [(0, "#111111"), (30, "#222222"), (40, "#333333"), (100, "#444444")]
+    )
+
+    bar = editor._bar_rect()
+
+    def drag_to(ratio):
+        editor.mouseMoveEvent(
+            _mouse_event(
+                QEvent.Type.MouseMove,
+                QPointF(bar.left() + bar.width() * ratio, bar.center().y()),
+                Qt.MouseButton.LeftButton,
+            )
+        )
+
+    # Press the 30 marker on its pointer body, sweep to exactly the 40 stop's
+    # pixel: passing over it mid-drag must not merge anything.
+    editor.mousePressEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonPress,
+            editor._marker_center(30),
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    drag_to(0.35)
+    drag_to(0.4)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#333333"),
+        (40, "#222222"),
+        (100, "#444444"),
+    ]
+
+    # Releasing on that exact position merges — same position-equality check
+    # the old mid-drag code used, now only evaluated when the drag settles.
+    editor.mouseReleaseEvent(
+        _mouse_event(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(bar.left() + bar.width() * 0.4, bar.center().y()),
+            Qt.MouseButton.LeftButton,
+        )
+    )
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (100, "#444444"),
+    ]
+
+
+def test_release_within_one_percent_merges_onto_interior_marker(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops(
+        [(0, "#111111"), (40, "#333333"), (80, "#222222"), (100, "#444444")]
+    )
+
+    editor._selected = 2
+    editor._begin_drag()
+    editor._apply_drag_position(40.6)  # 0.6 off the 40 marker: no merge yet
+    assert len(editor._stops) == 4
+    editor._end_drag(merge=True)  # inside the 1% drop window: snaps onto 40
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (100, "#444444"),
+    ]
+    assert editor._stops[editor._selected] == (40, "#222222")
+
+
+def test_release_beyond_one_percent_keeps_both(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops(
+        [(0, "#111111"), (40, "#333333"), (80, "#222222"), (100, "#444444")]
+    )
+
+    editor._selected = 2
+    editor._begin_drag()
+    editor._apply_drag_position(41.2)  # 1.2 off the 40 marker: outside window
+    editor._end_drag(merge=True)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#333333"),
+        (41.2, "#222222"),
+        (100, "#444444"),
+    ]
+
+
+def test_release_near_bar_end_snaps_flush_onto_endpoint(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    editor = GradientStopsEditor()
+    editor.set_orientation("gradient_vertical")
+    editor.set_stops(
+        [(0, "#111111"), (40, "#222222"), (60, "#333333"), (100, "#444444")]
+    )
+
+    # 99.7 is inside the 0.5% end window: snap flush onto 100 so the dragged
+    # color attaches exactly to the bar edge.
+    editor._selected = 2
+    editor._begin_drag()
+    editor._apply_drag_position(99.7)
+    editor._end_drag(merge=True)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (100, "#333333"),
+    ]
+    assert editor._stops[editor._selected] == (100, "#333333")
+
+    # 99.4 is outside the 0.5% end window (and endpoint stops are excluded
+    # from the 1% interior window): the marker stays where it was released.
+    editor.set_stops(
+        [(0, "#111111"), (40, "#222222"), (60, "#333333"), (100, "#444444")]
+    )
+    editor._selected = 2
+    editor._begin_drag()
+    editor._apply_drag_position(99.4)
+    editor._end_drag(merge=True)
+    assert editor._stops == [
+        (0, "#111111"),
+        (40, "#222222"),
+        (99.4, "#333333"),
+        (100, "#444444"),
+    ]
+
+
+def test_set_stops_keeps_selection_among_equal_position_stops(qapp) -> None:
+    from krok_helper.subtitle_render.frontend.properties.property_panel import (
+        GradientStopsEditor,
+    )
+
+    stops = [(0, "#111111"), (40, "#222222"), (40, "#333333"), (100, "#444444")]
+    editor = GradientStopsEditor()
+    editor.set_stops(stops)
+    editor._selected = 2
+
+    # The panel round-trips the same stops back on every drag frame; the
+    # equal-position neighbour must not steal the selection.
+    editor.set_stops(stops)
+    assert editor._stops[editor._selected][1] == "#333333"

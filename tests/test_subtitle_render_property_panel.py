@@ -4464,6 +4464,15 @@ def test_property_panel_dragging_endpoint_creates_mergeable_stop(qapp):
             Qt.KeyboardModifier.NoModifier,
         )
     )
+    editor.mouseReleaseEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            start,
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
 
     assert [position for position, _color in editor._stops] == [0, 100]  # noqa: SLF001
 

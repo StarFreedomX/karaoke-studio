@@ -64,6 +64,12 @@ class GradientStopsEditor(QWidget):
     _POINTER_ARROW_LENGTH = 6
     _POINTER_BODY_LENGTH = 18
     _POINTER_HALF_THICKNESS = 5
+    # Drop-to-merge windows (percent of the bar): releasing within these
+    # distances of another marker / of a bar end counts as dropping onto it,
+    # because a mouse release can never land pixel-exact. The end windows are
+    # narrower so a drop near an edge snaps flush onto the endpoint.
+    _DROP_MERGE_INTERIOR_PCT = 1.0
+    _DROP_MERGE_ENDPOINT_PCT = 0.5
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -72,6 +78,10 @@ class GradientStopsEditor(QWidget):
         self._orientation = "horizontal"
         self._hard_edges = False
         self._dragging = False
+        self._drag_moved = False
+        self._drag_snapshot: Optional[list[tuple[float, str]]] = None
+        self._dragged_snapshot_index: Optional[int] = None
+        self._last_drag_position: Optional[float] = None
         self.setMinimumHeight(52)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -118,9 +128,15 @@ class GradientStopsEditor(QWidget):
     def set_stops(self, stops: list[tuple[float, str]]) -> None:
         selected_position = self._stops[self._selected][0] if self._stops else 0
         self._stops = _normalize_gradient_stops(stops)
+        # The panel round-trips stops back into set_stops on every drag frame;
+        # among equal-position candidates keep the previously selected marker,
+        # otherwise the neighbour would steal the ongoing drag.
         self._selected = min(
             range(len(self._stops)),
-            key=lambda index: abs(self._stops[index][0] - selected_position),
+            key=lambda index: (
+                abs(self._stops[index][0] - selected_position),
+                abs(index - self._selected),
+            ),
         )
         self.update()
         self.selectedChanged.emit(self._selected)
@@ -135,7 +151,12 @@ class GradientStopsEditor(QWidget):
         self._emit_stops_changed()
 
     def set_selected_position(self, position: float) -> None:
-        self._move_selected_stop(position)
+        # An explicit value (spin box) is a one-shot drag: move from a fresh
+        # baseline, then settle immediately like a drop.
+        self._begin_drag()
+        self._drag_moved = True
+        self._apply_drag_position(position)
+        self._end_drag(merge=True)
 
     def add_stop(self, position: float, color: Optional[str] = None) -> None:
         pos = _normalized_stop_position(position)
@@ -213,7 +234,8 @@ class GradientStopsEditor(QWidget):
             return
         pos = self._position_from_point(event.position())
         nearest = self._nearest_marker_index(event.position())
-        self._dragging = False
+        if self._dragging:
+            self._end_drag(merge=False)
         hit_rect = self._bar_rect().adjusted(-8, -8, 8, 8).united(
             self._pointer_lane_rect().adjusted(-10, -10, 10, 10)
         )
@@ -221,18 +243,20 @@ class GradientStopsEditor(QWidget):
             self._selected = nearest
             self.selectedChanged.emit(self._selected)
             self.update()
-            self._dragging = True
+            self._begin_drag()
         elif hit_rect.contains(event.position()):
             self.add_stop(pos)
-            self._dragging = True
+            self._begin_drag()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if not self._dragging:
             return
-        self._move_selected_stop(self._position_from_point(event.position()))
+        self._apply_drag_position(self._position_from_point(event.position()))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802, ARG002
-        self._dragging = False
+        if not self._dragging:
+            return
+        self._end_drag(merge=True)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         if self._hard_edges:
@@ -378,26 +402,122 @@ class GradientStopsEditor(QWidget):
     def _index_for_position(self, position: float) -> int:
         return min(range(len(self._stops)), key=lambda index: abs(self._stops[index][0] - position))
 
-    def _move_selected_stop(self, position: float) -> None:
-        old_position, color = self._stops[self._selected]
+    def _begin_drag(self) -> None:
+        """Freeze the drag baseline; only one marker ever moves per drag."""
+        self._dragging = True
+        self._drag_moved = False
+        self._drag_snapshot = list(self._stops)
+        self._dragged_snapshot_index = self._selected
+        self._last_drag_position = self._stops[self._selected][0]
+
+    def _end_drag(self, *, merge: bool) -> None:
+        self._dragging = False
+        moved = self._drag_moved
+        self._drag_moved = False
+        self._drag_snapshot = None
+        self._dragged_snapshot_index = None
+        self._last_drag_position = None
+        if merge and moved:
+            # Dropping a marker onto another one merges (the moved color
+            # wins). Exact equality always merges; a mouse drop additionally
+            # counts within the drop windows, while merely passing over a
+            # marker mid-drag never deletes anything.
+            self._merge_selected_collisions(
+                interior_pct=self._DROP_MERGE_INTERIOR_PCT,
+                endpoint_pct=self._DROP_MERGE_ENDPOINT_PCT,
+            )
+
+    def _apply_drag_position(self, position: float) -> None:
+        """Rebuild the stops from the frozen baseline with the dragged marker
+        at a new position.
+
+        The baseline plus the dragged index fully determine the result, so the
+        drag never consults live state that the panel round-trip rewrites, and
+        a marker visiting an endpoint mid-drag can never be mistaken for the
+        endpoint anchor.
+        """
+        snapshot = self._drag_snapshot
+        dragged_index = self._dragged_snapshot_index
+        if snapshot is None or dragged_index is None:
+            return
+        dragged_position, dragged_color = snapshot[dragged_index]
         pos = _normalized_stop_position(position)
-        if old_position in {0, 100}:
-            if pos == old_position:
-                return
-            self._stops.append((pos, color))
-            moved_index = len(self._stops) - 1
+        if pos != self._last_drag_position:
+            self._drag_moved = True
+            self._last_drag_position = pos
+        sole_endpoint_anchor = dragged_position in {0, 100} and not any(
+            stop[0] == dragged_position
+            for index, stop in enumerate(snapshot)
+            if index != dragged_index
+        )
+        if sole_endpoint_anchor and pos != dragged_position:
+            # The endpoint anchor stays put; dragging it off spawns a new stop.
+            stops = list(snapshot) + [(pos, dragged_color)]
         else:
-            self._stops[self._selected] = (pos, color)
-            moved_index = self._selected
-        # The persisted model retains equal-position stops, but an explicit UI
-        # drag onto an existing marker means "merge" (the moved marker wins).
-        self._stops = [
+            stops = [
+                stop
+                for index, stop in enumerate(snapshot)
+                if index != dragged_index
+            ] + [(pos, dragged_color)]
+        moved_stop = (pos, dragged_color)
+        self._stops = _normalize_gradient_stops(stops)
+        # Pin the selection to the dragged marker; an equal-position neighbour
+        # must not steal it (value-identical ties are visually equivalent).
+        self._selected = self._stops.index(moved_stop)
+        self._emit_stops_changed()
+
+    def _merge_selected_collisions(
+        self,
+        *,
+        interior_pct: float = 0.0,
+        endpoint_pct: float = 0.0,
+    ) -> None:
+        """Merge the selected stop onto a nearby stop once its position settles.
+
+        Called when the position settles (mouse release / explicit spin value),
+        never per drag frame, so passing over a marker mid-drag cannot delete
+        it. Exact position equality always merges. With ``interior_pct`` a
+        mouse drop within that window of an interior marker snaps onto it; with
+        ``endpoint_pct`` a drop within that window of a bar end snaps flush
+        onto the endpoint, so the dragged color lands exactly on the bar edge.
+        The dragged color wins. The spin box passes no windows: typed values
+        are exact and merge only on exact equality.
+        """
+        position, color = self._stops[self._selected]
+        if endpoint_pct and (
+            position < endpoint_pct or position > 100 - endpoint_pct
+        ):
+            self._snap_selected_onto(0 if position < 50 else 100, color)
+            return
+        nearest_index: Optional[int] = None
+        nearest_delta: Optional[float] = None
+        for index, (other_position, _other_color) in enumerate(self._stops):
+            if index == self._selected:
+                continue
+            if endpoint_pct and other_position in {0, 100}:
+                # Bar-end stops are governed by the narrower endpoint window.
+                continue
+            delta = abs(other_position - position)
+            if delta > 0 and not (interior_pct and delta < interior_pct):
+                continue
+            if nearest_delta is None or delta < nearest_delta:
+                nearest_index = index
+                nearest_delta = delta
+        if nearest_index is not None:
+            self._snap_selected_onto(self._stops[nearest_index][0], color)
+
+    def _snap_selected_onto(self, position: float, color: str) -> None:
+        """Replace any stop at ``position`` with the selected stop moved onto
+        it (dragged color wins)."""
+        selected_stop = self._stops[self._selected]
+        stops = [
             stop
-            for index, stop in enumerate(self._stops)
-            if stop[0] != pos or index == moved_index
+            for stop in self._stops
+            if stop[0] != position and stop is not selected_stop
         ]
-        self._stops = _normalize_gradient_stops(self._stops)
-        self._selected = self._index_for_position(pos)
+        stops.append((position, color))
+        self._stops = _normalize_gradient_stops(stops)
+        self._selected = self._stops.index((position, color))
         self._emit_stops_changed()
 
     def _interpolated_color(self, position: float) -> str:
