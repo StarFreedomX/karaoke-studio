@@ -8321,8 +8321,9 @@ def test_title_rows_consume_layout_alignments_top_down(qapp):
     assert layout.row_x[0] == pytest.approx(
         resolved.offset_x + half_edge, abs=0.001
     )
+    # Center 行不以左右余白锚定（N3 SetOneLineX），真居中。
     assert layout.row_x[1] == pytest.approx(
-        (1920 - w1) / 2 + resolved.offset_x, abs=0.001
+        (1920 - w1) / 2, abs=0.001
     )
     assert layout.row_x[2] == pytest.approx(
         1920 - resolved.offset_x - half_edge - w2, abs=0.001
@@ -8378,6 +8379,49 @@ def test_title_mixed_row_alignment_paints_rows_left_and_right(qapp):
     # 若次行仍错误沿用首行 left，右缘只会到 ≈50+行宽 ≪ 750。
     assert left == pytest.approx(50, abs=8)
     assert 800 - right == pytest.approx(50, abs=8)
+
+
+def test_title_center_layout_ignores_horizontal_and_vertical_margins(qapp):
+    """居中标题布局的真居中回归（N3 SetOneLineX / Middle 口径）。
+
+    标题布局的行布局=居中（或上下配置=居中）时，左右/上下余白曾被当作
+    有符号偏移加进居中位置，标题整体偏移一份余白（2026-09 用户反馈
+    「余白设 0 才居中」）。余白只应锚定 Left/Right 行与 Top/Bottom 锚定。
+    """
+    track = _title_track()
+    style = Style(
+        custom_style_schemes={},
+        layouts=[
+            LyricsLayout(
+                name="タイトル中央",
+                line_y_position="center",
+                line_y_margin_px=120,
+                horizontal_margin_px=200,
+                line_alignments=["center"],
+            ),
+        ],
+        title_overlays=[TitleOverlay(
+            enabled=True,
+            text_template="曲名タイトル",
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=48,
+            stroke_width_px=3,
+            layout_index=1,
+            show_mode="whole",
+            fade_in_ms=0,
+            fade_out_ms=0,
+        )],
+        line_lead_in_ms=0,
+        line_tail_ms=0,
+    )
+
+    img = _blank(800, 450)
+    paint_frame(img, track, 500, style)
+    left, top, right, bottom = _ink_bounds(img)
+    # 修复前：水平中心 ≈ 400+200、垂直中心 ≈ 225+120。
+    assert (left + right) / 2 == pytest.approx(400, abs=8)
+    assert (top + bottom) / 2 == pytest.approx(225, abs=12)
 
 
 def test_default_title_latin_font_does_not_inherit_global_lyrics_font(qapp):

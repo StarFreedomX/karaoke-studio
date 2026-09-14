@@ -6406,6 +6406,76 @@ def test_gpu_g3_title_overlay_matches_painter_window_fade_and_anchor(monkeypatch
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_centered_title_layout_ignores_margins_like_painter(monkeypatch) -> None:
+    """居中标题布局不受左右/上下余白影响，GPU 与 Painter 同口径。
+
+    修复前布局方案的余白被投影成标题 centerOffsetX/Y，居中标题整体偏移
+    一份余白（N3 SetOneLineX 对 Center 行全宽居中、Middle 忽略上下余白）。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        meta=TimingTrackMeta(title="星空", artist="歌手"),
+        lines=[TimingLine(chars=[TimingChar("尾", 3_000)], end_ms=4_000)],
+    )
+    title = TitleOverlay(
+        enabled=True,
+        text_template="{title} / {artist}",
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=48,
+        font_weight=700,
+        fill=PaintFill(mode="solid", color="#40FF60"),
+        stroke=PaintFill(mode="solid", color="#102010"),
+        stroke_width_px=3,
+        stroke2_width_px=0,
+        decoration_kind="shadow",
+        shadow=PaintFill(mode="solid", color="#00000000"),
+        shadow_offset_x=0,
+        shadow_offset_y=0,
+        layout_index=1,
+        show_mode="whole",
+        fade_in_ms=0,
+        fade_out_ms=0,
+    )
+    style = _g1_style(
+        line_lead_in_ms=0,
+        line_tail_ms=0,
+        custom_style_schemes={},
+        layouts=[
+            LyricsLayout(
+                name="タイトル中央",
+                line_y_position="center",
+                line_y_margin_px=60,
+                horizontal_margin_px=120,
+                line_alignments=["center"],
+            )
+        ],
+        title_overlays=[title],
+    )
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _configured, frames = _render_g1_frames(
+            renderer,
+            style,
+            (2_500,),
+            force_warp=True,
+            track=track,
+        )
+    painter = _render_painter_oracle(style, t_ms=2_500, track=track)
+
+    gpu_bounds = _payload_alpha_bounds(frames[0])
+    painter_bounds = _payload_alpha_bounds(painter)
+    # 修复前两个后端的水平中心都 ≈ 320+120、垂直中心都 ≈ 180+60。
+    assert abs((gpu_bounds[0] + gpu_bounds[2]) / 2 - 320) <= 8
+    assert abs((painter_bounds[0] + painter_bounds[2]) / 2 - 320) <= 8
+    assert abs((gpu_bounds[1] + gpu_bounds[3]) / 2 - 180) <= 12
+    assert abs((painter_bounds[1] + painter_bounds[3]) / 2 - 180) <= 12
+    assert all(
+        abs(actual - expected) <= 12
+        for actual, expected in zip(gpu_bounds, painter_bounds)
+    ), (gpu_bounds, painter_bounds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_g3_multiline_title_role_styles_match_painter(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
 

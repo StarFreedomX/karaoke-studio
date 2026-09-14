@@ -217,12 +217,16 @@ def title_row_screen_x(
     offset_x: int,
     half_edge: float,
 ) -> float:
-    """Place one title row by its page-row alignment against the screen edges."""
+    """Place one title row by its page-row alignment against the screen edges.
+
+    N3 的 ``SetOneLineX`` 里 Center 行以整行自然宽度居中、不以左右余白锚定
+    （与歌词 ``_resolve_line_x`` 同口径），余白只贴 Left / Right 行。
+    """
     if align == "left":
         return float(offset_x) + half_edge
     if align == "right":
         return float(img_w) - float(offset_x) - half_edge - row_w
-    return (float(img_w) - row_w) / 2.0 + float(offset_x)
+    return (float(img_w) - row_w) / 2.0
 
 
 def title_anchor_block_x0(
@@ -231,12 +235,16 @@ def title_anchor_block_x0(
     title: TitleOverlay,
     half_edge: float,
 ) -> float:
-    """Legacy anchor-side x of the whole block (widest row) on the nine grid."""
+    """Legacy anchor-side x of the whole block (widest row) on the nine grid.
+
+    居中锚点不带余白偏移：旧标题迁移时居中锚点的正负偏移本就「按 0 余白
+    近似」（``_layout_from_title_position``），这里保持同一口径。
+    """
     if title.anchor.endswith("left"):
         return float(title.offset_x) + half_edge
     if title.anchor.endswith("right"):
         return float(img_w) - block_w - float(title.offset_x) - half_edge
-    return (float(img_w) - block_w) / 2.0 + float(title.offset_x)
+    return (float(img_w) - block_w) / 2.0
 
 
 def title_row_offset_in_block(block_w: float, row_w: float, align: str) -> float:
@@ -249,12 +257,16 @@ def title_row_offset_in_block(block_w: float, row_w: float, align: str) -> float
 
 
 def title_block_y_top(img_h: int, block_h: float, title: TitleOverlay) -> float:
-    """Vertical anchor of the title block (nine-grid top edge)."""
+    """Vertical anchor of the title block (nine-grid top edge).
+
+    与歌词 ``_resolve_baseline_y`` 同口径：Top 用上余白、Bottom 用下余白、
+    Middle 整体垂直居中（N3 Middle 忽略上下余白）。
+    """
     if title.anchor.startswith("top"):
         return float(title.offset_y)
     if title.anchor.startswith("bottom"):
         return float(img_h) - block_h - title.offset_y
-    return (float(img_h) - block_h) / 2.0 + title.offset_y
+    return (float(img_h) - block_h) / 2.0
 
 
 def layout_title_overlay(

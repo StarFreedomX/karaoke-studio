@@ -791,12 +791,15 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
         // in _title_block_origin.
         const float titleHalfEdge = std::max(titleStyle.strokeWidth, 0.0f) * 0.5f;
         // The title block is one page: each row carries its own alignment
-        // (Python resolves the layout's line_alignments top-down), so both the
-        // edge margin and the center offset must hold the title's own offsets
-        // whichever alignment a row ends up using.  The anchor's horizontal
-        // suffix only stays as the default alignment.
+        // (Python resolves the layout's line_alignments top-down), so the
+        // edge margin must hold the title's own offsets whichever edge a row
+        // ends up using.  The anchor's horizontal suffix only stays as the
+        // default alignment.  Centered rows keep centerOffsetX at zero: N3's
+        // SetOneLineX anchors Center rows to the full movie width without the
+        // horizontal margin, and Middle centers vertically ignoring the
+        // vertical margin -- mirroring Painter's title_row_screen_x and
+        // title_block_y_top.
         titleStyle.horizontalMargin = offsetX + titleHalfEdge;
-        titleStyle.centerOffsetX = offsetX;
         if (anchor.endsWith(QStringLiteral("left"))) {
             titleStyle.alignment = "left";
         } else if (anchor.endsWith(QStringLiteral("right"))) {
@@ -818,7 +821,6 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
             titleStyle.bottomMargin = offsetY;
         } else {
             titleStyle.verticalPosition = "center";
-            titleStyle.centerOffsetY = offsetY;
         }
 
         const QJsonObject titleRoleStyles = title.value(
