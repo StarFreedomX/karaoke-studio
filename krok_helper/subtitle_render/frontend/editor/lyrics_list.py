@@ -170,6 +170,7 @@ _KARAOKE_EFFECTS = (
     ("scanline", "扫字线"),
     ("utopia_scanline", "Utopia+扫字线"),
     ("zoom_pulse", "整字放大"),
+    ("zoom_pulse_scanline", "整字放大+扫字线"),
 )
 _ENTRY_LABELS = dict(_ENTRY_EFFECTS)
 _EXIT_LABELS = dict(_EXIT_EFFECTS)

@@ -413,7 +413,7 @@ struct TextStyle {
     float scanlineGlowRadius = 8.0f;
     // Whole-char zoom pulse easing order (0..5; 0 = linear).  Whether the
     // effect is active is a per-line flag (TextLine::zoomPulseEnabled).
-    int zoomPulseCurveLevel = 3;
+    int zoomPulseCurveLevel = 1;
     bool operator==(const TextStyle &) const = default;
 };
 

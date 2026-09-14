@@ -14,10 +14,12 @@ ExitAnimation = Literal[
     "none", "fade", "slide_out", "rise", "char_fade", "char_drip", "spin_flip", "utopia"
 ]
 KaraokeAnimation = Literal[
-    "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline", "zoom_pulse"
+    "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline",
+    "zoom_pulse", "zoom_pulse_scanline"
 ]
-"""扫字线（``scanline`` / ``utopia_scanline``）是在基础 Wipe / Utopia 之上叠加的
-锋面高亮：唱字动画本体仍按 ``none`` / ``utopia`` 的基础模式渲染，扫字线层按
+"""扫字线（``scanline`` / ``utopia_scanline`` / ``zoom_pulse_scanline``）是在基础
+Wipe / Utopia / 整字放大之上叠加的锋面高亮：唱字动画本体仍按 ``none`` /
+``utopia`` 的基础模式渲染，扫字线层按
 ``Style.scanline_*`` 参数在走字锋面处附加高亮发光。整字放大（``zoom_pulse``）
 按 ``utopia`` 本体渲染，但缩放曲线换成「唱字期间缓出放大、唱字结束后缓入缩回」
 并改用字符中心原点。"""

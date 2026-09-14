@@ -1030,7 +1030,10 @@ class PropertyPanel(QWidget):
                     self._karaoke_anim_combo.findData(
                         timing.karaoke_anim
                         if timing.karaoke_anim
-                        in {"none", "no_wipe", "utopia", "scanline", "utopia_scanline", "zoom_pulse"}
+                        in {
+                            "none", "no_wipe", "utopia", "scanline", "utopia_scanline",
+                            "zoom_pulse", "zoom_pulse_scanline"
+                        }
                         else effective_karaoke_animation(self._style)
                     ),
                 )
@@ -1063,7 +1066,7 @@ class PropertyPanel(QWidget):
                             max(
                                 int(
                                     getattr(
-                                        self._style, "zoom_pulse_curve_level", 3
+                                        self._style, "zoom_pulse_curve_level", 1
                                     )
                                 ),
                                 0,

@@ -240,12 +240,13 @@ class EffectsPropertyPageBuilder:
             ("扫字线", "scanline"),
             ("utopia+扫字线", "utopia_scanline"),
             ("整字放大", "zoom_pulse"),
+            ("整字放大+扫字线", "zoom_pulse_scanline"),
         ):
             host._karaoke_anim_combo.addItem(label, value)
         host._karaoke_anim_combo.setToolTip(
             "控制歌词正在着色时的逐字动画；旧项目的 Utopia 入退场会自动兼容。"
             "扫字线在走字锋面处按设定粗细高亮发光（主文字与注音同效）；"
-            "整字放大在唱字期间持续放大、唱字结束后缓慢缩回"
+            "整字放大在唱字期间持续放大、唱字结束后缓慢缩回，可再叠加扫字线"
         )
         host._karaoke_anim_combo.currentIndexChanged.connect(
             lambda _index: host._update_style(
@@ -263,6 +264,7 @@ class EffectsPropertyPageBuilder:
             ("扫字线", "scanline"),
             ("utopia+扫字线", "utopia_scanline"),
             ("整字放大", "zoom_pulse"),
+            ("整字放大+扫字线", "zoom_pulse_scanline"),
         ):
             host._reverse_karaoke_anim_combo.addItem(label, value)
         host._reverse_karaoke_anim_combo.setToolTip(
@@ -331,17 +333,17 @@ class EffectsPropertyPageBuilder:
         compact_property_control(host._zoom_pulse_curve_combo)
         for label, value in (
             ("0级（线性）", 0),
-            ("1级（匀速）", 1),
+            ("1级（匀速·默认）", 1),
             ("2级（稍快）", 2),
-            ("3级（较快·默认）", 3),
+            ("3级（较快）", 3),
             ("4级（快）", 4),
             ("5级（极快）", 5),
         ):
             host._zoom_pulse_curve_combo.addItem(label, value)
         host._zoom_pulse_curve_combo.setToolTip(
             "整字放大速度等级：0=线性（匀速放大缩小）；1~5 为缓出/缓入曲线阶数，"
-            "等级越高放大越快贴近峰值、在峰值附近停留越久（默认 3；"
-            "1 级画面与 0 级相同）"
+            "等级越高放大越快贴近峰值、在峰值附近停留越久（默认 1，"
+            "画面与 0 级相同；觉得放大拖沓可调高）"
         )
         host._zoom_pulse_curve_combo.currentIndexChanged.connect(
             lambda _index: host._update_style(

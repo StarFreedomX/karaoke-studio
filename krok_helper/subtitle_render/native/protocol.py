@@ -151,12 +151,14 @@ def gpu_unsupported_features(
         }
     ):
         reasons.append("line_animation")
-    # 扫字线档位（scanline / utopia_scanline）由 GPU sidecar 原生渲染：
-    # 主文字与 ruby 的锋面高亮带在 d2d_backend_render 里与 Wipe/Utopia 同路绘制。
-    # 整字放大（zoom_pulse）同样原生渲染：本体按 utopia 逐字变换管线走，
-    # 曲线/原点由行级 zoom_pulse 标记在 C++ 侧切换。
+    # 扫字线档位（scanline / utopia_scanline / zoom_pulse_scanline）由 GPU
+    # sidecar 原生渲染：主文字与 ruby 的锋面高亮带在 d2d_backend_render 里与
+    # Wipe/Utopia 同路绘制。整字放大（zoom_pulse / zoom_pulse_scanline）同样
+    # 原生渲染：本体按 utopia 逐字变换管线走，曲线/原点由行级 zoom_pulse
+    # 标记在 C++ 侧切换。
     karaoke_effects = {
-        "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline", "zoom_pulse"
+        "inherit", "none", "no_wipe", "utopia", "scanline", "utopia_scanline",
+        "zoom_pulse", "zoom_pulse_scanline"
     }
     if (
         style.karaoke_anim not in karaoke_effects

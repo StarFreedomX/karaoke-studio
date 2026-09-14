@@ -7747,6 +7747,25 @@ def test_gpu_zoom_pulse_wipe_follows_painter(monkeypatch) -> None:
         )
     assert _payload_alpha_bounds(linear_gpu[0]) != _payload_alpha_bounds(steep_gpu[0])
 
+    # 组合档「整字放大+扫字线」：IR 三标志（utopia 本体 + zoom_pulse + scanline）
+    # 齐全，锋面高亮带叠加在缩放字形之上，GPU 与 Painter oracle 对照。
+    combo_style = replace(style, karaoke_anim="zoom_pulse_scanline")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, combo_gpu = _render_g1_frames(
+            renderer, combo_style, (1_450,), force_warp=True, track=track
+        )
+    combo_painter = _render_painter_oracle(combo_style, t_ms=1_450, track=track)
+    assert all(
+        abs(actual - expected) <= 14
+        for actual, expected in zip(
+            _payload_alpha_bounds(combo_gpu[0]),
+            _payload_alpha_bounds(combo_painter),
+        )
+    ), (
+        _payload_alpha_bounds(combo_gpu[0]),
+        _payload_alpha_bounds(combo_painter),
+    )
+
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_utopia_karaoke_bounce_uses_ruby_main_wipe_points(monkeypatch) -> None:

@@ -168,6 +168,7 @@ class TestDialog:
             "scanline",
             "utopia_scanline",
             "zoom_pulse",
+            "zoom_pulse_scanline",
         }
 
     def test_it_round_trips_the_choice(self) -> None:

@@ -263,7 +263,7 @@ struct ResolvedStyle {
     int scanlineGlowPx = 8;
     // 整字放大缓动档位（0~5，0=线性）来自全局 Style；仅显式选择 zoom_pulse
     // 档位的行会置位 TimingLine::zoomPulseEnabled。
-    int zoomPulseCurveLevel = 3;
+    int zoomPulseCurveLevel = 1;
     bool hasMainKaraokeColors = false;
     bool hasRubyKaraokeColors = false;
 };

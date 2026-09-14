@@ -85,6 +85,11 @@ def _utopia_transition(start_ms: int = 0, end_ms: int = 2000) -> LineCharTransit
 
 def test_zoom_pulse_resolves_to_utopia_base_animation() -> None:
     assert effective_karaoke_animation(_zoom_pulse_style()) == "utopia"
+    # 组合档同样按 utopia 本体渲染。
+    assert (
+        effective_karaoke_animation(_zoom_pulse_style(karaoke_anim="zoom_pulse_scanline"))
+        == "utopia"
+    )
     # 其它档位不受影响。
     assert effective_karaoke_animation(_zoom_pulse_style(karaoke_anim="none")) == "none"
     assert effective_karaoke_animation(_zoom_pulse_style(karaoke_anim="utopia")) == "utopia"
@@ -92,11 +97,67 @@ def test_zoom_pulse_resolves_to_utopia_base_animation() -> None:
 
 def test_effective_karaoke_zoom_pulse_only_accepts_explicit_mode() -> None:
     assert effective_karaoke_zoom_pulse(_zoom_pulse_style())
+    assert effective_karaoke_zoom_pulse(
+        _zoom_pulse_style(karaoke_anim="zoom_pulse_scanline")
+    )
     assert not effective_karaoke_zoom_pulse(_zoom_pulse_style(karaoke_anim="utopia"))
+    assert not effective_karaoke_zoom_pulse(
+        _zoom_pulse_style(karaoke_anim="utopia_scanline")
+    )
     assert not effective_karaoke_zoom_pulse(_zoom_pulse_style(karaoke_anim="none"))
     # inherit 的旧推导（入退场含 utopia）不产生整字放大。
     assert not effective_karaoke_zoom_pulse(
         _zoom_pulse_style(karaoke_anim="inherit", entry_anim="utopia")
+    )
+
+
+def test_zoom_pulse_scanline_combines_both_overlays() -> None:
+    from krok_helper.subtitle_render.domain.models import effective_karaoke_scanline
+
+    combo = _zoom_pulse_style(karaoke_anim="zoom_pulse_scanline")
+    assert effective_karaoke_scanline(combo)
+    assert effective_karaoke_zoom_pulse(combo)
+    # 纯整字放大档不点亮扫字线。
+    assert not effective_karaoke_scanline(_zoom_pulse_style())
+
+
+def test_zoom_pulse_scanline_serializes_and_bakes_per_line() -> None:
+    style = _zoom_pulse_style(karaoke_anim="zoom_pulse_scanline")
+    restored = style_from_dict(style_to_dict(style))
+    assert restored.karaoke_anim == "zoom_pulse_scanline"
+    override = line_animation_override_from_dict(
+        {"entry_anim": "none", "exit_anim": "none", "karaoke_anim": "zoom_pulse_scanline"}
+    )
+    assert override is not None and override.karaoke_anim == "zoom_pulse_scanline"
+    reverse = TimingLine(
+        chars=[TimingChar("歌", 0)], end_ms=500, wipe_reverse=True
+    )
+    assert effective_karaoke_zoom_pulse(style_with_line_animation(style, reverse))
+
+
+def test_zoom_pulse_scanline_gpu_ir_marks_all_three_flags() -> None:
+    from krok_helper.subtitle_render.engine.render.render_ir import build_render_ir
+
+    ir = build_render_ir(
+        _single_char_track(),
+        _zoom_pulse_style(karaoke_anim="zoom_pulse_scanline"),
+        width=640,
+        height=360,
+        fps=60,
+    )
+    line = ir["track"]["lines"][0]
+    assert line["karaoke_anim"] == "utopia"
+    assert line["scanline"] is True
+    assert line["zoom_pulse"] is True
+
+
+def test_zoom_pulse_scanline_does_not_force_gpu_fallback() -> None:
+    assert (
+        gpu_unsupported_features(
+            _single_char_track(),
+            _zoom_pulse_style(karaoke_anim="zoom_pulse_scanline"),
+        )
+        == ()
     )
 
 
@@ -200,38 +261,40 @@ def test_zoom_pulse_active_window_covers_shrink_tail() -> None:
 
 def test_zoom_pulse_enlarge_phase_eases_out() -> None:
     start, end = 0, 1000
-    mid = zoom_pulse_wipe_scale(500, start, end)
+    mid = zoom_pulse_wipe_scale(500, start, end, 3)
     # 三次缓出：中点已越过线性中点（1.125）逼近峰值。
     assert mid == pytest.approx(1.21875)
     assert mid > 1.125
     # 3/4 处几乎贴住峰值（停留感）。
-    assert zoom_pulse_wipe_scale(750, start, end) > 1.24
+    assert zoom_pulse_wipe_scale(750, start, end, 3) > 1.24
 
 
 def test_zoom_pulse_shrink_phase_eases_in() -> None:
     start, end = 0, 1000
     # 缩回段前 1/3：仍贴近峰值（远高于线性位置 1.1667）。
-    assert zoom_pulse_wipe_scale(end + 100, start, end) == pytest.approx(
+    assert zoom_pulse_wipe_scale(end + 100, start, end, 3) == pytest.approx(
         1.0 + 0.25 * (1.0 - (100.0 / 300.0) ** 3), rel=1e-6
     )
-    assert zoom_pulse_wipe_scale(end + 100, start, end) > 1.23
+    assert zoom_pulse_wipe_scale(end + 100, start, end, 3) > 1.23
     # 尾段快速落回（q=5/6 时三次缓入只剩约 10% 的放大量）。
-    assert zoom_pulse_wipe_scale(end + 250, start, end) < 1.11
+    assert zoom_pulse_wipe_scale(end + 250, start, end, 3) < 1.11
 
 
 def test_zoom_pulse_peak_is_c1_smooth() -> None:
     start, end = 0, 1000
-    before = zoom_pulse_wipe_scale(end - 1, start, end)
-    after = zoom_pulse_wipe_scale(end, start, end)
+    before = zoom_pulse_wipe_scale(end - 1, start, end, 3)
+    after = zoom_pulse_wipe_scale(end, start, end, 3)
     # 峰值两侧导数均为 0：单帧步进远小于峰值的 0.5%。
     assert abs(after - before) < ZOOM_PULSE_PEAK_RATIO * 0.005
 
 
 def test_zoom_pulse_short_char_reaches_peak_then_shrinks() -> None:
     start, end = 0, 50
-    assert zoom_pulse_wipe_scale(end, start, end) == pytest.approx(ZOOM_PULSE_PEAK_RATIO)
-    assert zoom_pulse_wipe_scale(end + 50, start, end) > 1.2
-    assert zoom_pulse_wipe_scale(end + ZOOM_PULSE_SHRINK_MS, start, end) == 1.0
+    assert zoom_pulse_wipe_scale(end, start, end, 3) == pytest.approx(
+        ZOOM_PULSE_PEAK_RATIO
+    )
+    assert zoom_pulse_wipe_scale(end + 50, start, end, 3) > 1.2
+    assert zoom_pulse_wipe_scale(end + ZOOM_PULSE_SHRINK_MS, start, end, 3) == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +324,7 @@ def test_zoom_pulse_curve_level_monotonic_stay_at_peak() -> None:
 
 
 def test_zoom_pulse_curve_level_defaults_and_clamps() -> None:
-    assert zoom_pulse_curve_level(Style(karaoke_anim="zoom_pulse")) == 3
+    assert zoom_pulse_curve_level(Style(karaoke_anim="zoom_pulse")) == 1
     assert zoom_pulse_curve_level(Style(zoom_pulse_curve_level=99)) == 5
     assert zoom_pulse_curve_level(Style(zoom_pulse_curve_level=-2)) == 0
     # 曲线函数自身对越界档位也做钳制。
@@ -303,7 +366,7 @@ def test_transition_char_state_obeys_curve_level() -> None:
 
 
 def test_transition_char_state_uses_zoom_pulse_curve() -> None:
-    style = _zoom_pulse_style()
+    style = _zoom_pulse_style(zoom_pulse_curve_level=3)
     transition = _utopia_transition()
     opacity, dx, dy, rotation, scale_x, scale_y, skew_y = transition_char_state(
         style,
@@ -321,7 +384,7 @@ def test_transition_char_state_uses_zoom_pulse_curve() -> None:
 
 
 def test_zoom_pulse_shrink_tail_survives_past_char_end() -> None:
-    style = _zoom_pulse_style()
+    style = _zoom_pulse_style(zoom_pulse_curve_level=3)
     transition = _utopia_transition()
     # t > char_end：is_utopia_wiping 已为 False，但整字放大尾窗仍返回缩放。
     _, _, _, _, scale_x, _, _ = transition_char_state(
@@ -447,3 +510,28 @@ def test_painter_zoom_pulse_differs_from_utopia_growth_direction(qapp) -> None:
     utopia_bounds = _alpha_bounds(track, utopia, 500)
     # 峰值更高（1.25 vs utopia 走字脉冲 1.15），且 utopia 从左缘向右上生长。
     assert (zoom_bounds[1] - zoom_bounds[0]) > (utopia_bounds[1] - utopia_bounds[0])
+
+
+def _frame_bytes(track: TimingTrack, style: Style, t_ms: int) -> bytes:
+    image = QImage(800, 450, QImage.Format.Format_RGBA8888)
+    image.fill(0)
+    paint_frame(image, track, t_ms, style)
+    bits = image.constBits()
+    bits.setsize(image.sizeInBytes())
+    return bytes(bits)
+
+
+def _visible_diff(left: bytes, right: bytes) -> int:
+    a = np.frombuffer(left, dtype=np.uint8).reshape(-1, 4).astype(np.int16)
+    b = np.frombuffer(right, dtype=np.uint8).reshape(-1, 4).astype(np.int16)
+    return int(np.count_nonzero(np.abs(a - b).max(axis=1) > 2))
+
+
+def test_painter_zoom_pulse_scanline_highlights_the_moving_front(qapp) -> None:
+    track = _single_char_track()
+    base = _zoom_pulse_style()
+    combo = _zoom_pulse_style(karaoke_anim="zoom_pulse_scanline")
+    # 唱字进行中：整字放大保持不变，锋面高亮带叠加出可见差异。
+    assert _visible_diff(_frame_bytes(track, base, 500), _frame_bytes(track, combo, 500)) > 20
+    # 未开始（t=0）：无锋面无差异，两档画面一致。
+    assert _visible_diff(_frame_bytes(track, base, 0), _frame_bytes(track, combo, 0)) == 0
