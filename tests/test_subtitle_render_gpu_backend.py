@@ -655,7 +655,8 @@ def test_gpu_latin_stretch_changes_real_pixels_without_stretching_cjk() -> None:
         assert width_of(renderer, "W", 100) < width_of(renderer, "W", 160)
         assert width_of(renderer, "한", 60) == width_of(renderer, "한", 160)
         assert width_of(renderer, "中", 60) == width_of(renderer, "中", 160)
-        assert width_of(renderer, "!", 60) == width_of(renderer, "!", 160)
+        assert width_of(renderer, "!", 60) < width_of(renderer, "!", 160)
+        assert width_of(renderer, "。", 60) < width_of(renderer, "。", 160)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")

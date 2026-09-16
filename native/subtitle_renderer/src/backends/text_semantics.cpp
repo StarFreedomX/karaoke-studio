@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cwctype>
 
+#include <QChar>
+
 namespace krok::subtitle::native {
 
 bool isLatinText(const std::wstring &text) {
@@ -10,12 +12,9 @@ bool isLatinText(const std::wstring &text) {
         return false;
     }
     return std::all_of(text.begin(), text.end(), [](wchar_t value) {
-        return (value >= L'0' && value <= L'9')
-            || (value >= L'A' && value <= L'Z')
-            || (value >= L'a' && value <= L'z')
-            || (value >= 0x00c0 && value <= 0x00d6)
-            || (value >= 0x00d8 && value <= 0x00f6)
-            || (value >= 0x00f8 && value <= 0x00ff);
+        return (value >= 0x20 && value <= 0x7e)
+            || (value >= 0x00c0 && value <= 0x00ff)
+            || QChar(static_cast<char16_t>(value)).isPunct();
     });
 }
 
