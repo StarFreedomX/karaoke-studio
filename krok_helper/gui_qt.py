@@ -30,6 +30,7 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
     QPropertyAnimation,
+    QRect,
     QSize,
     QTimer,
     Qt,
@@ -330,6 +331,21 @@ class PageTransitionOverlay(QWidget):
         painter.drawPixmap(int(self._offset), 0, self._new_pixmap)
 
 
+def _valid_window_geometry(value: object) -> tuple[int, int, int, int] | None:
+    """校验持久化的主窗口几何 ``[x, y, width, height]``，无效返回 ``None``。
+
+    x / y 允许负值（显示器摆在主屏左侧/上方时坐标为负），宽高必须为正。
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        return None
+    x, y, width, height = value
+    if width <= 0 or height <= 0:
+        return None
+    return x, y, width, height
+
+
 class KrokHelperQtApp(QMainWindow):
     """工作台主窗口（外壳）。
 
@@ -374,6 +390,9 @@ class KrokHelperQtApp(QMainWindow):
         self._media_duration_cache: dict[Path, str] = {}
         self._restoring_from_maximized = False
         self._startup_geometry_applied = False
+        # 最近一次窗口化（非最大化/全屏/最小化）几何 [x, y, width, height]。
+        # 启动恢复后由 move/resize 事件实时维护，供退出最大化与下次启动复用。
+        self._last_normal_geometry: list[int] = []
         self._page_transition_overlay: PageTransitionOverlay | None = None
         self._page_switch_anim: QPropertyAnimation | None = None
         self._settings_dialogs = SettingsDialogs(host=self, parent=self)
@@ -636,43 +655,158 @@ class KrokHelperQtApp(QMainWindow):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._track_normal_geometry()
         page = getattr(self, "lyrics_page", None)
         if page is not None:
             page.refresh_layout_direction()
 
+    def moveEvent(self, event) -> None:  # noqa: N802
+        super().moveEvent(event)
+        self._track_normal_geometry()
+
+    def _track_normal_geometry(self) -> None:
+        """窗口化状态下实时记住当前几何，供退出最大化与下次启动恢复。
+
+        最大化/全屏/最小化期间的 move/resize 反映的是系统摆放，不是用户的
+        窗口化几何，一律跳过；``_restoring_from_maximized`` 期间（我们正在
+        显式恢复几何）也跳过，避免中间态覆盖要恢复的目标矩形 —— 恢复方法
+        自己负责在落位后更新 ``_last_normal_geometry``。
+        """
+        if not getattr(self, "_startup_geometry_applied", False):
+            return
+        if self._restoring_from_maximized:
+            return
+        state = self.windowState()
+        if state & (
+            Qt.WindowState.WindowMaximized
+            | Qt.WindowState.WindowFullScreen
+            | Qt.WindowState.WindowMinimized
+        ):
+            return
+        geo = self.geometry()
+        if geo.isValid() and geo.width() > 0 and geo.height() > 0:
+            self._last_normal_geometry = [geo.x(), geo.y(), geo.width(), geo.height()]
+
     def _apply_startup_window_geometry(self) -> None:
+        """首帧显示后应用窗口几何：优先恢复上次记住的，否则默认尺寸居中。"""
+        if self._apply_window_geometry_from_settings():
+            return
         self._restore_windowed_geometry_centered()
 
+    def _apply_window_geometry_from_settings(self) -> bool:
+        """按持久化设置恢复主窗口几何与最大化/全屏状态。
+
+        Returns:
+            True 表示几何恢复成功；False（无记录/记录脱屏）时调用方回落默认居中。
+        """
+        geo = _valid_window_geometry(getattr(self.settings, "window_geometry", None))
+        if geo is None:
+            return False
+        clamped = self._clamp_geometry_to_screen(*geo)
+        if clamped is None:
+            return False
+        x, y, width, height = clamped
+        self.setGeometry(x, y, width, height)
+        self._last_normal_geometry = [x, y, width, height]
+        state = self.windowState()
+        if self.settings.window_fullscreen:
+            state |= Qt.WindowState.WindowFullScreen
+        if self.settings.window_maximized:
+            state |= Qt.WindowState.WindowMaximized
+        if state != self.windowState():
+            # 先摆好窗口化几何再进入最大化/全屏：Qt 会把上面的矩形记作
+            # normalGeometry，用户退出最大化时回到它而不是默认尺寸。
+            self.setWindowState(state)
+        return True
+
+    def _clamp_geometry_to_screen(
+        self, x: int, y: int, width: int, height: int
+    ) -> tuple[int, int, int, int] | None:
+        """把窗口几何夹进重叠面积最大的屏幕可用区，返回修正后的矩形。
+
+        显示器布局可能在两次启动之间变化（拔掉副屏、改缩放），完全脱屏的
+        记录返回 ``None``，由调用方回落默认居中。位置夹取保证至少留出可抓
+        拖的标题区，不会出现"窗口挂在屏幕边缘外拖不回来"。
+        """
+        screens = [screen for screen in QApplication.screens() if screen is not None]
+        if not screens:
+            primary = QApplication.primaryScreen()
+            screens = [primary] if primary is not None else []
+        if not screens:
+            return None
+        rect = QRect(x, y, width, height)
+        best = None
+        best_area = 0
+        for candidate in screens:
+            available = candidate.availableGeometry()
+            overlap = available.intersected(rect)
+            area = max(0, overlap.width()) * max(0, overlap.height())
+            if area > best_area:
+                best = available
+                best_area = area
+        if best is None or best_area <= 0 or best.width() <= 0 or best.height() <= 0:
+            return None
+
+        min_width = min(WINDOW_MIN_WIDTH, best.width())
+        min_height = min(WINDOW_MIN_HEIGHT, best.height())
+        if min_width <= 0 or min_height <= 0:
+            return None
+        self.setMinimumSize(min_width, min_height)
+        width = max(min_width, min(width, best.width()))
+        height = max(min_height, min(height, best.height()))
+        x = min(max(x, best.x() - width + 96), best.x() + best.width() - 96)
+        y = min(max(y, best.y()), best.y() + best.height() - 32)
+        return x, y, width, height
+
     def _restore_windowed_geometry_centered(self) -> None:
+        """回到窗口化几何：有记住的矩形就恢复它，否则按默认尺寸居中。
+
+        退出最大化/全屏也走这里（见 :meth:`changeEvent`）。落点必须由我们
+        显式 ``setGeometry`` 而不是信 Qt 自己恢复 —— 后者曾出现恢复后窗口
+        落到屏幕右侧的问题（c2a8fe85）。两条路都会重新夹一遍当前屏幕
+        可用区，会话中显示器布局同样可能变化。
+        """
         try:
-            screen = self.screen() or QApplication.primaryScreen()
-            if screen is None:
-                return
-            available = screen.availableGeometry()
-            safe_rect = available.adjusted(48, 72, -48, -88)
-            if safe_rect.width() <= 0 or safe_rect.height() <= 0:
-                safe_rect = available.adjusted(24, 24, -24, -48)
-
-            min_width = min(WINDOW_MIN_WIDTH, safe_rect.width())
-            min_height = min(WINDOW_MIN_HEIGHT, safe_rect.height())
-            if min_width > 0 and min_height > 0:
-                self.setMinimumSize(min_width, min_height)
-
-            target_width = min(
-                WINDOW_WIDTH,
-                safe_rect.width(),
-            )
-            target_height = min(
-                WINDOW_HEIGHT,
-                safe_rect.height(),
-            )
-            target_width = max(min_width, target_width)
-            target_height = max(min_height, target_height)
-            left = safe_rect.x() + max(0, (safe_rect.width() - target_width) // 2)
-            top = safe_rect.y() + max(0, (safe_rect.height() - target_height) // 2)
-            self.setGeometry(left, top, target_width, target_height)
+            remembered = _valid_window_geometry(self._last_normal_geometry)
+            if remembered is not None:
+                clamped = self._clamp_geometry_to_screen(*remembered)
+                if clamped is not None:
+                    x, y, width, height = clamped
+                    self.setGeometry(x, y, width, height)
+                    self._last_normal_geometry = [x, y, width, height]
+                    return
+            self._restore_default_windowed_geometry_centered()
         finally:
             self._restoring_from_maximized = False
+
+    def _restore_default_windowed_geometry_centered(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        safe_rect = available.adjusted(48, 72, -48, -88)
+        if safe_rect.width() <= 0 or safe_rect.height() <= 0:
+            safe_rect = available.adjusted(24, 24, -24, -48)
+
+        min_width = min(WINDOW_MIN_WIDTH, safe_rect.width())
+        min_height = min(WINDOW_MIN_HEIGHT, safe_rect.height())
+        if min_width > 0 and min_height > 0:
+            self.setMinimumSize(min_width, min_height)
+
+        target_width = min(
+            WINDOW_WIDTH,
+            safe_rect.width(),
+        )
+        target_height = min(
+            WINDOW_HEIGHT,
+            safe_rect.height(),
+        )
+        target_width = max(min_width, target_width)
+        target_height = max(min_height, target_height)
+        left = safe_rect.x() + max(0, (safe_rect.width() - target_width) // 2)
+        top = safe_rect.y() + max(0, (safe_rect.height() - target_height) // 2)
+        self.setGeometry(left, top, target_width, target_height)
+        self._last_normal_geometry = [left, top, target_width, target_height]
 
     def _on_theme_changed(self) -> None:
         """SUG ``theme.changed`` 回调：重应用工作台外壳 QSS + 品牌色 + 重跑
@@ -1523,7 +1657,34 @@ class KrokHelperQtApp(QMainWindow):
             self.settings.ffmpeg_dir = self.ffmpeg_dir_text
             self.collect_page_settings()
         self._sync_lyrics_timing_host_paths()
+        self._capture_window_geometry_into_settings()
         return save_app_settings(self.settings)
+
+    def _capture_window_geometry_into_settings(self) -> None:
+        """把当前窗口几何与最大化/全屏状态写进 settings，供下次启动恢复。
+
+        挂在 :meth:`_save_all_settings` 上而不是 ``closeEvent``：页面构建期
+        也会走到保存路径，那时窗口还没显示、几何是默认值，采了会把刚加载的
+        持久化几何冲掉 —— 所以用 ``_startup_geometry_applied`` 把首帧显示前
+        的保存全部跳过。同时这也让更新强退（不走 ``closeEvent``）能带上几何。
+        """
+        if not self._startup_geometry_applied:
+            return
+        state = self.windowState()
+        geo = _valid_window_geometry(self._last_normal_geometry)
+        if geo is None and not state & (
+            Qt.WindowState.WindowMaximized
+            | Qt.WindowState.WindowFullScreen
+            | Qt.WindowState.WindowMinimized
+        ):
+            # 兜底：move/resize 事件尚未跑过时直接读当前几何（仅窗口化态可靠）。
+            live = self.geometry()
+            geo = _valid_window_geometry((live.x(), live.y(), live.width(), live.height()))
+        if geo is None:
+            return
+        self.settings.window_geometry = [geo[0], geo[1], geo[2], geo[3]]
+        self.settings.window_maximized = bool(state & Qt.WindowState.WindowMaximized)
+        self.settings.window_fullscreen = bool(state & Qt.WindowState.WindowFullScreen)
 
     def _bind_shortcuts(self) -> None:
         # Ctrl+S 是跨模块的（对齐导出 / 打轴保存），留在外壳；

@@ -104,6 +104,15 @@ class AppSettings:
     # 全局开关（不分页面），用户在工作流栏右上角的折叠按钮里手动切换并持久化。
     workflow_compact: bool = False
 
+    # ── 主窗口几何记忆 ──
+    # 上次退出时的窗口化几何 [x, y, width, height] 与最大化/全屏状态。空列表表示
+    # 首次运行或上次记录无效，启动时按默认尺寸居中。恢复顺序：先摆好窗口化几何
+    # 再进入最大化/全屏（Qt 会把该矩形记作 normalGeometry），退出最大化即回到它。
+    # x / y 允许负值（显示器摆在主屏左侧/上方时坐标为负）。
+    window_geometry: list[int] = field(default_factory=list)
+    window_maximized: bool = False
+    window_fullscreen: bool = False
+
     # ── 歌词打轴模块（StrangeUtaGame）的设置 namespace ──
     # 由 frontend/settings/app_settings.py 中 AppSettings 的 dotted-key 树
     # 序列化/反序列化得来，宿主直接以 dict 形式持久化；StrangeUtaGame
@@ -267,6 +276,9 @@ def _settings_from_payload(payload: dict) -> AppSettings:
         lyrics_timing_network_dictionary=_safe_dict(payload.get("lyrics_timing_network_dictionary")),
         lyrics_timing_migrated_v1=bool(payload.get(LYRICS_TIMING_MIGRATED_KEY, False)),
         workflow_compact=bool(payload.get("workflow_compact", False)),
+        window_geometry=_safe_window_geometry(payload.get("window_geometry")),
+        window_maximized=bool(payload.get("window_maximized", False)),
+        window_fullscreen=bool(payload.get("window_fullscreen", False)),
         subtitle_render=_safe_dict(payload.get("subtitle_render")),
         pymss=_safe_dict(payload.get("pymss")),
     )
@@ -438,6 +450,22 @@ def _safe_splitter_sizes(value: object, expected_count: int) -> list[int]:
         return []
     sizes = [int(item) for item in value]
     return sizes if sum(sizes) > 0 else []
+
+
+def _safe_window_geometry(value: object) -> list[int]:
+    """Return a persisted main-window [x, y, width, height], or [] when invalid.
+
+    x / y 允许负值（多显示器摆在主屏左侧/上方时坐标为负）；宽高必须为正。
+    与 :func:`_safe_splitter_sizes` 不同，不能按「负数即非法」一刀切。
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return []
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        return []
+    x, y, width, height = (int(item) for item in value)
+    if width <= 0 or height <= 0:
+        return []
+    return [x, y, width, height]
 
 
 # ════════════════════════════════════════════════════════════════════
