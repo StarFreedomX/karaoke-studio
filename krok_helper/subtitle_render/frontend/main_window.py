@@ -425,17 +425,24 @@ RENDER_WORKER_OPTIONS = (0, 4, 8, 12, 16)
 """0 = 自动（最多 8）；其余值为用户显式选择的渲染进程数。"""
 
 
-#: 标题里跟着"用户习惯"走的字段（标题文字、显示时长这些是逐曲的，不在此列）。
-#:
-#: 淡入淡出时长改一次就该一直沿用 —— 每开一个新项目重设一遍 300 → 250 很烦。
-#: 尾段那两项是 ``Optional``：``None`` 表示"跟随开头"，原样记住即可。
+#: 标题里跟着"用户习惯"走的字段。除条目名、标题文字、逐字角色、自定义
+#: 时间段（逐曲）和字体/颜色/锚点（渲染时由 ``scheme_name`` + ``layout_index``
+#: 推导的解析结果）之外，剩下的全部记忆 —— 改一次就该一直沿用，每开一个
+#: 新项目重设一遍 300 → 250、「自定义」→「全程显示」很烦。尾段那两项是
+#: ``Optional``：``None`` 表示"跟随开头"，原样记住即可。
 _TITLE_PREFERENCE_FIELDS = (
     "enabled",
     "layout_index",
+    "scheme_name",
     "fade_in_ms",
     "fade_out_ms",
     "tail_fade_in_ms",
     "tail_fade_out_ms",
+    "show_mode",
+    "head_offset_ms",
+    "duration_ms",
+    "tail_offset_ms",
+    "tail_duration_ms",
 )
 
 #: 上面那几项里，纯粹的时长字段（``enabled`` / ``layout_index`` 另有存取方式）。
@@ -444,6 +451,16 @@ _TITLE_FADE_FIELDS = (
     "fade_out_ms",
     "tail_fade_in_ms",
     "tail_fade_out_ms",
+)
+
+#: 显示时段的字段（模式 + 时间偏移 + 显示时长）；自定义时间段窗口是逐曲
+#: 的，不记——新建条目时按工程时长现铺。
+_TITLE_TIMING_FIELDS = (
+    "show_mode",
+    "head_offset_ms",
+    "duration_ms",
+    "tail_offset_ms",
+    "tail_duration_ms",
 )
 
 
@@ -4662,16 +4679,12 @@ class SubtitleRenderWindow(QWidget):
         )
 
     def _new_title_entry_defaults(self) -> TitleOverlay:
-        """新增标题条目套用应用偏好（启用/布局/淡入淡出）。"""
+        """新增标题条目套用应用偏好（启用/布局/淡入淡出/显示时段）。"""
         return replace(
             TitleOverlay(),
             **{
                 field: value
-                for field in (
-                    "enabled",
-                    "layout_index",
-                    *_TITLE_FADE_FIELDS,
-                )
+                for field in _TITLE_PREFERENCE_FIELDS
                 if (value := getattr(
                     self._preferred_title_for_preferences(self._app_default_style),
                     field,
@@ -7542,15 +7555,19 @@ class SubtitleRenderWindow(QWidget):
         )
         previous_title = self._preferred_title_for_preferences(previous)
         current_title = self._preferred_title_for_preferences(current)
-        title_preference_changed = (
-            bool(previous_title.enabled),
-            int(previous_title.layout_index or 0),
-            *(getattr(previous_title, name) for name in _TITLE_FADE_FIELDS),
-        ) != (
-            bool(current_title.enabled),
-            int(current_title.layout_index or 0),
-            *(getattr(current_title, name) for name in _TITLE_FADE_FIELDS),
-        )
+
+        def _title_preference_signature(title: TitleOverlay) -> tuple:
+            return (
+                bool(title.enabled),
+                int(title.layout_index or 0),
+                title.scheme_name,
+                *(getattr(title, name) for name in _TITLE_FADE_FIELDS),
+                *(getattr(title, name) for name in _TITLE_TIMING_FIELDS),
+            )
+
+        title_preference_changed = _title_preference_signature(
+            previous_title
+        ) != _title_preference_signature(current_title)
         app_title = self._preferred_title_for_preferences(self._app_default_style)
         remembered_layout_name = self._layout_name_for_index(
             self._app_default_style, app_title.layout_index
@@ -7577,9 +7594,14 @@ class SubtitleRenderWindow(QWidget):
                             else bool(app_title.enabled)
                         ),
                         layout_index=app_layout_index,
+                        scheme_name=source_title.scheme_name,
                         **{
                             name: getattr(source_title, name)
                             for name in _TITLE_FADE_FIELDS
+                        },
+                        **{
+                            name: getattr(source_title, name)
+                            for name in _TITLE_TIMING_FIELDS
                         },
                     )
                 ],

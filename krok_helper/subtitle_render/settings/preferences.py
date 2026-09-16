@@ -92,6 +92,19 @@ TITLE_FADE_FIELDS = (
     "tail_fade_in_ms",
     "tail_fade_out_ms",
 )
+TITLE_TIMING_FIELDS = (
+    "show_mode",
+    "head_offset_ms",
+    "duration_ms",
+    "tail_offset_ms",
+    "tail_duration_ms",
+)
+"""标题「显示时段」里跟着用户习惯走的字段。
+
+自定义时间段窗口是逐曲的，不在此列；``tail_duration_ms`` 是 ``Optional``，
+``None`` 表示"跟随开头"，原样记住。
+"""
+_TITLE_SHOW_MODES = frozenset({"custom", "whole", "head", "tail", "head_tail"})
 DEFAULT_AUTO_SAVE_INTERVAL_MINUTES = 5
 DEFAULT_PROJECT_BACKUP_COUNT = 5
 DEFAULT_PREVIEW_SPLITTER_RATIO = 0.4
@@ -422,6 +435,15 @@ def load_app_style_preferences(
         title_layout_index = int(legacy_title.layout_index or 0)
     else:
         title_layout_index = _default_title_layout_index(normalized_style)
+    if "title_scheme_name" in defaults:
+        scheme_value = defaults.get("title_scheme_name")
+        title_scheme_name = (
+            scheme_value if isinstance(scheme_value, str) and scheme_value else None
+        )
+    elif had_persisted_title:
+        title_scheme_name = legacy_title.scheme_name
+    else:
+        title_scheme_name = TitleOverlay().scheme_name
     persisted_fades = defaults.get("title_fades")
     title_fades: dict[str, object] = {}
     if isinstance(persisted_fades, dict):
@@ -433,6 +455,7 @@ def load_app_style_preferences(
                 title_fades[name] = None
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 title_fades[name] = max(int(value), 0)
+    title_timing = _title_timing_from_payload(defaults.get("title_timing"))
     app_default_style = replace(
         normalized_style,
         custom_style_schemes={TITLE_SCHEME_NAME: deepcopy(title_scheme)},
@@ -442,7 +465,9 @@ def load_app_style_preferences(
                 TitleOverlay(),
                 enabled=title_enabled,
                 layout_index=title_layout_index,
+                scheme_name=title_scheme_name,
                 **title_fades,
+                **title_timing,
             )
         ],
     )
@@ -461,6 +486,31 @@ def load_app_style_preferences(
         layout_assignment=layout_assignment,
         changed=changed,
     )
+
+
+def _title_timing_from_payload(payload: object) -> dict[str, object]:
+    """Read remembered show-mode/offset/duration habits; garbage falls back.
+
+    与 ``title_fades`` 同一套口径：模式必须是已知档位，时长/偏移钳到非负
+    整数；``tail_duration_ms`` 的 ``None`` 是"跟随开头"的合法值。坏值逐字段
+    丢弃（回落条目默认），不让手改坏的 settings.json 拖垮整个标题。
+    """
+    timing: dict[str, object] = {}
+    if not isinstance(payload, dict):
+        return timing
+    mode = payload.get("show_mode")
+    if mode in _TITLE_SHOW_MODES:
+        timing["show_mode"] = mode
+    for name in ("head_offset_ms", "duration_ms", "tail_offset_ms"):
+        value = payload.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            timing[name] = max(int(value), 0)
+    tail = payload.get("tail_duration_ms")
+    if tail is None:
+        timing["tail_duration_ms"] = None
+    elif isinstance(tail, (int, float)) and not isinstance(tail, bool):
+        timing["tail_duration_ms"] = max(int(tail), 0)
+    return timing
 
 
 def _layout_index_for_name(style: Style, name: object) -> int:
@@ -614,10 +664,20 @@ def prepare_app_preferences(
         app_default_style,
         default_title.layout_index,
     )
+    new_project_defaults["title_scheme_name"] = (
+        default_title.scheme_name
+        if isinstance(default_title.scheme_name, str) and default_title.scheme_name
+        else None
+    )
     new_project_defaults["title_fades"] = merge_app_setting_field(
         new_project_defaults.get("title_fades"),
         {name: getattr(default_title, name) for name in TITLE_FADE_FIELDS},
         key="title_fades",
+    )
+    new_project_defaults["title_timing"] = merge_app_setting_field(
+        new_project_defaults.get("title_timing"),
+        {name: getattr(default_title, name) for name in TITLE_TIMING_FIELDS},
+        key="title_timing",
     )
     if values.layout_assignment is None:
         new_project_defaults.pop("layout_assignment", None)
