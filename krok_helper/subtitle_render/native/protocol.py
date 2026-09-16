@@ -132,6 +132,17 @@ def title_overlay_to_ir(
             999,
         ),
     )
+    payload["latin_font_stretch_pct"] = max(
+        50,
+        min(
+            200,
+            int(
+                scheme.latin_font_stretch_pct
+                if scheme is not None and scheme.latin_font_stretch_pct is not None
+                else title.latin_font_stretch_pct
+            ),
+        ),
+    )
     return payload
 
 

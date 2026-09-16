@@ -266,6 +266,8 @@ def _ruby_measure_key(style: Style) -> tuple:
         style.font_family,
         ruby_font_size(style),
         style.italic,
+        style.latin_font_stretch_pct,
+        style.ruby_latin_font_stretch_pct,
         ruby_stroke_width(style),
         ruby_stroke2_width(style),
         int(style.space_width_percent),
@@ -312,30 +314,27 @@ def ruby_unit_layouts(
     if cached is not None:
         return cached
     ruby_font, measure_style = _ruby_measure_resources(style, measure_key)
-    result = [
-        (
-            unit,
-            float(
-                char_layout_width(
-                    unit,
-                    ruby_font,
-                    ruby_metrics,
-                    ruby_metrics,
-                    None,
-                    measure_style,
-                )
-            ),
-            char_path_left_offset(
-                unit,
-                ruby_font,
-                ruby_metrics,
-                ruby_metrics,
-                None,
-                measure_style,
-            ),
+    stretch = (
+        style.ruby_latin_font_stretch_pct
+        if style.ruby_latin_font_stretch_pct is not None
+        else style.latin_font_stretch_pct
+    )
+    result = []
+    for unit in units:
+        unit_font = (
+            build_ruby_font_for_text(style, unit)
+            if int(stretch) != 100 else ruby_font
         )
-        for unit in units
-    ]
+        unit_metrics = QFontMetrics(unit_font) if unit_font != ruby_font else ruby_metrics
+        result.append((
+            unit,
+            float(char_layout_width(
+                unit, unit_font, unit_metrics, unit_metrics, None, measure_style,
+            )),
+            char_path_left_offset(
+                unit, unit_font, unit_metrics, unit_metrics, None, measure_style,
+            ),
+        ))
     if len(_RUBY_UNIT_LAYOUT_CACHE) >= _RUBY_UNIT_LAYOUT_CACHE_MAX:
         _RUBY_UNIT_LAYOUT_CACHE.clear()
     _RUBY_UNIT_LAYOUT_CACHE[layout_key] = result

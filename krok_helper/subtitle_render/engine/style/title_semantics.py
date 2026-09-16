@@ -57,6 +57,7 @@ def resolve_title_overlay(
             font_family_latin=merged.font_family_latin,
             font_size_px=int(merged.font_size_px),
             font_weight=int(merged.font_weight),
+            latin_font_stretch_pct=int(merged.latin_font_stretch_pct),
             italic=bool(merged.italic),
             letter_spacing_px=int(merged.letter_spacing_px),
             fill=colors.text,
@@ -133,6 +134,7 @@ def resolve_title_role_overlay(
         font_family_latin=merged.font_family_latin,
         font_size_px=int(merged.font_size_px),
         font_weight=int(merged.font_weight),
+        latin_font_stretch_pct=int(merged.latin_font_stretch_pct),
         italic=bool(merged.italic),
         letter_spacing_px=(
             int(base.letter_spacing_px)

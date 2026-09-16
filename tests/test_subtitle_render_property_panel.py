@@ -19,9 +19,12 @@ from PyQt6.QtGui import (  # noqa: E402
     QContextMenuEvent,
     QCursor,
     QFont,
+    QFontDatabase,
+    QFontMetrics,
     QFocusEvent,
     QImage,
     QMouseEvent,
+    QPainterPath,
     QWheelEvent,
 )
 from PyQt6.QtTest import QTest  # noqa: E402
@@ -3674,6 +3677,170 @@ def test_font_tabs_own_four_independent_stroke_groups(qapp):
     assert emitted[-1].ruby_latin_stroke_width_px == 7
 
 
+def test_role_latin_glyph_width_edits_and_round_trips(qapp):
+    panel = PropertyPanel()
+    initial = Style(
+        latin_font_stretch_pct=90,
+        ruby_latin_font_stretch_pct=110,
+        custom_style_schemes={
+            "A": SubtitleStyleScheme(
+                latin_font_stretch_pct=125,
+                ruby_latin_font_stretch_pct=80,
+            )
+        },
+    )
+    panel.set_style(initial)
+    panel.set_roles(["A"])
+    assert panel._latin_font_stretch_spin.value() == 90
+    assert panel._ruby_latin_font_stretch_spin.value() == 110
+
+    panel._latin_font_stretch_spin.setValue(75)
+    assert panel.subtitle_style.latin_font_stretch_pct == 75
+    panel._ruby_latin_font_stretch_spin.setValue(135)
+    assert panel.subtitle_style.ruby_latin_font_stretch_pct == 135
+    assert panel.subtitle_style.ruby_font_follow_main is True
+    panel.set_current_scheme_key("custom:A")
+    assert panel._latin_font_stretch_spin.value() == 125
+    assert panel._ruby_latin_font_stretch_spin.value() == 80
+    panel._latin_font_stretch_spin.setValue(150)
+    assert panel.subtitle_style.custom_style_schemes["A"].latin_font_stretch_pct == 150
+    panel.set_current_scheme_key("global")
+    assert panel._latin_font_stretch_spin.value() == 75
+    restored = style_from_dict(style_to_dict(panel.subtitle_style))
+    assert restored.latin_font_stretch_pct == 75
+    assert restored.ruby_latin_font_stretch_pct == 135
+    assert restored.custom_style_schemes["A"].latin_font_stretch_pct == 150
+    assert restored.custom_style_schemes["A"].ruby_latin_font_stretch_pct == 80
+    assert style_for_role(restored, "A").latin_font_stretch_pct == 150
+    assert style_for_role(restored, "A").ruby_latin_font_stretch_pct == 80
+    assert style_from_dict({}).latin_font_stretch_pct == 100
+    panel.deleteLater()
+    qapp.processEvents()
+
+
+def test_title_role_latin_width_reaches_title_font(qapp):
+    from krok_helper.subtitle_render.engine.render.elements.title import (
+        build_title_font, build_title_latin_font, make_title_font_for,
+    )
+    from krok_helper.subtitle_render.engine.style.title_semantics import (
+        resolve_title_overlay,
+    )
+
+    panel = PropertyPanel()
+    panel.set_style(Style())
+    panel.set_current_scheme_key(f"custom:{TITLE_SCHEME_NAME}")
+    panel._latin_font_stretch_spin.setValue(135)
+    title = resolve_title_overlay(panel.subtitle_style)
+    assert title is not None
+    assert title.latin_font_stretch_pct == 135
+    assert build_title_latin_font(title).stretch() == 135
+    same_family = replace(title, font_family="Arial", font_family_latin=None)
+    font_for = make_title_font_for(
+        same_family, build_title_font(same_family), build_title_latin_font(same_family)
+    )
+    assert font_for is not None
+    assert font_for("A").stretch() == 135
+    assert font_for("あ").stretch() != 135
+    assert style_from_dict(style_to_dict(panel.subtitle_style)).custom_style_schemes[
+        TITLE_SCHEME_NAME
+    ].latin_font_stretch_pct == 135
+    panel.deleteLater()
+    qapp.processEvents()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Uses the installed Windows Arial font")
+def test_latin_stretch_changes_real_glyph_and_layout_width(qapp):
+    from krok_helper.subtitle_render.engine.ruby.layout import ruby_unit_layouts
+    from krok_helper.subtitle_render.engine.ruby.style import build_ruby_font_for_text
+    from krok_helper.subtitle_render.engine.text.metrics import (
+        build_font, build_latin_font, char_ink_width, char_layout_width, make_font_for,
+    )
+
+    assert QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\arial.ttf") >= 0
+
+    def measured(style, text):
+        japanese = build_font(style)
+        latin = build_latin_font(style)
+        font_for = make_font_for(style, japanese, latin)
+        font = font_for(text)
+        path = QPainterPath()
+        path.addText(0, 0, font, text)
+        return (
+            path.boundingRect().width(),
+            char_layout_width(
+                text, japanese, QFontMetrics(japanese),
+                QFontMetrics(latin), font_for, style,
+            ),
+            char_ink_width(
+                text, japanese, QFontMetrics(japanese),
+                QFontMetrics(latin), font_for,
+            ),
+        )
+
+    base = Style(font_family="Arial", font_family_latin="Arial",
+                 font_size_px=80, stroke_width_px=0)
+    narrow = replace(base, latin_font_stretch_pct=70)
+    wide = replace(base, latin_font_stretch_pct=140)
+    narrow_ink, narrow_layout, narrow_timing_ink = measured(narrow, "W")
+    wide_ink, wide_layout, wide_timing_ink = measured(wide, "W")
+    assert narrow_ink < wide_ink
+    assert narrow_layout < wide_layout
+    assert narrow_timing_ink < wide_timing_ink
+    assert measured(narrow, "あ") == measured(wide, "あ")
+    assert build_ruby_font_for_text(narrow, "W").stretch() == 70
+    assert build_ruby_font_for_text(
+        replace(narrow, ruby_latin_font_stretch_pct=125), "W"
+    ).stretch() == 125
+    narrow_ruby = build_ruby_font_for_text(narrow, "W")
+    wide_ruby_style = replace(narrow, ruby_latin_font_stretch_pct=140)
+    wide_ruby = build_ruby_font_for_text(wide_ruby_style, "W")
+    assert ruby_unit_layouts(
+        ["W"], QFontMetrics(narrow_ruby), narrow
+    )[0][1] < ruby_unit_layouts(
+        ["W"], QFontMetrics(wide_ruby), wide_ruby_style
+    )[0][1]
+
+
+def test_role_japanese_font_size_controls_korean_and_chinese(qapp):
+    from krok_helper.subtitle_render.engine.text.layout import build_text_layout
+
+    panel = PropertyPanel()
+    panel.set_roles(["A"])
+    panel._singer_combo.setCurrentIndex(panel._singer_combo.findData("custom:A"))
+    panel._font_size_spin.setValue(92)
+    panel._font_latin_size_spin.setValue(38)
+    track_line = TimingLine(
+        chars=[
+            TimingChar("한", 0, role_label="A"),
+            TimingChar("中", 1, role_label="A"),
+            TimingChar("A", 2, role_label="A"),
+        ],
+        end_ms=1_000,
+    )
+    layout = build_text_layout(
+        track_line, panel.subtitle_style, x0=0, baseline_y=100,
+        inline_styles=True,
+    )
+    assert [glyph.font.pixelSize() for glyph in layout.glyphs] == [92, 92, 38]
+    panel._font_latin_size_spin.setValue(72)
+    layout = build_text_layout(
+        track_line, panel.subtitle_style, x0=0, baseline_y=100,
+        inline_styles=True,
+    )
+    assert [glyph.font.pixelSize() for glyph in layout.glyphs] == [92, 92, 72]
+    track_line.chars.insert(2, TimingChar("。", 2, role_label="A"))
+    track_line.chars.insert(3, TimingChar("!", 2, role_label="A"))
+    layout = build_text_layout(
+        track_line, panel.subtitle_style, x0=0, baseline_y=100,
+        inline_styles=True,
+    )
+    assert [glyph.font.pixelSize() for glyph in layout.glyphs] == [
+        92, 92, 92, 92, 72,
+    ]
+    panel.deleteLater()
+    qapp.processEvents()
+
+
 def test_default_style_stroke2_sub_slots_show_inherited_state(qapp):
     panel = PropertyPanel()
     panel.set_style(Style())
@@ -3809,6 +3976,75 @@ def test_latin_font_overrides_round_trip_and_legacy_values_inherit():
     assert zero_slots.ruby_latin_font_weight is None
     assert zero_slots.ruby_latin_stroke_width_px is None
     assert zero_slots.ruby_latin_stroke2_width_px is None
+
+
+@pytest.mark.parametrize("legacy_single_title", [False, True])
+def test_project_without_latin_stretch_fields_keeps_natural_width(
+    legacy_single_title, qapp,
+):
+    from krok_helper.subtitle_render.engine.ruby.style import build_ruby_font_for_text
+    from krok_helper.subtitle_render.engine.style.title_semantics import resolve_title_overlay
+    from krok_helper.subtitle_render.engine.text.metrics import build_latin_font
+    from krok_helper.subtitle_render.native.protocol import gpu_unsupported_features
+
+    base = Style()
+    payload = style_to_dict(replace(
+        base,
+        custom_style_schemes={
+            **base.custom_style_schemes,
+            "A": SubtitleStyleScheme(font_family_latin="Arial",
+                                     n3_font_inheritance=True),
+        },
+        singer_style_overrides={1: SubtitleStyleScheme(font_family_latin="Arial")},
+    ))
+    payload.pop("latin_font_stretch_pct")
+    payload.pop("ruby_latin_font_stretch_pct")
+    for scheme in (
+        *payload["custom_style_schemes"].values(),
+        *payload["singer_style_overrides"].values(),
+    ):
+        scheme.pop("latin_font_stretch_pct", None)
+        scheme.pop("ruby_latin_font_stretch_pct", None)
+    for title in payload["title_overlays"]:
+        title.pop("latin_font_stretch_pct")
+    payload["title_overlay"].pop("latin_font_stretch_pct", None)
+    if legacy_single_title:
+        payload.pop("title_overlays")
+        payload["custom_style_schemes"].pop(TITLE_SCHEME_NAME)
+
+    restored = style_from_dict(payload)
+    assert restored.latin_font_stretch_pct == 100
+    assert restored.ruby_latin_font_stretch_pct is None
+    assert build_latin_font(restored).stretch() == 0  # Qt natural width
+    assert build_ruby_font_for_text(restored, "A").stretch() == 0
+    for scheme in (
+        restored.custom_style_schemes["A"],
+        restored.singer_style_overrides[1],
+    ):
+        assert scheme.latin_font_stretch_pct is None
+        assert scheme.ruby_latin_font_stretch_pct is None
+    assert style_for_role(restored, "A").latin_font_stretch_pct == 100
+    title = resolve_title_overlay(restored)
+    assert title is not None
+    assert title.latin_font_stretch_pct == 100
+    assert restored.custom_style_schemes[TITLE_SCHEME_NAME].latin_font_stretch_pct == 100
+    assert "latin_font_stretch" not in gpu_unsupported_features(
+        TimingTrack(lines=[]), restored
+    )
+    saved = style_to_dict(restored)
+    assert saved["latin_font_stretch_pct"] == 100
+    assert saved["title_overlays"][0]["latin_font_stretch_pct"] == 100
+    panel = PropertyPanel()
+    panel.set_style(restored)
+    panel.set_roles(["A"])
+    assert panel._latin_font_stretch_spin.value() == 100
+    assert panel._ruby_latin_font_stretch_spin.value() == 100
+    panel.set_current_scheme_key("custom:A")
+    assert panel._latin_font_stretch_spin.value() == 100
+    panel.set_current_scheme_key(f"custom:{TITLE_SCHEME_NAME}")
+    assert panel._latin_font_stretch_spin.value() == 100
+    panel.deleteLater()
+    qapp.processEvents()
 
 
 def test_ruby_font_defaults_show_zero_inheritance_but_keep_own_size(qapp):

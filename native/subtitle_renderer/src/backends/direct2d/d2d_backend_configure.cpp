@@ -242,13 +242,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             : static_cast<int>(scaledValue);
         return std::max(value, minimum);
     };
-    const auto scaleReferenceGeometry = [&](Microsoft::WRL::ComPtr<ID2D1PathGeometry> &path,
-                                            const char *operation) {
-        if (!scaledPreviewLayout || !path) {
+    const auto transformPath = [&](Microsoft::WRL::ComPtr<ID2D1PathGeometry> &path,
+                                   float scaleX, float scaleY,
+                                   const char *operation) {
+        if (!path || (std::abs(scaleX - 1.0f) < 0.000001f
+                      && std::abs(scaleY - 1.0f) < 0.000001f)) {
             return;
         }
         const D2D1_MATRIX_3X2_F matrix = D2D1::Matrix3x2F::Scale(
-            layoutScale, layoutScale
+            scaleX, scaleY
         );
         Microsoft::WRL::ComPtr<ID2D1TransformedGeometry> transformed;
         checkHr(
@@ -281,6 +283,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         checkHr(simplifyResult, operation, device_);
         checkHr(closeResult, "ID2D1GeometrySink::Close(scale preview outline)", device_);
         path = scaledPath;
+    };
+    const auto scaleReferenceGeometry = [&](Microsoft::WRL::ComPtr<ID2D1PathGeometry> &path,
+                                            const char *operation) {
+        if (scaledPreviewLayout) {
+            transformPath(path, layoutScale, layoutScale, operation);
+        }
     };
     impl_->realizationActive = impl_->realizationEnabled
         && scene.realizationEnabled
@@ -548,12 +556,14 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     auto textRealizationFor = [&] (
         const Microsoft::WRL::ComPtr<IDWriteFontFace> &face,
         const std::vector<UINT16> &glyphs,
-        int unit
+        int unit,
+        int stretchPct
     ) -> GlyphGeometryResource & {
         const Impl::TextGlyphKey key{
             reinterpret_cast<std::uintptr_t>(face.Get()),
             unit,
             layoutScaleKey,
+            stretchPct,
             glyphs,
         };
         const auto found = textGlyphRealizations.find(key);
@@ -594,6 +604,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         const HRESULT closeResult = sink->Close();
         checkHr(outlineResult, "IDWriteFontFace::GetGlyphRunOutline", device_);
         checkHr(closeResult, "ID2D1GeometrySink::Close(character)", device_);
+        transformPath(
+            resource.path,
+            static_cast<float>(stretchPct) / 100.0f,
+            1.0f,
+            "ID2D1Factory::CreateTransformedGeometry(stretch Latin character)"
+        );
         checkHr(
             resource.path->GetBounds(nullptr, &resource.referenceBounds),
             "ID2D1Geometry::GetBounds(character)",
@@ -805,6 +821,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             const bool vectorGlyph = sourceChar.vectorGlyph != nullptr;
             const bool bitmapGuide = sourceChar.bitmapGuide.has_value();
             const bool latin = !vectorGlyph && !bitmapGuide && isLatinText(sourceChar.text);
+            const int stretchPct = latin
+                ? std::clamp(charStyle.latinFontStretchPct, 50, 200)
+                : 100;
             Microsoft::WRL::ComPtr<IDWriteFontFace> requestedFace = latin
                 ? latinFace
                 : mainFace;
@@ -906,7 +925,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     );
                 }
                 if (outlineFace && !glyphs.empty()) {
-                    glyphResource = &textRealizationFor(outlineFace, glyphs, unit);
+                    glyphResource = &textRealizationFor(
+                        outlineFace, glyphs, unit, stretchPct
+                    );
                     path = glyphResource->path;
                 }
             }
@@ -1582,6 +1603,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
 
             for (const RubyUnit &sourceUnit : sourceRuby.units) {
                 const bool latin = isLatinText(sourceUnit.text);
+                const int stretchPct = latin
+                    ? std::clamp(rubyStyle.rubyLatinFontStretchPct, 50, 200)
+                    : 100;
                 const auto &measureFace = latin
                     ? selectedRubyLatinFace
                     : selectedRubyFace;
@@ -1617,7 +1641,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 GlyphGeometryResource *glyphResource = nullptr;
                 if (outlineFace && !glyphs.empty()) {
                     glyphResource = &textRealizationFor(
-                        outlineFace, glyphs, drawingUnit
+                        outlineFace, glyphs, drawingUnit, stretchPct
                     );
                     path = glyphResource->path;
                 }

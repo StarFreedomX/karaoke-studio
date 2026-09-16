@@ -55,6 +55,23 @@ MEFISTO_N3PROJ = Path.cwd().parent / "songs" / "メフィスト" / "1.n3proj"
 RUN_REAL_GPU_AB = os.environ.get("KROK_RUN_REAL_GPU_AB", "0") == "1"
 
 
+def test_latin_stretch_is_supported_by_gpu_for_all_font_slots():
+    track = TimingTrack(lines=[])
+    assert "latin_font_stretch" not in gpu_unsupported_features(track, Style())
+    assert "latin_font_stretch" not in gpu_unsupported_features(
+        track, Style(latin_font_stretch_pct=80)
+    )
+    assert "latin_font_stretch" not in gpu_unsupported_features(
+        track,
+        Style(custom_style_schemes={
+            "A": SubtitleStyleScheme(ruby_latin_font_stretch_pct=120)
+        }),
+    )
+    assert "latin_font_stretch" not in gpu_unsupported_features(
+        track, Style(title_overlays=[TitleOverlay(latin_font_stretch_pct=135)])
+    )
+
+
 #: Every family this module names, with the file DirectWrite resolves the same
 #: way.  Qt's offscreen platform plugin does not enumerate system fonts, so a
 #: family nobody registered silently falls back to whichever application font
@@ -608,6 +625,154 @@ def _render_g1_frames(
         if reader is not None:
             reader.close()
     return configured, frames
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_latin_stretch_changes_real_pixels_without_stretching_cjk() -> None:
+    def track_for(text: str) -> TimingTrack:
+        return TimingTrack(
+            lines=[TimingLine(chars=[TimingChar(text, 0)], end_ms=1_000)]
+        )
+
+    def width_of(renderer: NativeRendererProcess, text: str, stretch: int) -> int:
+        style = _g1_style(
+            font_family="Meiryo",
+            font_family_latin="Arial",
+            font_size_px=80,
+            latin_font_stretch_pct=stretch,
+            stroke_width_px=0,
+            stroke2_enabled=False,
+            decoration_kind="none",
+        )
+        _, frames = _render_g1_frames(
+            renderer, style, (500,), force_warp=True, track=track_for(text)
+        )
+        left, _, right, _ = _payload_alpha_bounds(frames[0])
+        return right - left + 1
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        assert width_of(renderer, "W", 60) < width_of(renderer, "W", 100)
+        assert width_of(renderer, "W", 100) < width_of(renderer, "W", 160)
+        assert width_of(renderer, "한", 60) == width_of(renderer, "한", 160)
+        assert width_of(renderer, "中", 60) == width_of(renderer, "中", 160)
+        assert width_of(renderer, "!", 60) == width_of(renderer, "!", 160)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_korean_and_chinese_follow_japanese_role_size() -> None:
+    track = TimingTrack(
+        lines=[TimingLine(
+            chars=[TimingChar("한", 0, role_label="A"),
+                   TimingChar("中", 1, role_label="A")],
+            end_ms=1_000,
+        )]
+    )
+
+    def bounds_for(
+        renderer: NativeRendererProcess, japanese_size: int, latin_size: int
+    ) -> tuple[int, int, int, int]:
+        style = _g1_style(
+            font_family="Meiryo",
+            font_family_latin="Arial",
+            font_size_px=48,
+            latin_font_size_px=32,
+            stroke_width_px=0,
+            stroke2_enabled=False,
+            decoration_kind="none",
+            custom_style_schemes={
+                "A": SubtitleStyleScheme(
+                    font_size_px=japanese_size,
+                    latin_font_size_px=latin_size,
+                )
+            },
+        )
+        _, frames = _render_g1_frames(
+            renderer, style, (500,), force_warp=True, track=track
+        )
+        return _payload_alpha_bounds(frames[0])
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        small = bounds_for(renderer, 40, 30)
+        latin_only = bounds_for(renderer, 40, 110)
+        large = bounds_for(renderer, 100, 30)
+    assert small == latin_only
+    assert large[2] - large[0] > (small[2] - small[0]) * 1.8
+    assert large[3] - large[1] > (small[3] - small[1]) * 1.8
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_ruby_latin_stretch_affects_ruby_without_changing_main_text() -> None:
+    track = _g3_ruby_track()
+    track.rubies[0] = replace(
+        track.rubies[0],
+        reading="WWW",
+        reading_parts=["W", "", "WW"],
+    )
+    base = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Arial",
+        ruby_font_family_latin="Arial",
+        ruby_font_size_px=36,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        ruby_stroke_width_px=0,
+        ruby_stroke2_enabled=False,
+        decoration_kind="none",
+        ruby_decoration_kind="none",
+    )
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        _, narrow = _render_g1_frames(
+            renderer, replace(base, ruby_latin_font_stretch_pct=60), (1_000,),
+            force_warp=True, track=track,
+        )
+        _, wide = _render_g1_frames(
+            renderer, replace(base, ruby_latin_font_stretch_pct=160), (1_000,),
+            force_warp=True, track=track,
+        )
+    assert narrow[0] != wide[0]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_title_latin_stretch_changes_title_pixels() -> None:
+    title = TitleOverlay(
+        enabled=True,
+        text_template="WWW",
+        font_family="Arial",
+        font_family_latin="Arial",
+        font_size_px=80,
+        stroke_width_px=0,
+        stroke2_width_px=0,
+        decoration_kind="none",
+        layout_index=None,
+        show_mode="whole",
+    )
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("尾", 3_000)], end_ms=4_000)]
+    )
+
+    def title_width(renderer: NativeRendererProcess, stretch: int) -> int:
+        style = _g1_style(
+            title_overlays=[title],
+            custom_style_schemes={
+                TITLE_SCHEME_NAME: SubtitleStyleScheme(
+                    font_family="Arial",
+                    font_family_latin="Arial",
+                    font_size_px=80,
+                    latin_font_stretch_pct=stretch,
+                    stroke_width_px=0,
+                    stroke2_enabled=False,
+                    decoration_kind="none",
+                )
+            },
+        )
+        _, frames = _render_g1_frames(
+            renderer, style, (500,), force_warp=True, track=track
+        )
+        left, _, right, _ = _payload_alpha_bounds(frames[0])
+        return right - left + 1
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        assert title_width(renderer, 60) < title_width(renderer, 160)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")

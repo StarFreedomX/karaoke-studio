@@ -56,7 +56,10 @@ def latin_font_weight(style: Style) -> int:
 
 def is_n3_latin_text(text: str) -> bool:
     return bool(text) and all(
-        "\u0020" <= char <= "\u007e" or "\u00c0" <= char <= "\u00ff"
+        ("0" <= char <= "9" or "A" <= char <= "Z" or "a" <= char <= "z")
+        or ("\u00c0" <= char <= "\u00d6"
+            or "\u00d8" <= char <= "\u00f6"
+            or "\u00f8" <= char <= "\u00ff")
         for char in text
     )
 
@@ -83,6 +86,8 @@ def build_latin_font(style: Style) -> QFont:
     font.setPixelSize(size)
     font.setWeight(clamp_weight(latin_font_weight(style)))
     font.setItalic(style.italic)
+    if int(style.latin_font_stretch_pct) != 100:
+        font.setStretch(max(50, min(200, int(style.latin_font_stretch_pct))))
     return font
 
 
@@ -157,8 +162,8 @@ def char_ink_width(
     if source_font is not None:
         source_key = ("emoji", _font_signature(source_font))
     elif use_latin:
-        source_font = font
-        source_key = ("latin", _font_signature(font))
+        source_font = font_for(text)
+        source_key = ("latin", _font_signature(source_font))
     else:
         source_font = font
         source_key = _font_signature(font)
@@ -207,7 +212,7 @@ def n3_char_box_descent(
 
 
 def _font_signature(font: QFont) -> tuple:
-    return (font.family(), font.pixelSize(), int(font.weight()), font.italic())
+    return (font.family(), font.pixelSize(), int(font.weight()), font.italic(), font.stretch())
 
 
 def _char_metric_key(

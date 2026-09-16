@@ -121,6 +121,7 @@ void applyGpuResolvedStyle(
         : std::nullopt;
     target.fontWeight = source.fontWeight;
     target.latinFontWeight = source.latinFontWeight;
+    target.latinFontStretchPct = source.latinFontStretchPct;
     target.italic = source.italic;
     target.allowBiting = source.allowBiting;
     target.affectsRubyAnchor = source.affectsRubyAnchor;
@@ -195,6 +196,9 @@ void applyGpuResolvedStyle(
         ? source.fontWeight
         : source.rubyFontWeight.value_or(source.fontWeight);
     target.rubyLatinFontWeight = source.rubyLatinFontWeight;
+    target.rubyLatinFontStretchPct = source.rubyLatinFontStretchPct.value_or(
+        source.latinFontStretchPct
+    );
     target.rubyGap = static_cast<float>(source.rubyGapPx * scale);
     target.rubyInterval = static_cast<float>(source.rubyIntervalPx * scale);
     target.rubyAlignment = source.rubyAlignment.toStdString();

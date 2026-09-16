@@ -110,6 +110,8 @@ def build_title_latin_font(title: TitleOverlay) -> QFont:
     font.setPixelSize(max(title.font_size_px, 1))
     font.setWeight(clamp_weight(title.font_weight))
     font.setItalic(title.italic)
+    if int(title.latin_font_stretch_pct) != 100:
+        font.setStretch(max(50, min(200, int(title.latin_font_stretch_pct))))
     return font
 
 
@@ -118,7 +120,9 @@ def make_title_font_for(
     jp_font: QFont,
     latin_font: QFont,
 ) -> Callable[[str], QFont] | None:
-    if not title.font_family_latin or latin_font.family() == jp_font.family():
+    if (not title.font_family_latin or latin_font.family() == jp_font.family()) and (
+        latin_font.stretch() == jp_font.stretch()
+    ):
         return None
 
     def font_for(text: str) -> QFont:
@@ -454,6 +458,7 @@ def title_overlay_layer_key(
         layout.latin_font.pixelSize(),
         int(layout.latin_font.weight()),
         layout.latin_font.italic(),
+        layout.latin_font.stretch(),
         title.letter_spacing_px,
         fill_signature(title.fill),
         fill_signature(title.stroke),
@@ -475,6 +480,7 @@ def title_overlay_layer_key(
                 glyph.font.pixelSize(),
                 int(glyph.font.weight()),
                 glyph.font.italic(),
+                glyph.font.stretch(),
                 fill_signature(glyph.title.fill),
                 fill_signature(glyph.title.stroke),
                 glyph.title.stroke_width_px,

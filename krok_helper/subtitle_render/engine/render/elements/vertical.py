@@ -698,6 +698,7 @@ def vertical_main_path_signature(
         latin_font_size(style),
         int(style.font_weight),
         latin_font_weight(style),
+        style.latin_font_stretch_pct,
         style.italic,
         layout.column_x,
         layout.y_top,
@@ -832,6 +833,7 @@ def vertical_ruby_layers(
         ruby_font.pixelSize(),
         int(ruby_font.weight()),
         ruby_font.italic(),
+        ruby_font.stretch(),
     )
 
     layers: list = []

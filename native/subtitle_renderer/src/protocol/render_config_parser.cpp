@@ -459,6 +459,11 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
             intValue(style, QStringLiteral("latin_font_weight"), cfg.fontWeight), 1, 999
         );
     }
+    if (hasNonNull(style, QStringLiteral("latin_font_stretch_pct"))) {
+        cfg.latinFontStretchPct = std::clamp(
+            intValue(style, QStringLiteral("latin_font_stretch_pct"), 100), 50, 200
+        );
+    }
     if (hasNonNull(style, QStringLiteral("italic"))) {
         cfg.italic = style.value(QStringLiteral("italic")).toBool(cfg.italic);
     }
@@ -574,6 +579,11 @@ void applyScalarStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     if (hasNonNull(style, QStringLiteral("ruby_latin_font_size_px"))) {
         cfg.rubyLatinFontSizePx = std::max(
             1, intValue(style, QStringLiteral("ruby_latin_font_size_px"), cfg.rubyFontSizePx)
+        );
+    }
+    if (hasNonNull(style, QStringLiteral("ruby_latin_font_stretch_pct"))) {
+        cfg.rubyLatinFontStretchPct = std::clamp(
+            intValue(style, QStringLiteral("ruby_latin_font_stretch_pct"), 100), 50, 200
         );
     }
     if (hasNonNull(style, QStringLiteral("ruby_latin_font_weight"))) {
@@ -727,6 +737,9 @@ ResolvedStyle resolvedStyleFromTitle(
             999
         )
         : cfg.fontWeight;
+    cfg.latinFontStretchPct = std::clamp(
+        intValue(title, QStringLiteral("latin_font_stretch_pct"), 100), 50, 200
+    );
     cfg.italic = title.value(QStringLiteral("italic")).toBool(cfg.italic);
     cfg.letterSpacingPx = intValue(
         title, QStringLiteral("letter_spacing_px"), cfg.letterSpacingPx
@@ -846,6 +859,9 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     if (style.value(QStringLiteral("latin_font_weight")).isDouble()) {
         base.latinFontWeight = std::clamp(intValue(style, QStringLiteral("latin_font_weight"), base.fontWeight), 1, 999);
     }
+    base.latinFontStretchPct = std::clamp(
+        intValue(style, QStringLiteral("latin_font_stretch_pct"), 100), 50, 200
+    );
     base.italic = style.value(QStringLiteral("italic")).toBool(base.italic);
     base.allowBiting = style.value(QStringLiteral("allow_biting")).toBool(base.allowBiting);
     base.affectsRubyAnchor = style.value(
@@ -911,6 +927,11 @@ std::optional<RenderConfig> parseRenderConfig(const QJsonObject &ir, QString *er
     if (style.value(QStringLiteral("ruby_latin_font_size_px")).isDouble()) {
         base.rubyLatinFontSizePx = std::max(
             1, intValue(style, QStringLiteral("ruby_latin_font_size_px"), base.rubyFontSizePx)
+        );
+    }
+    if (style.value(QStringLiteral("ruby_latin_font_stretch_pct")).isDouble()) {
+        base.rubyLatinFontStretchPct = std::clamp(
+            intValue(style, QStringLiteral("ruby_latin_font_stretch_pct"), 100), 50, 200
         );
     }
     if (style.value(QStringLiteral("ruby_latin_font_weight")).isDouble()) {

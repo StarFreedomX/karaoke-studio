@@ -224,6 +224,24 @@ class RoleFontSettingsPageBuilder:
         row_layout.setColumnStretch(1, 1)
         layout.addWidget(row)
 
+        if script == "latin":
+            stretch_spin = self._spin_factory(50, 200, suffix=" %")
+            stretch_spin.setValue(100)
+            stretch_spin.setToolTip("100% 为字体原宽；小于 100% 压窄，大于 100% 拉宽。")
+            if subject == "main":
+                host._latin_font_stretch_spin = stretch_spin
+                stretch_spin.valueChanged.connect(
+                    lambda value: host._update_style(latin_font_stretch_pct=value)
+                )
+            else:
+                host._ruby_latin_font_stretch_spin = stretch_spin
+                stretch_spin.valueChanged.connect(
+                    lambda value: host._update_style(
+                        ruby_latin_font_stretch_pct=value
+                    )
+                )
+            layout.addWidget(property_field("字形宽度", stretch_spin))
+
         # 英数字号本来就有"0 = 跟随上一级"的语义，但它藏在一个数字里，改了日文
         # 字号还得记得回来把英数也改一遍。这里把它摆成一个勾选框，且默认勾上。
         follow_label = {

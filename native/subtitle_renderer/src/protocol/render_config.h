@@ -133,6 +133,7 @@ struct ResolvedStyle {
     std::optional<int> latinFontSizePx;
     int fontWeight = 400;
     std::optional<int> latinFontWeight;
+    int latinFontStretchPct = 100;
     bool italic = false;
     bool allowBiting = false;
     bool affectsRubyAnchor = true;
@@ -199,6 +200,7 @@ struct ResolvedStyle {
     std::optional<int> rubyFontWeight;
     std::optional<int> rubyLatinFontSizePx;
     std::optional<int> rubyLatinFontWeight;
+    std::optional<int> rubyLatinFontStretchPct;
     bool rubyFontFollowMain = true;
     int rubyGapPx = 8;
     int rubyIntervalPx = 0;

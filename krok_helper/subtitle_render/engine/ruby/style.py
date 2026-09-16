@@ -104,6 +104,13 @@ def build_ruby_font_for_text(style: Style, reading: str) -> QFont:
     font.setPixelSize(max(size, 1))
     font.setWeight(clamp_weight(weight))
     font.setItalic(style.italic)
+    stretch = (
+        style.ruby_latin_font_stretch_pct
+        if style.ruby_latin_font_stretch_pct is not None
+        else style.latin_font_stretch_pct
+    )
+    if int(stretch) != 100:
+        font.setStretch(max(50, min(200, int(stretch))))
     return font
 
 

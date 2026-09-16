@@ -285,6 +285,7 @@ struct TextStyle {
     std::optional<float> latinFontSize;
     int fontWeight = 400;
     std::optional<int> latinFontWeight;
+    int latinFontStretchPct = 100;
     bool italic = false;
     bool allowBiting = false;
     bool affectsRubyAnchor = true;
@@ -335,6 +336,7 @@ struct TextStyle {
     std::optional<float> rubyLatinFontSize;
     int rubyFontWeight = 400;
     std::optional<int> rubyLatinFontWeight;
+    int rubyLatinFontStretchPct = 100;
     float rubyGap = 0.0f;
     float rubyInterval = 0.0f;
     std::string rubyAlignment = "auto";

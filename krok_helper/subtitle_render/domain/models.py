@@ -263,6 +263,7 @@ class TitleOverlay:
     font_family_latin: Optional[str] = "Comic Sans MS"
     font_size_px: int = 40
     font_weight: int = 700
+    latin_font_stretch_pct: int = 100
     italic: bool = False
     letter_spacing_px: int = 0
     line_gap_px: int = 15
@@ -387,6 +388,7 @@ class SubtitleStyleScheme:
     space_width_percent: Optional[int] = None
     latin_font_size_px: Optional[int] = None
     latin_font_weight: Optional[int] = None
+    latin_font_stretch_pct: Optional[int] = None
     latin_stroke_width_px: Optional[int] = None
     latin_stroke2_enabled: Optional[bool] = None
     latin_stroke2_width_px: Optional[int] = None
@@ -419,6 +421,7 @@ class SubtitleStyleScheme:
     ruby_font_weight: Optional[int] = None
     ruby_latin_font_size_px: Optional[int] = None
     ruby_latin_font_weight: Optional[int] = None
+    ruby_latin_font_stretch_pct: Optional[int] = None
     ruby_font_follow_main: Optional[bool] = None
     ruby_color: Optional[str] = None
     ruby_gap_px: Optional[int] = None
@@ -580,6 +583,7 @@ def title_scheme_from_overlay(title: "TitleOverlay") -> SubtitleStyleScheme:
         latin_font_size_px=title.font_size_px,
         font_weight=title.font_weight,
         latin_font_weight=title.font_weight,
+        latin_font_stretch_pct=title.latin_font_stretch_pct,
         italic=title.italic,
         letter_spacing_px=title.letter_spacing_px,
         stroke_width_px=title.stroke_width_px,
@@ -623,6 +627,7 @@ def default_title_scheme() -> SubtitleStyleScheme:
         letter_spacing_px=0,
         latin_font_size_px=40,
         latin_font_weight=700,
+        latin_font_stretch_pct=100,
         latin_stroke_width_px=5,
         latin_stroke2_enabled=False,
         latin_stroke2_width_px=5,
@@ -769,6 +774,8 @@ class Style:
     # 字体族沿用历史字段 ``font_family_latin``（同一语义）。
     latin_font_size_px: Optional[int] = None
     latin_font_weight: Optional[int] = None
+    latin_font_stretch_pct: int = 100
+    """Latin glyph width percentage; 100 preserves the font's natural width."""
     latin_stroke_width_px: Optional[int] = None
     latin_stroke2_enabled: Optional[bool] = None
     latin_stroke2_width_px: Optional[int] = None
@@ -853,6 +860,7 @@ class Style:
     ruby_font_weight: Optional[int] = None
     ruby_latin_font_size_px: Optional[int] = None
     ruby_latin_font_weight: Optional[int] = None
+    ruby_latin_font_stretch_pct: Optional[int] = None
     ruby_font_follow_main: bool = True
     """注音字体族/字重跟随主文字；注音字号始终由独立字段控制。"""
     ruby_color: str = "#FF5A6F"
@@ -1821,6 +1829,13 @@ def style_from_dict(payload: object) -> Style:
             "ruby_font_family_latin",
         }:
             changes[key] = str(value) if value else None
+        elif key == "latin_font_stretch_pct":
+            changes[key] = max(50, min(200, _int_value(value, 100)))
+        elif key == "ruby_latin_font_stretch_pct":
+            changes[key] = (
+                None if value is None
+                else max(50, min(200, _int_value(value, 100)))
+            )
         elif key in {
             "latin_font_size_px",
             "latin_font_weight",
@@ -1937,6 +1952,11 @@ def _migrate_title_references(changes: dict) -> None:
                 title_scheme.latin_font_weight
                 if title_scheme.latin_font_weight is not None
                 else title_weight
+            ),
+            latin_font_stretch_pct=(
+                title_scheme.latin_font_stretch_pct
+                if title_scheme.latin_font_stretch_pct is not None
+                else 100
             ),
             latin_stroke_width_px=(
                 title_scheme.latin_stroke_width_px
@@ -2386,6 +2406,11 @@ def subtitle_style_scheme_from_dict(payload: object) -> SubtitleStyleScheme:
             "ruby_font_family_latin",
         }:
             changes[key] = str(value) if value else None
+        elif key in {"latin_font_stretch_pct", "ruby_latin_font_stretch_pct"}:
+            changes[key] = (
+                None if value is None
+                else max(50, min(200, _int_value(value, 100)))
+            )
         elif key in {
             "latin_font_size_px",
             "latin_font_weight",
@@ -2426,6 +2451,7 @@ def title_overlay_to_dict(title: TitleOverlay) -> dict:
         "font_family_latin": title.font_family_latin,
         "font_size_px": title.font_size_px,
         "font_weight": title.font_weight,
+        "latin_font_stretch_pct": title.latin_font_stretch_pct,
         "italic": title.italic,
         "letter_spacing_px": title.letter_spacing_px,
         "line_gap_px": title.line_gap_px,
@@ -2498,6 +2524,9 @@ def title_overlay_from_dict(payload: object) -> Optional[TitleOverlay]:
         ),
         font_size_px=_int_value(payload.get("font_size_px"), defaults.font_size_px),
         font_weight=_int_value(payload.get("font_weight"), defaults.font_weight),
+        latin_font_stretch_pct=max(
+            50, min(200, _int_value(payload.get("latin_font_stretch_pct"), 100))
+        ),
         italic=bool(payload.get("italic", defaults.italic)),
         letter_spacing_px=_int_value(payload.get("letter_spacing_px"), defaults.letter_spacing_px),
         line_gap_px=_int_value(payload.get("line_gap_px"), defaults.line_gap_px),

@@ -268,6 +268,7 @@ _FONT_CARD_FIELDS: tuple[str, ...] = (
     "font_family_latin",
     "latin_font_size_px",
     "latin_font_weight",
+    "latin_font_stretch_pct",
     "latin_stroke_width_px",
     "latin_stroke2_enabled",
     "latin_stroke2_width_px",
@@ -282,6 +283,7 @@ _FONT_CARD_FIELDS: tuple[str, ...] = (
     "ruby_font_family_latin",
     "ruby_latin_font_size_px",
     "ruby_latin_font_weight",
+    "ruby_latin_font_stretch_pct",
     "ruby_latin_stroke_width_px",
     "ruby_latin_stroke2_enabled",
     "ruby_latin_stroke2_width_px",
@@ -3925,6 +3927,9 @@ class PropertyPanel(QWidget):
             self._font_latin_size_spin.setValue(
                 0 if latin_size is None else int(latin_size)
             )
+            self._latin_font_stretch_spin.setValue(
+                int(self._scheme_value("latin_font_stretch_pct") or 100)
+            )
             latin_weight = self._scheme_value("latin_font_weight")
             self._italic_check.setChecked(bool(self._scheme_value("italic")))
             self._ruby_anchor_check.setChecked(
@@ -3947,6 +3952,10 @@ class PropertyPanel(QWidget):
                 self._ruby_font_latin_combo.setCurrentFont(QFont(str(ruby_latin_family)))
             self._ruby_font_latin_size_spin.setValue(
                 0 if ruby_latin_size is None else int(ruby_latin_size)
+            )
+            self._ruby_latin_font_stretch_spin.setValue(
+                int(self._scheme_value("ruby_latin_font_stretch_pct")
+                    or self._scheme_value("latin_font_stretch_pct") or 100)
             )
             self._sync_font_size_follow_controls()
             self._refresh_font_weight_combos(

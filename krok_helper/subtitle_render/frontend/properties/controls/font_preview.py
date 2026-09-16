@@ -216,7 +216,7 @@ class _FontSampleCanvas(QWidget):
     def _render_sample_image(cls, style: Style, script: str) -> QImage:
         latin = script == "latin"
         main_text = "LinK" if latin else "人"
-        ruby_text = "リンク" if latin else "ひと"
+        ruby_text = "link" if latin else "ひと"
         # Keep this an isolated sample renderer: only reuse the production
         # glyph/font/layer primitives.  Calling paint_frame here would also
         # traverse project overlays (notably titles), which do not belong in
