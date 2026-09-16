@@ -10,10 +10,15 @@ import pytest
 
 from krok_helper.subtitle_render.engine.style.style_semantics import style_for_role
 from krok_helper.subtitle_render.domain.models import (
+    DEFAULT_OUTPUT_NAME_SUFFIX,
     Style,
     default_title_scheme,
     guide_symbol_from_dict,
     style_from_dict,
+)
+from krok_helper.subtitle_render.engine.export.render_job import (
+    OUTPUT_FORMAT_PNG_COMPOSITED,
+    OUTPUT_FORMAT_PNG_TRANSPARENT,
 )
 from krok_helper.subtitle_render.n3.project_import import (
     N3ImportResult,
@@ -1069,7 +1074,27 @@ def test_unsupported_dest_format_warns(tmp_path):
     payload["DestFormat"] = 0
     result = load_n3proj(_write_n3proj(tmp_path, payload))
     assert "output_path" not in result.project_data["output"]
+    assert "output_format" not in result.project_data["output"]
     assert any("输出格式" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize(
+    ("dest_format", "expected_format"),
+    [
+        (2, OUTPUT_FORMAT_PNG_COMPOSITED),
+        (3, OUTPUT_FORMAT_PNG_TRANSPARENT),
+    ],
+)
+def test_png_sequence_dest_format_maps_to_png_export(tmp_path, dest_format, expected_format):
+    payload = _project_payload(tmp_path)
+    payload["DestFormat"] = dest_format
+    payload["DestPath"] = str(tmp_path / "video_ニコカラメーカー3出力.png")
+    result = load_n3proj(_write_n3proj(tmp_path, payload))
+    output = result.project_data["output"]
+    assert output["output_format"] == expected_format
+    # N3 自动命名同样替换为本模块默认后缀；PNG 序列只取 stem 作导出名。
+    assert Path(output["output_path"]).stem.endswith(DEFAULT_OUTPUT_NAME_SUFFIX)
+    assert not any("输出格式" in warning for warning in result.warnings)
 
 
 def test_unsupported_fps_falls_back_without_warning(tmp_path):

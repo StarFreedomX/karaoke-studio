@@ -23,9 +23,10 @@
 - ``TitleShowKind``：0 Head（``HeadEnd`` 为 ``5999990`` 哨兵时=整段）/
   1 HeadAndInterval / 2 HeadAndTail（首尾之间连续一段）/ 3 Tail。
 - ``SourceKind``：0 Movie / 1 Image / 2 SequenceImage / 3 Background（纯色）。
-- ``DestFormat``：0 UnCompressedAvi / 1 Mp4 / 2·3 ArgbPng。
+- ``DestFormat``：0 UnCompressedAvi（不支持，回退 MP4）/ 1 Mp4 /
+  2·3 ArgbPng（含背景 / 仅字幕，映射为本模块 PNG 序列导出）。
 
-不支持的设置（非 MP4 输出、未知字幕动作等）不阻塞导入，
+不支持的设置（未压缩 AVI 输出、未知字幕动作等）不阻塞导入，
 收集为中文 warning 由 UI 一次性展示。
 """
 
@@ -58,6 +59,10 @@ from krok_helper.subtitle_render.domain.models import (
     TitleOverlay,
     default_title_scheme,
     style_to_dict,
+)
+from krok_helper.subtitle_render.engine.export.render_job import (
+    OUTPUT_FORMAT_PNG_COMPOSITED,
+    OUTPUT_FORMAT_PNG_TRANSPARENT,
 )
 from krok_helper.subtitle_render.sources.subtitles import load_nicokara_lrc
 from krok_helper.subtitle_render.serialization.timing import (
@@ -391,21 +396,27 @@ def load_n3proj(path: str | Path) -> N3ImportResult:
     # ---------------------------------------------------------------- 输出
     output: dict[str, Any] = {}
     dest_format = _int(data.get("DestFormat"), 1)
-    dest_path = str(data.get("DestPath") or "").strip()
-    if dest_format == 1:
-        if dest_path:
-            # N3 自动命名「{视频名}_ニコカラメーカー3出力」换成本模块默认后缀；
-            # 用户在 N3 里自定义过的文件名原样保留。
-            path = Path(dest_path)
-            if path.stem.endswith(_N3_AUTO_OUTPUT_SUFFIX):
-                stem = path.stem[: -len(_N3_AUTO_OUTPUT_SUFFIX)]
-                path = path.with_name(f"{stem}{DEFAULT_OUTPUT_NAME_SUFFIX}{path.suffix}")
-            output["output_path"] = str(path)
-    else:
-        format_names = {0: "未压缩 AVI", 2: "ARGB PNG 序列", 3: "ARGB PNG 序列（仅字幕）"}
+    # N3 的 ARGB PNG 序列（2 含背景 / 3 仅字幕）与本模块的 PNG 序列导出
+    # 同语义，直接映射输出格式；只有未压缩 AVI 与未知值回退 MP4。
+    if dest_format == 2:
+        output["output_format"] = OUTPUT_FORMAT_PNG_COMPOSITED
+    elif dest_format == 3:
+        output["output_format"] = OUTPUT_FORMAT_PNG_TRANSPARENT
+    elif dest_format != 1:
+        format_names = {0: "未压缩 AVI"}
         warnings.append(
-            f"N3 输出格式「{format_names.get(dest_format, dest_format)}」不支持，请手动设置输出路径（本模块输出 MP4）"
+            f"N3 输出格式「{format_names.get(dest_format, dest_format)}」不支持，"
+            "已回退 MP4，请手动设置输出路径"
         )
+    dest_path = str(data.get("DestPath") or "").strip()
+    if dest_path and dest_format in (1, 2, 3):
+        # N3 自动命名「{视频名}_ニコカラメーカー3出力」换成本模块默认后缀；
+        # 用户在 N3 里自定义过的文件名原样保留。PNG 序列只取 stem 作导出名。
+        path = Path(dest_path)
+        if path.stem.endswith(_N3_AUTO_OUTPUT_SUFFIX):
+            stem = path.stem[: -len(_N3_AUTO_OUTPUT_SUFFIX)]
+            path = path.with_name(f"{stem}{DEFAULT_OUTPUT_NAME_SUFFIX}{path.suffix}")
+        output["output_path"] = str(path)
 
     project_data: dict[str, Any] = {
         "subtitle_path": str(subtitle_path) if subtitle_path else None,
