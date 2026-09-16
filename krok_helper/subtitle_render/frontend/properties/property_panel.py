@@ -1588,6 +1588,22 @@ class PropertyPanel(QWidget):
     def _make_gradient_fill_page(self) -> QWidget:
         return self._role_fill_pages_builder.make_gradient_page()
 
+    def _show_gradient_copy_success(self) -> None:
+        InfoBar.success(
+            title="复制成功",
+            content="渐变信息已复制到剪贴板。",
+            parent=self,
+            duration=2500,
+        )
+
+    def _show_split_copy_success(self) -> None:
+        InfoBar.success(
+            title="复制成功",
+            content="拼色信息已复制到剪贴板。",
+            parent=self,
+            duration=2500,
+        )
+
     def _make_split_fill_page(self) -> QWidget:
         return self._role_fill_pages_builder.make_split_page()
     @staticmethod
@@ -1599,6 +1615,7 @@ class PropertyPanel(QWidget):
         *,
         vertical: bool,
         footer: QWidget | None = None,
+        actions: QWidget | None = None,
     ) -> None:
         """Place vertical bars left with two stacked editors on the right."""
         while layout.count():
@@ -1613,6 +1630,8 @@ class PropertyPanel(QWidget):
             # rows and Qt expands the field label into the surplus height.
             layout.addWidget(color_field, 0, 1, Qt.AlignmentFlag.AlignTop)
             layout.addWidget(position_field, 1, 1, Qt.AlignmentFlag.AlignTop)
+            if actions is not None:
+                layout.addWidget(actions, 2, 0)
             layout.setColumnStretch(0, 0)
             layout.setColumnStretch(1, 1)
         else:
@@ -1620,12 +1639,15 @@ class PropertyPanel(QWidget):
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
             )
             layout.addWidget(bar_field, 0, 0, 1, 2)
-            layout.addWidget(color_field, 1, 0)
-            layout.addWidget(position_field, 1, 1)
+            if actions is not None:
+                layout.addWidget(actions, 1, 0, 1, 2)
+            control_row = 2 if actions is not None else 1
+            layout.addWidget(color_field, control_row, 0)
+            layout.addWidget(position_field, control_row, 1)
             layout.setColumnStretch(0, 1)
             layout.setColumnStretch(1, 1)
         if footer is not None:
-            layout.addWidget(footer, 2, 0, 1, 2)
+            layout.addWidget(footer, 3 if actions is not None else 2, 0, 1, 2)
 
     def _make_image_fill_page(self) -> QWidget:
         return self._role_fill_pages_builder.make_image_page()
@@ -3258,6 +3280,7 @@ class PropertyPanel(QWidget):
                     self._gradient_position_field,
                     vertical=fill.mode == "gradient_vertical",
                     footer=self._ruby_horizontal_gradient_with_main_check,
+                    actions=self._gradient_actions_row,
                 )
                 self._ruby_horizontal_gradient_with_main_check.setVisible(
                     fill.mode == "gradient_horizontal"

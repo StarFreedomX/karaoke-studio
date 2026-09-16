@@ -4447,6 +4447,8 @@ def test_gradient_stop_copy_and_paste_applies_to_current_layer(
     qapp, monkeypatch
 ):
     panel = PropertyPanel()
+    notices = []
+    monkeypatch.setattr(pp.InfoBar, "success", lambda **kwargs: notices.append(kwargs))
     emitted: list[Style] = []
     panel.styleChanged.connect(emitted.append)
     source_stops = [
@@ -4458,9 +4460,14 @@ def test_gradient_stop_copy_and_paste_applies_to_current_layer(
         panel._fill_mode_combo.findData("gradient_vertical")
     )
     panel._gradient_editor.set_stops(source_stops)
-    copied = panel._gradient_editor.copy_gradient_info()
+    panel._gradient_copy_btn.click()
+    copied = pp._gradient_stops_to_json(source_stops)
 
     assert QApplication.clipboard().text() == copied
+    assert len(notices) == 1
+    assert notices[0]["title"] == "复制成功"
+    assert notices[0]["content"] == "渐变信息已复制到剪贴板。"
+    assert notices[0]["parent"] is panel
 
     panel._color_layer_combo.setCurrentIndex(
         panel._color_layer_combo.findData("stroke2")
@@ -4474,13 +4481,16 @@ def test_gradient_stop_copy_and_paste_applies_to_current_layer(
         lambda _self: QDialog.DialogCode.Accepted,
     )
 
-    assert panel._gradient_editor.paste_gradient_info()
+    panel._gradient_paste_btn.click()
 
     fill = emitted[-1].karaoke_colors.after.stroke2
     assert fill.mode == "gradient_horizontal"
     assert fill.gradient_stops == source_stops
     assert fill.start_color == "#112233"
     assert fill.end_color == "#DDEEFF"
+
+    assert panel._gradient_copy_btn.accessibleName() == "复制渐变信息"
+    assert panel._gradient_paste_btn.accessibleName() == "粘贴渐变信息"
 
 
 def test_gradient_bar_context_menu_exposes_copy_and_paste(qapp, monkeypatch):
@@ -4507,6 +4517,70 @@ def test_gradient_bar_context_menu_exposes_copy_and_paste(qapp, monkeypatch):
 
     assert action_texts == ["复制渐变信息", "粘贴渐变信息…"]
     assert event.accepted
+
+
+def test_split_bar_copy_and_paste_preserves_hard_color_bands(qapp, monkeypatch):
+    panel = PropertyPanel()
+    notices = []
+    monkeypatch.setattr(pp.InfoBar, "success", lambda **kwargs: notices.append(kwargs))
+    emitted: list[Style] = []
+    panel.styleChanged.connect(emitted.append)
+    source_stops = [
+        (0, "#112233"), (37.5, "#112233"),
+        (37.5, "#804093E9"), (100, "#804093E9"),
+    ]
+    panel._fill_mode_combo.setCurrentIndex(
+        panel._fill_mode_combo.findData("split_vertical")
+    )
+    panel._split_editor.set_stops(source_stops)
+    panel._split_copy_btn.click()
+
+    assert QApplication.clipboard().text() == pp._gradient_stops_to_json(source_stops)
+    assert notices[0]["content"] == "拼色信息已复制到剪贴板。"
+    assert panel._split_copy_btn.accessibleName() == "复制拼色信息"
+    assert panel._split_paste_btn.accessibleName() == "粘贴拼色信息"
+    assert panel._split_editor_layout.getItemPosition(
+        panel._split_editor_layout.indexOf(panel._split_actions_row)
+    ) == (2, 0, 1, 1)
+
+    panel._color_layer_combo.setCurrentIndex(
+        panel._color_layer_combo.findData("stroke2")
+    )
+    panel._fill_mode_combo.setCurrentIndex(
+        panel._fill_mode_combo.findData("split_vertical")
+    )
+    monkeypatch.setattr(
+        pp._GradientStopsPasteDialog,
+        "exec",
+        lambda _self: QDialog.DialogCode.Accepted,
+    )
+    panel._split_paste_btn.click()
+
+    fill = emitted[-1].karaoke_colors.after.stroke2
+    assert fill.mode == "split_vertical"
+    assert fill.split_stops == source_stops
+    assert panel._split_editor._hard_edges is True
+
+
+def test_split_bar_context_menu_exposes_copy_and_paste(qapp, monkeypatch):
+    editor = pp.GradientStopsEditor()
+    editor.set_orientation("split_vertical")
+    action_texts = []
+    monkeypatch.setattr(
+        role_fills_module.RoundMenu, "exec",
+        lambda menu, _pos: action_texts.extend(action.text() for action in menu.actions()),
+    )
+
+    class FakeContextMenuEvent:
+        @staticmethod
+        def globalPos():  # noqa: N802 - Qt API shape
+            return QPoint(10, 10)
+
+        def accept(self):
+            pass
+
+    editor.contextMenuEvent(FakeContextMenuEvent())
+    assert action_texts == ["复制拼色信息", "粘贴拼色信息…"]
 
 
 def test_property_panel_gradient_bar_click_adds_stop(qapp):
@@ -4760,9 +4834,11 @@ def test_vertical_gradient_and_split_use_compact_matching_bar_layout(qapp):
     bar_position = layout.getItemPosition(layout.indexOf(panel._gradient_bar_field))
     color_position = layout.getItemPosition(layout.indexOf(panel._gradient_color_field))
     stop_position = layout.getItemPosition(layout.indexOf(panel._gradient_position_field))
+    actions_position = layout.getItemPosition(layout.indexOf(panel._gradient_actions_row))
     assert bar_position == (0, 0, 2, 1)
     assert color_position == (0, 1, 1, 1)
     assert stop_position == (1, 1, 1, 1)
+    assert actions_position == (2, 0, 1, 1)
     assert panel._gradient_editor.sizeHint().width() == panel._split_editor.sizeHint().width()
     assert panel._gradient_editor._bar_rect().width() == panel._split_editor._bar_rect().width()
 
@@ -4781,6 +4857,8 @@ def test_vertical_gradient_and_split_use_compact_matching_bar_layout(qapp):
     )
     bar_position = layout.getItemPosition(layout.indexOf(panel._gradient_bar_field))
     assert bar_position == (0, 0, 1, 2)
+    assert layout.getItemPosition(layout.indexOf(panel._gradient_actions_row)) == (1, 0, 1, 2)
+    assert layout.getItemPosition(layout.indexOf(panel._gradient_color_field)) == (2, 0, 1, 1)
 
 
 def test_gradient_and_split_editors_do_not_show_redundant_titles(qapp):

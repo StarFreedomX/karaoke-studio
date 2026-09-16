@@ -57,6 +57,7 @@ class GradientStopsEditor(QWidget):
 
     stopsChanged = Signal(list)
     selectedChanged = Signal(int)
+    gradientCopied = Signal()
 
     _POINTER_BLUE = "#0B84FF"
     _POINTER_OUTLINE = "#46505F"
@@ -259,14 +260,12 @@ class GradientStopsEditor(QWidget):
         self._end_drag(merge=True)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
-        if self._hard_edges:
-            super().contextMenuEvent(event)
-            return
+        label = "拼色" if self._hard_edges else "渐变"
         menu = RoundMenu(parent=self)
-        copy_action = Action("复制渐变信息", menu)
+        copy_action = Action(f"复制{label}信息", menu)
         copy_action.triggered.connect(self.copy_gradient_info)
         menu.addAction(copy_action)
-        paste_action = Action("粘贴渐变信息…", menu)
+        paste_action = Action(f"粘贴{label}信息…", menu)
         paste_action.triggered.connect(self.paste_gradient_info)
         menu.addAction(paste_action)
         menu.exec(event.globalPos())
@@ -275,12 +274,14 @@ class GradientStopsEditor(QWidget):
     def copy_gradient_info(self) -> str:
         text = _gradient_stops_to_json(self._stops)
         QApplication.clipboard().setText(text)
+        self.gradientCopied.emit()
         return text
 
     def paste_gradient_info(self) -> bool:
         dialog = _GradientStopsPasteDialog(
             QApplication.clipboard().text(),
             parent=self,
+            label="拼色" if self._hard_edges else "渐变",
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
@@ -554,9 +555,11 @@ class GradientStopsEditor(QWidget):
 class _GradientStopsPasteDialog(ModelessDialog):
     """Import portable gradient-stop JSON into the current gradient bar."""
 
-    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self, text: str, parent: Optional[QWidget] = None, *, label: str = "渐变"
+    ) -> None:
         super().__init__(parent.window() if parent is not None else None)
-        self.setWindowTitle("粘贴渐变信息")
+        self.setWindowTitle(f"粘贴{label}信息")
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setMinimumSize(520, 360)
         self._stops: list[tuple[float, str]] = []
@@ -566,14 +569,14 @@ class _GradientStopsPasteDialog(ModelessDialog):
         layout.setSpacing(10)
 
         hint = CaptionLabel(
-            "粘贴 Lin-K Lyrics 渐变关键点 JSON。应用后仅替换当前渐变条的颜色和位置。",
+            f"粘贴 Lin-K Lyrics {label}关键点 JSON。应用后仅替换当前{label}条的颜色和位置。",
             self,
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         self.text_edit = FluentPlainTextEdit(self)
-        self.text_edit.setPlaceholderText("在此粘贴渐变信息…")
+        self.text_edit.setPlaceholderText(f"在此粘贴{label}信息…")
         self.text_edit.setPlainText(text)
         layout.addWidget(self.text_edit, 1)
 
@@ -774,7 +777,26 @@ class RoleFillPagesBuilder:
         host._gradient_editor.selectedChanged.connect(
             lambda _index: host._sync_gradient_stop_controls()
         )
+        host._gradient_editor.gradientCopied.connect(host._show_gradient_copy_success)
         host._gradient_bar_field = host._gradient_editor
+
+        host._gradient_actions_row = QWidget(page)
+        gradient_actions_layout = QHBoxLayout(host._gradient_actions_row)
+        gradient_actions_layout.setContentsMargins(0, 0, 0, 0)
+        gradient_actions_layout.setSpacing(4)
+        for name, icon, label, callback in (
+            ("_gradient_copy_btn", FIF.COPY, "复制渐变信息", host._gradient_editor.copy_gradient_info),
+            ("_gradient_paste_btn", FIF.PASTE, "粘贴渐变信息", host._gradient_editor.paste_gradient_info),
+        ):
+            button = FluentTransparentToolButton(icon, host._gradient_actions_row)
+            button.setToolTip(label)
+            button.setAccessibleName(label)
+            button.setFixedSize(26, 26)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(callback)
+            setattr(host, name, button)
+            gradient_actions_layout.addWidget(button)
+        gradient_actions_layout.addStretch(1)
 
         host._gradient_stop_color_btn = self._color_button_factory("#FFFFFF", page)
         host._wire_color_edit_session(host._gradient_stop_color_btn)
@@ -838,6 +860,7 @@ class RoleFillPagesBuilder:
             host._gradient_position_field,
             vertical=False,
             footer=host._ruby_horizontal_gradient_with_main_check,
+            actions=host._gradient_actions_row,
         )
         return page
 
@@ -864,7 +887,26 @@ class RoleFillPagesBuilder:
         host._split_editor.selectedChanged.connect(
             lambda _index: host._sync_split_stop_controls()
         )
+        host._split_editor.gradientCopied.connect(host._show_split_copy_success)
         host._split_bar_field = host._split_editor
+
+        host._split_actions_row = QWidget(page)
+        split_actions_layout = QHBoxLayout(host._split_actions_row)
+        split_actions_layout.setContentsMargins(0, 0, 0, 0)
+        split_actions_layout.setSpacing(4)
+        for name, icon, label, callback in (
+            ("_split_copy_btn", FIF.COPY, "复制拼色信息", host._split_editor.copy_gradient_info),
+            ("_split_paste_btn", FIF.PASTE, "粘贴拼色信息", host._split_editor.paste_gradient_info),
+        ):
+            button = FluentTransparentToolButton(icon, host._split_actions_row)
+            button.setToolTip(label)
+            button.setAccessibleName(label)
+            button.setFixedSize(26, 26)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(callback)
+            setattr(host, name, button)
+            split_actions_layout.addWidget(button)
+        split_actions_layout.addStretch(1)
 
         host._split_stop_color_btn = self._color_button_factory("#FFFFFF", page)
         host._wire_color_edit_session(host._split_stop_color_btn)
@@ -907,12 +949,14 @@ class RoleFillPagesBuilder:
             Qt.AlignmentFlag.AlignBottom,
         )
         host._split_position_field = property_field("分段位置", position_row)
+        host._split_editor_layout = layout
         host._arrange_stop_editor(
             layout,
             host._split_bar_field,
             host._split_color_field,
             host._split_position_field,
             vertical=True,
+            actions=host._split_actions_row,
         )
         return page
 
