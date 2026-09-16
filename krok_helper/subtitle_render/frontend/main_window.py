@@ -5424,6 +5424,7 @@ class SubtitleRenderWindow(QWidget):
         settings: SubtitleLoadingSettings,
         *,
         mode: str,
+        preserve_page_structure: bool = False,
     ) -> tuple[TimingTrack, Optional[TimingTrack], tuple[str, ...]]:
         current = self._track_by_index(track_index)
         if current is None:
@@ -5462,22 +5463,30 @@ class SubtitleRenderWindow(QWidget):
                 current,
                 baseline,
                 parsed_source,
-                preserve_page_structure=False,
+                preserve_page_structure=preserve_page_structure,
             )
             refreshed = merge.track
             conflicts = merge.conflicts
         else:
             refreshed = deepcopy(current)
-            for line in refreshed.lines:
-                line.layout_index = 0
-                line.break_before = "none"
+            if not preserve_page_structure:
+                for line in refreshed.lines:
+                    line.layout_index = 0
+                    line.break_before = "none"
             conflicts = ()
         refreshed.loading_settings_mode = (
             mode if mode in {"global", "custom"} else current.loading_settings_mode
         )
         refreshed.loading_settings = settings if refreshed.loading_settings_mode == "custom" else None
         refreshed.loading_settings_snapshot = settings
-        refreshed.page_plan = build_page_plan(refreshed, settings, self._style)
+        if preserve_page_structure and current.page_plan is not None:
+            # 保留手工分页 / 分段 / 逐页布局：只按刷新后的行数修复越界页，
+            # 多出的行按默认行数布局补页。
+            refreshed.page_plan = normalize_page_plan(
+                refreshed, self._style, current.page_plan
+            )
+        else:
+            refreshed.page_plan = build_page_plan(refreshed, settings, self._style)
         project_page_plan_to_legacy_fields(refreshed, self._style)
         return refreshed, parsed_source, conflicts
 
@@ -5499,23 +5508,30 @@ class SubtitleRenderWindow(QWidget):
             if track is not None
             and page_plan_has_manual_changes(track, self._style)
         )
-        if manual_count and not fluent_question(
-            self,
-            "重新生成段落和页面",
-            f"{manual_count} 个字幕源包含手工分页、分段或逐页布局。刷新会按加载设置"
-            "重新生成这些结构，但会尽量保留角色、特效、导唱符和显示时间。是否继续？",
-            yes_text="刷新",
-            no_text="取消",
-            default_cancel=True,
-        ):
-            return False
+        self._last_refresh_preserved_manual = False
+        if manual_count:
+            choice = fluent_choice(
+                self,
+                "刷新包含手工结构的字幕源",
+                f"{manual_count} 个字幕源包含手工分页、分段或逐页布局。可以保留这些"
+                "手工结构、只刷新歌词内容与时间，也可以按加载设置全部重新生成；"
+                "两种刷新都会尽量保留角色、特效、导唱符和显示时间。",
+                ("保留手工结构", "全部重新生成", "取消"),
+                default=2,
+            )
+            if choice not in (0, 1):
+                return False
+            self._last_refresh_preserved_manual = choice == 0
         prepared: list[tuple[int, TimingTrack, Optional[TimingTrack]]] = []
         conflicts: list[str] = []
         try:
             for index in indices:
                 mode, settings = settings_by_index[index]
                 refreshed, parsed, merge_conflicts = self._build_refreshed_track(
-                    index, settings, mode=mode
+                    index,
+                    settings,
+                    mode=mode,
+                    preserve_page_structure=self._last_refresh_preserved_manual,
                 )
                 prepared.append((index, refreshed, parsed))
                 conflicts.extend(merge_conflicts)
@@ -5579,9 +5595,16 @@ class SubtitleRenderWindow(QWidget):
                 )
             },
         ):
+            if getattr(self, "_last_refresh_preserved_manual", False):
+                content = (
+                    "已重新读取字幕并刷新歌词内容与时间；"
+                    "手工分页、分段和逐页布局已保留。"
+                )
+            else:
+                content = "已按保存的加载设置重新读取字幕，并生成段落、页面和按行数布局。"
             InfoBar.success(
                 title="字幕已刷新",
-                content="已按保存的加载设置重新读取字幕，并生成段落、页面和按行数布局。",
+                content=content,
                 parent=self,
                 position=InfoBarPosition.BOTTOM_RIGHT,
                 duration=3000,

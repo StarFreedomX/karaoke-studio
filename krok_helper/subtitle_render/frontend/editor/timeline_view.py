@@ -34,7 +34,15 @@ from PyQt6.QtWidgets import (
     QStyleOption,
     QWidget,
 )
-from qfluentwidgets import Action, BodyLabel, CardWidget, LineEdit, PrimaryPushButton, RoundMenu
+from qfluentwidgets import (
+    Action,
+    BodyLabel,
+    CardWidget,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    RoundMenu,
+)
 
 from krok_helper.qfluent_compat import hide_fluent_tooltip, show_fluent_tooltip
 from krok_helper.subtitle_render.engine.render.adapters.timeline_projection import (
@@ -276,6 +284,7 @@ class TrackTimelineView(QWidget):
         ("zoom_right",)。拖动期间暂停播放头自动翻页。"""
         self._margin_editor: Optional[CardWidget] = None
         self._margin_edit: Optional[LineEdit] = None
+        self._margin_reset_btn: Optional[PushButton] = None
         self._margin_editor_context: Optional[tuple[int, LineBlock, bool, tuple]] = None
         self._lanes_pixmap: Optional[QPixmap] = None
         self._pixmap_key: Optional[tuple] = None
@@ -668,26 +677,38 @@ class TrackTimelineView(QWidget):
             edit.setClearButtonEnabled(False)
             edit.setPlaceholderText("0")
             edit.setFixedWidth(96)
+            reset = PushButton("恢复自动", frame)
+            reset.setToolTip(
+                "清除本侧的手动覆盖，恢复按全局提前入场 / 延迟退场自动计算"
+            )
             ok = PrimaryPushButton("确定", frame)
             ok.setDefault(True)
             ok.setAutoDefault(True)
             layout.addWidget(edit, 1)
             layout.addWidget(label)
+            layout.addWidget(reset)
             layout.addWidget(ok)
             edit.returnPressed.connect(self._commit_margin_editor)
             ok.clicked.connect(self._commit_margin_editor)
+            reset.clicked.connect(self._restore_margin_auto)
             self._margin_editor = frame
             self._margin_edit = edit
+            self._margin_reset_btn = reset
 
         assert self._margin_editor is not None
         assert self._margin_edit is not None
         self._margin_editor_context = (lane_index, block, bool(entry), old_values)
+        if self._margin_reset_btn is not None:
+            # 该侧已是自动时没有可恢复的覆盖，禁用按钮作提示
+            self._margin_reset_btn.setEnabled(
+                old_values[0 if entry else 1] is not None
+            )
         self._margin_edit.blockSignals(True)
         self._margin_edit.setText(str(int(value)))
         self._margin_edit.blockSignals(False)
 
         lane_rect = self._lane_geometry()[lane_index][1]
-        width = 156
+        width = 304
         height = max(32, min(44, int(lane_rect.height())))
         x = int(handle_rect.center().x() - width / 2)
         x = max(self._plot_left(), min(x, self.width() - width - 6))
@@ -716,6 +737,37 @@ class TrackTimelineView(QWidget):
         )
         new_values = self._line_override_values(lane_index, block.line_index)
         self._hide_margin_editor()
+        if new_values != old_values:
+            self.displayWindowEdited.emit(
+                lane_index, block.line_index, old_values, new_values
+            )
+
+    def _restore_margin_auto(self) -> None:
+        """「恢复自动」：清掉本侧的手动覆盖时刻，交回全局自动计算。
+
+        本地 ``_windows`` 缓存先把该侧退回演唱区间（与无缓存兜底一致），
+        宿主收到 :pyattr:`displayWindowEdited` 后会重算并推送真实自动值。"""
+        if self._margin_editor_context is None:
+            return
+        lane_index, block, entry, old_values = self._margin_editor_context
+        track = self._track_refs[lane_index]
+        if not 0 <= block.line_index < len(track.lines):
+            return
+        line = track.lines[block.line_index]
+        if entry:
+            line.display_start_override_ms = None
+        else:
+            line.display_end_override_ms = None
+        if lane_index < len(self._windows):
+            show, hide = self._windows[lane_index].get(
+                block.line_index, (block.start_ms, block.end_ms)
+            )
+            self._windows[lane_index][block.line_index] = (
+                (block.start_ms, hide) if entry else (show, block.end_ms)
+            )
+        new_values = self._line_override_values(lane_index, block.line_index)
+        self._hide_margin_editor()
+        self.update()
         if new_values != old_values:
             self.displayWindowEdited.emit(
                 lane_index, block.line_index, old_values, new_values

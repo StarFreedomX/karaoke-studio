@@ -316,7 +316,8 @@ class SubtitleLoadingSettingsDialog(ModelessDialog):
         self._gap_enabled.setToolTip(
             "比较相邻两句的真实演唱时间。当“下一句开始时间 − 上一句结束时间”"
             "大于设定值时，从下一句开始新段落。提前显示、结束延时和动画时长"
-            "不参与计算。保存加载设置或点击刷新后重新计算，并覆盖现有手工分页。"
+            "不参与计算。保存加载设置或点击刷新后会询问：重新计算并覆盖现有"
+            "手工分页，或保留手工分页只刷新歌词内容与时间。"
         )
         form.addRow("", self._gap_enabled)
         self._gap_spin = FluentSpinBox(self)

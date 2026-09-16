@@ -734,6 +734,88 @@ def test_overlapped_blocks_select_topmost_line_and_edit_its_margin(qapp) -> None
     assert track.lines[1].display_end_override_ms == 5100
 
 
+def test_margin_editor_restore_auto_clears_manual_entry(qapp) -> None:
+    """双击入场把手弹窗里点「恢复自动」：清手动上屏覆盖并上报可撤销编辑。"""
+    track = _make_track()
+    track.lines[0].display_start_override_ms = 400
+    widget = TrackTimelineView()
+    widget.resize(800, 180)
+    widget.set_tracks([("主字幕", track)])
+    widget.set_duration(10_000)
+    widget.set_display_windows([{0: (400, 3000)}])
+
+    edits: list[tuple] = []
+    widget.displayWindowEdited.connect(lambda *args: edits.append(args))
+
+    _lane, lane_rect = widget._lane_geometry()[0]
+    _click(widget, widget._x_for_ms(1650), lane_rect.center().y())
+    left_rect, _right, _lane_idx, _block = widget._handle_rects()
+
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+    assert widget._margin_reset_btn is not None
+    assert widget._margin_reset_btn.isEnabled()
+
+    widget._restore_margin_auto()
+
+    assert track.lines[0].display_start_override_ms is None
+    # 本地窗口缓存先退回演唱区间（= 无缓存兜底），等宿主重算推送自动值
+    assert widget._windows[0][0] == (1000, 3000)
+    assert edits == [(0, 0, (400, None), (None, None))]
+    assert widget._margin_editor.isHidden()
+
+
+def test_margin_editor_restore_auto_clears_manual_exit(qapp) -> None:
+    """双击退场把手弹窗里点「恢复自动」：只清手动消失覆盖，入场侧不动。"""
+    track = _make_track()
+    track.lines[0].display_start_override_ms = 400
+    track.lines[0].display_end_override_ms = 3500
+    widget = TrackTimelineView()
+    widget.resize(800, 180)
+    widget.set_tracks([("主字幕", track)])
+    widget.set_duration(10_000)
+    widget.set_display_windows([{0: (400, 3500)}])
+
+    edits: list[tuple] = []
+    widget.displayWindowEdited.connect(lambda *args: edits.append(args))
+
+    _lane, lane_rect = widget._lane_geometry()[0]
+    _click(widget, widget._x_for_ms(1650), lane_rect.center().y())
+    _left, right_rect, _lane_idx, _block = widget._handle_rects()
+
+    _double_click(widget, right_rect.center().x(), right_rect.center().y())
+    assert widget._margin_reset_btn is not None
+    assert widget._margin_reset_btn.isEnabled()
+    widget._restore_margin_auto()
+
+    assert track.lines[0].display_end_override_ms is None
+    assert track.lines[0].display_start_override_ms == 400
+    assert widget._windows[0][0] == (400, 2600)
+    assert edits == [(0, 0, (400, 3500), (400, None))]
+
+
+def test_margin_editor_restore_auto_disabled_on_automatic_side(qapp) -> None:
+    """该侧本就是自动计算时没有可恢复的覆盖：按钮禁用作提示。"""
+    track = _make_track()
+    track.lines[0].display_end_override_ms = 3500
+    widget = TrackTimelineView()
+    widget.resize(800, 180)
+    widget.set_tracks([("主字幕", track)])
+    widget.set_duration(10_000)
+    widget.set_display_windows([{0: (800, 3500)}])
+
+    _lane, lane_rect = widget._lane_geometry()[0]
+    _click(widget, widget._x_for_ms(1650), lane_rect.center().y())
+    left_rect, right_rect, _lane_idx, _block = widget._handle_rects()
+
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+    assert widget._margin_reset_btn is not None
+    assert not widget._margin_reset_btn.isEnabled()
+    widget._hide_margin_editor()
+
+    _double_click(widget, right_rect.center().x(), right_rect.center().y())
+    assert widget._margin_reset_btn.isEnabled()
+
+
 def test_selection_paint_smoke(qapp) -> None:
     widget = TrackTimelineView()
     widget.resize(800, 180)

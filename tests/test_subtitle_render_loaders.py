@@ -459,6 +459,121 @@ def test_manual_refresh_axis_extra_keeps_group_filter(qapp, monkeypatch, tmp_pat
     assert extra.source_baseline.lines[0].chars[0].start_ms == 2300
 
 
+def _write_two_line_lrc(path: Path, second_line_tag: str) -> None:
+    """两行间隔 < 分段阈值的 LRC：自动布局为单段单页两行。
+
+    ``second_line_tag`` 是第二行的时间标签（如 ``[00:02:10]``）。"""
+    path.write_text(
+        "[00:01:00]a[00:01:50]b[00:02:00]\n"
+        f"{second_line_tag}c[00:03:00]d[00:03:50]\n",
+        encoding="utf-8-sig",
+    )
+
+
+def test_manual_refresh_preserve_choice_keeps_manual_page_structure(
+    qapp, monkeypatch, tmp_path
+):
+    """有手工分页时刷新弹三选：选「保留手工结构」→ 只刷新内容与时间。"""
+    from krok_helper.subtitle_render.domain.timing import (
+        TrackPage,
+        TrackPagePlan,
+        TrackSection,
+    )
+
+    lrc = tmp_path / "manual-structure.lrc"
+    _write_two_line_lrc(lrc, "[00:02:10]")
+    win = _make_window(qapp, monkeypatch)
+    assert win.load_from_lrc(lrc) is not None
+    track = win._timing_track
+    # 自动计划为单页两行；手工改成同段两页各一行
+    track.page_plan = TrackPagePlan([TrackSection([TrackPage(1), TrackPage(1)])])
+    mw.project_page_plan_to_legacy_fields(track, win._style)
+    assert mw.page_plan_has_manual_changes(track, win._style) is True
+
+    choices: list[dict] = []
+    monkeypatch.setattr(
+        mw,
+        "fluent_choice",
+        lambda *args, **kwargs: (choices.append(kwargs), 0)[1],
+    )
+    monkeypatch.setattr(mw.InfoBar, "success", lambda **kwargs: None)
+    _write_two_line_lrc(lrc, "[00:02:50]")
+
+    assert _refresh_single_source(win, 0)
+    track = win._timing_track  # 刷新会替换 track 对象，重取引用
+
+    assert len(choices) == 1
+    assert choices[0]["default"] == 2  # 默认焦点在「取消」，防误触
+    assert track.lines[1].chars[0].start_ms == 2500
+    assert [
+        [page.line_count for page in section.pages]
+        for section in track.page_plan.sections
+    ] == [[1, 1]]
+    assert mw.page_plan_has_manual_changes(track, win._style) is True
+    assert win._last_refresh_preserved_manual is True
+
+
+def test_manual_refresh_regenerate_choice_rebuilds_page_structure(
+    qapp, monkeypatch, tmp_path
+):
+    """三选选「全部重新生成」：与旧行为一致，手工结构按加载设置重建。"""
+    from krok_helper.subtitle_render.domain.timing import (
+        TrackPage,
+        TrackPagePlan,
+        TrackSection,
+    )
+
+    lrc = tmp_path / "manual-regenerate.lrc"
+    _write_two_line_lrc(lrc, "[00:02:10]")
+    win = _make_window(qapp, monkeypatch)
+    assert win.load_from_lrc(lrc) is not None
+    track = win._timing_track
+    track.page_plan = TrackPagePlan([TrackSection([TrackPage(1), TrackPage(1)])])
+    mw.project_page_plan_to_legacy_fields(track, win._style)
+
+    monkeypatch.setattr(mw, "fluent_choice", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(mw.InfoBar, "success", lambda **kwargs: None)
+    _write_two_line_lrc(lrc, "[00:02:50]")
+
+    assert _refresh_single_source(win, 0)
+    track = win._timing_track  # 刷新会替换 track 对象，重取引用
+
+    assert track.lines[1].chars[0].start_ms == 2500
+    assert [
+        [page.line_count for page in section.pages]
+        for section in track.page_plan.sections
+    ] == [[2]]
+    assert mw.page_plan_has_manual_changes(track, win._style) is False
+    assert win._last_refresh_preserved_manual is False
+
+
+def test_manual_refresh_cancel_keeps_track_untouched(qapp, monkeypatch, tmp_path):
+    """三选选「取消」：不重读文件、不动轨道。"""
+    from krok_helper.subtitle_render.domain.timing import (
+        TrackPage,
+        TrackPagePlan,
+        TrackSection,
+    )
+
+    lrc = tmp_path / "manual-cancel.lrc"
+    _write_two_line_lrc(lrc, "[00:02:10]")
+    win = _make_window(qapp, monkeypatch)
+    assert win.load_from_lrc(lrc) is not None
+    track = win._timing_track
+    track.page_plan = TrackPagePlan([TrackSection([TrackPage(1), TrackPage(1)])])
+    mw.project_page_plan_to_legacy_fields(track, win._style)
+
+    monkeypatch.setattr(mw, "fluent_choice", lambda *args, **kwargs: 2)
+    _write_two_line_lrc(lrc, "[00:02:50]")
+
+    assert _refresh_single_source(win, 0) is False
+    assert track.lines[1].chars[0].start_ms == 2100
+    assert [
+        [page.line_count for page in section.pages]
+        for section in track.page_plan.sections
+    ] == [[1, 1]]
+
+
 def test_manual_refresh_split_primary_keeps_group_filter(qapp, monkeypatch, tmp_path):
     """刷新分轴主字幕：只重读主分组的行，其他分组不会混进主轨道。"""
     sug = tmp_path / "grouped.sug"
