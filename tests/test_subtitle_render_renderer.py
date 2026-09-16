@@ -1271,16 +1271,86 @@ def test_render_retries_amf_broken_pipe_with_cpu(monkeypatch, tmp_path):
 
 def test_amf_retry_filter_rejects_unrelated_ffmpeg_failure():
     command = ["ffmpeg", "-c:v", "h264_amf", "out.mp4"]
-    assert renderer._should_retry_amf_with_cpu(
+    assert renderer._should_retry_encoder_with_cpu(
         command, deque(["No space left on device"])
     ) is False
-    assert renderer._should_retry_amf_with_cpu(
+    assert renderer._should_retry_encoder_with_cpu(
         command, deque(["Error while opening encoder"])
     ) is True
-    assert renderer._should_retry_amf_with_cpu(
+    assert renderer._should_retry_encoder_with_cpu(
         ["ffmpeg", "-c:v", "libx264", "out.mp4"],
         deque(["Error while opening encoder"]),
     ) is False
+
+
+def test_encoder_retry_filter_covers_nvenc_and_qsv_init_failures():
+    nvenc_command = ["ffmpeg", "-c:v", "h264_nvenc", "out.mp4"]
+    # 无 N 卡 / 驱动缺失：ffmpeg -encoders 名单里有 nvenc 但运行时初始化失败。
+    assert renderer._should_retry_encoder_with_cpu(
+        nvenc_command, deque(["Cannot load nvcuda.dll"])
+    ) is True
+    assert renderer._should_retry_encoder_with_cpu(
+        nvenc_command,
+        deque(["The minimum required Nvidia driver for nvenc is 522.25 or newer"]),
+    ) is True
+    assert renderer._should_retry_encoder_with_cpu(
+        nvenc_command,
+        deque(
+            [
+                "[h264_nvenc @ ...] OpenEncodeSessionEx failed: "
+                "out of memory (10)"
+            ]
+        ),
+    ) is True
+    qsv_command = ["ffmpeg", "-c:v", "hevc_qsv", "out.mp4"]
+    assert renderer._should_retry_encoder_with_cpu(
+        qsv_command, deque(["Error initializing an MFX session: -5"])
+    ) is True
+    # 与硬编无关的失败不重试（磁盘满等在两条路径下都白跑第二遍）。
+    assert renderer._should_retry_encoder_with_cpu(
+        nvenc_command, deque(["av_interleaved_write_fd: No space left on device"])
+    ) is False
+
+
+def test_render_retries_nvenc_broken_pipe_with_cpu(monkeypatch, tmp_path):
+    class _BrokenNvencStdin(_FakeRenderStdin):
+        def write(self, _payload):
+            raise BrokenPipeError("nvenc exited during initialization")
+
+    job = replace(
+        _job(tmp_path),
+        width=2,
+        height=2,
+        fps=2,
+        duration_ms=1_000,
+        gpu_export_enabled=False,
+        encoder_mode="nvenc",
+    )
+    failed = _FakeRenderProcess(job.output_path)
+    failed.stdin = _BrokenNvencStdin()
+    failed.returncode = 1
+    failed.stdout = [b"[h264_nvenc @ ...] Cannot load nvcuda.dll\n"]
+    succeeded = _FakeRenderProcess(job.output_path)
+    processes = [failed, succeeded]
+    commands: list[list[str]] = []
+    logs: list[str] = []
+
+    def fake_popen(command, **_kwargs):
+        commands.append(command)
+        return processes.pop(0)
+
+    def fake_writer(process, active_job, _top, render_h, total, *_args):
+        process.stdin.write(b"p" * (active_job.width * render_h * 4 * total))
+
+    monkeypatch.setenv("KROK_SUBTITLE_RENDER_STRIP", "0")
+    monkeypatch.setattr(renderer, "find_tool", lambda *_args, **_kwargs: "ffmpeg")
+    monkeypatch.setattr(renderer, "_write_frames_single", fake_writer)
+    monkeypatch.setattr(renderer.subprocess, "Popen", fake_popen)
+
+    assert render_subtitle_video(job, logger=logs.append) == job.output_path
+    assert "h264_nvenc" in commands[0]
+    assert "libx264" in commands[1]
+    assert any("已自动切换 CPU 编码" in message for message in logs)
 
 
 def test_ffmpeg_failure_hint_translates_common_markers():
@@ -1293,8 +1363,13 @@ def test_ffmpeg_failure_hint_translates_common_markers():
     assert "素材" in renderer._ffmpeg_failure_hint(
         deque(["bg.mp4: No such file or directory"])
     )
-    assert renderer._ffmpeg_failure_hint(deque(["some unrelated warning"])) == ""
-    assert renderer._ffmpeg_failure_hint(deque([])) == ""
+    # 未命中已知标记时不再返回空串：附上 ffmpeg 原始输出末尾，让「裸 32」
+    # 类失败也能从错误弹窗里看到 ffmpeg 的真实死因。
+    assert "some unrelated warning" in renderer._ffmpeg_failure_hint(
+        deque(["some unrelated warning"])
+    )
+    # 一字不输出（进程被系统/杀软强制终止）也要给出可行动的解释。
+    assert "未输出任何错误信息" in renderer._ffmpeg_failure_hint(deque([]))
 
 
 def test_render_failure_message_includes_translated_hint(monkeypatch, tmp_path):

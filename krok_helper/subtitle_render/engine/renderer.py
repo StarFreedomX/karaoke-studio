@@ -398,7 +398,7 @@ def render_subtitle_video(
     output_drain_thread.start()
 
     return_code: int | None = None
-    amf_pipe_failure = False
+    hw_encoder_pipe_failure = False
     try:
         assert process.stdin is not None
         # 预扫（条带/多带）阶段可被取消，但取消后原实现仍会走完 Popen 并拉起
@@ -493,12 +493,12 @@ def render_subtitle_video(
         _remove_incomplete_output(job, logger)
         if should_cancel is not None and should_cancel():
             raise ExportCancelled("已停止导出。") from exc
-        # AMF 初始化失败通常在第一批 rawvideo 写入时就关闭管道，
+        # 硬编初始化失败通常在第一批 rawvideo 写入时就关闭管道，
         # 比最终 return_code 更早到达。等日志线程读完后判断；
         # CPU 重试放在 finally 之后，避免新旧 ffmpeg 进程重叠。
         output_drain_thread.join(timeout=1.0)
-        if _should_retry_amf_with_cpu(command, ffmpeg_output_tail):
-            amf_pipe_failure = True
+        if _should_retry_encoder_with_cpu(command, ffmpeg_output_tail):
+            hw_encoder_pipe_failure = True
         else:
             raise ProcessingError(
                 f"ffmpeg 管道写入失败: {exc}"
@@ -520,15 +520,15 @@ def render_subtitle_video(
     if should_cancel is not None and should_cancel():
         _remove_incomplete_output(job, logger)
         raise ExportCancelled("已停止导出。")
-    retry_amf_with_cpu = amf_pipe_failure or (
+    retry_hw_encoder_with_cpu = hw_encoder_pipe_failure or (
         return_code is not None
         and return_code != 0
-        and _should_retry_amf_with_cpu(command, ffmpeg_output_tail)
+        and _should_retry_encoder_with_cpu(command, ffmpeg_output_tail)
     )
-    if retry_amf_with_cpu:
+    if retry_hw_encoder_with_cpu:
         _remove_incomplete_output(job, logger)
         logger(
-            "AMD AMF 编码器初始化/显存失败，已自动切换 CPU 编码"
+            "硬编码码器（NVENC/QSV/AMF）初始化或显存失败，已自动切换 CPU 编码"
             "，从头重试（进度会重新从 0 开始计数）"
         )
         return render_subtitle_video(
@@ -1640,22 +1640,46 @@ def _drain_process_output(
             logger(line)
 
 
-def _should_retry_amf_with_cpu(
+# 硬件编码器初始化失败自动回退 CPU 的适配范围：auto 模式按 ffmpeg -encoders
+# 名单选硬编，不验证能否真正初始化（无 N 卡 / 驱动过旧 / 会话占满都会在写
+# 第一批帧时断管退出），NVENC / QSV / AMF 一视同仁地允许换 CPU 重试一次。
+_HW_ENCODER_NAMES = frozenset(
+    {
+        "h264_nvenc",
+        "hevc_nvenc",
+        "h264_qsv",
+        "hevc_qsv",
+        "h264_amf",
+        "hevc_amf",
+    }
+)
+
+
+def _should_retry_encoder_with_cpu(
     command: list[str], output_tail: deque[str],
 ) -> bool:
-    """仅对 AMF 初始化/设备/内存类错误用 CPU 编码重试一次。
+    """硬编初始化/会话/显存类错误用 CPU 编码重试一次。
 
-    输出目录不可写、输入损坏、磁盘满等与 AMF 无关的失败不重试，
-    避免长视频在必然失败时白跑第二遍。
+    输出目录不可写、输入损坏、磁盘满等与硬编无关的失败不重试，
+    避免长视频在必然失败时白跑第二遍；CPU 命令（libx264/libx265）
+    不含硬编编码器名，也不会重试。
     """
 
-    if not any(part in {"h264_amf", "hevc_amf"} for part in command):
+    if not any(part in _HW_ENCODER_NAMES for part in command):
         return False
     output = "\n".join(output_tail).lower()
     markers = (
         "amf_",
         "createcomponent",
         "no capable devices",
+        # NVENC：无驱动 / 驱动过旧 / 无 N 卡 / 会话占满
+        "cannot load nvcuda",
+        "minimum required nvidia driver",
+        "openencodesessionex",
+        "initializeencoder failed",
+        "no nvidia devices",
+        # QSV：运行时建不起 MFX 会话（-encoders 名单存在 ≠ 核显可用）
+        "mfx session",
         "out of memory",
         "cannot allocate memory",
         "failed to initialise",
@@ -1689,14 +1713,24 @@ def _ffmpeg_failure_hint(output_tail: deque[str]) -> str:
     """从 ffmpeg 输出尾部识别常见失败原因，翻译成一句中文解释。
 
     这些失败最终都表现为断管或非零退出码，光看通用报错无法定位；ffmpeg 的
-    stderr 已由排水线程收进 ``output_tail``，这里只挑高置信度的标记。
+    stderr 已由排水线程收进 ``output_tail``。命中已知标记给翻译；未命中时
+    附上原始输出的最后几行，一个字都不输出则明确指出「被强制终止」——
+    这两种形态（裸 errno 32）是最难排查的，不能再让用户对着空提示猜。
     """
 
     output = "\n".join(output_tail).lower()
     for marker, hint in _FFMPEG_FAILURE_HINTS:
         if marker in output:
             return f"（疑似原因：{hint}）"
-    return ""
+    tail_lines = [line.strip() for line in output_tail if line.strip()]
+    if tail_lines:
+        quoted = " | ".join(line[-160:] for line in tail_lines[-3:])
+        return f"（ffmpeg 原始输出末尾：{quoted}）"
+    return (
+        "（ffmpeg 未输出任何错误信息就退出了：常见于系统内存耗尽时进程被强制"
+        "终止，或被杀毒软件拦截；可关闭其他程序、调低导出分辨率或减少并行"
+        " worker 后重试）"
+    )
 
 
 def _output_format_label(output_format: str) -> str:
