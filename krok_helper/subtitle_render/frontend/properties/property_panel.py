@@ -1604,6 +1604,22 @@ class PropertyPanel(QWidget):
             duration=2500,
         )
 
+    def _show_color_info_paste_success(self, kind: str) -> None:
+        InfoBar.success(
+            title="粘贴成功",
+            content=f"{kind}信息已应用到当前图层。",
+            parent=self,
+            duration=2500,
+        )
+
+    def _show_color_info_paste_invalid(self, kind: str, reason: str) -> None:
+        InfoBar.warning(
+            title=f"无法直接粘贴{kind}信息",
+            content=f"{reason} 请在弹出的窗口中检查或修改。",
+            parent=self,
+            duration=3500,
+        )
+
     def _make_split_fill_page(self) -> QWidget:
         return self._role_fill_pages_builder.make_split_page()
     @staticmethod

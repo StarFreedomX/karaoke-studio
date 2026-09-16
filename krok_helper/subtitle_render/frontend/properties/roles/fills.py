@@ -58,6 +58,8 @@ class GradientStopsEditor(QWidget):
     stopsChanged = Signal(list)
     selectedChanged = Signal(int)
     gradientCopied = Signal()
+    infoPasted = Signal()
+    clipboardPasteRejected = Signal(str)
 
     _POINTER_BLUE = "#0B84FF"
     _POINTER_OUTLINE = "#46505F"
@@ -285,9 +287,23 @@ class GradientStopsEditor(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
-        self.set_stops(dialog.stops())
-        self.stopsChanged.emit(list(self._stops))
+        self._apply_pasted_stops(dialog.stops())
         return True
+
+    def paste_clipboard_info(self) -> bool:
+        """Paste valid clipboard data immediately; offer the editor for invalid data."""
+        try:
+            stops = _gradient_stops_from_json(QApplication.clipboard().text())
+        except ValueError as exc:
+            self.clipboardPasteRejected.emit(str(exc))
+            return self.paste_gradient_info()
+        self._apply_pasted_stops(stops)
+        return True
+
+    def _apply_pasted_stops(self, stops: list[tuple[float, str]]) -> None:
+        self.set_stops(stops)
+        self.stopsChanged.emit(list(self._stops))
+        self.infoPasted.emit()
 
     def _bar_rect(self) -> QRectF:
         if self._orientation == "horizontal":
@@ -778,6 +794,12 @@ class RoleFillPagesBuilder:
             lambda _index: host._sync_gradient_stop_controls()
         )
         host._gradient_editor.gradientCopied.connect(host._show_gradient_copy_success)
+        host._gradient_editor.infoPasted.connect(
+            lambda: host._show_color_info_paste_success("渐变")
+        )
+        host._gradient_editor.clipboardPasteRejected.connect(
+            lambda reason: host._show_color_info_paste_invalid("渐变", reason)
+        )
         host._gradient_bar_field = host._gradient_editor
 
         host._gradient_actions_row = QWidget(page)
@@ -786,7 +808,7 @@ class RoleFillPagesBuilder:
         gradient_actions_layout.setSpacing(4)
         for name, icon, label, callback in (
             ("_gradient_copy_btn", FIF.COPY, "复制渐变信息", host._gradient_editor.copy_gradient_info),
-            ("_gradient_paste_btn", FIF.PASTE, "粘贴渐变信息", host._gradient_editor.paste_gradient_info),
+            ("_gradient_paste_btn", FIF.PASTE, "粘贴渐变信息", host._gradient_editor.paste_clipboard_info),
         ):
             button = FluentTransparentToolButton(icon, host._gradient_actions_row)
             button.setToolTip(label)
@@ -888,6 +910,12 @@ class RoleFillPagesBuilder:
             lambda _index: host._sync_split_stop_controls()
         )
         host._split_editor.gradientCopied.connect(host._show_split_copy_success)
+        host._split_editor.infoPasted.connect(
+            lambda: host._show_color_info_paste_success("拼色")
+        )
+        host._split_editor.clipboardPasteRejected.connect(
+            lambda reason: host._show_color_info_paste_invalid("拼色", reason)
+        )
         host._split_bar_field = host._split_editor
 
         host._split_actions_row = QWidget(page)
@@ -896,7 +924,7 @@ class RoleFillPagesBuilder:
         split_actions_layout.setSpacing(4)
         for name, icon, label, callback in (
             ("_split_copy_btn", FIF.COPY, "复制拼色信息", host._split_editor.copy_gradient_info),
-            ("_split_paste_btn", FIF.PASTE, "粘贴拼色信息", host._split_editor.paste_gradient_info),
+            ("_split_paste_btn", FIF.PASTE, "粘贴拼色信息", host._split_editor.paste_clipboard_info),
         ):
             button = FluentTransparentToolButton(icon, host._split_actions_row)
             button.setToolTip(label)

@@ -4478,12 +4478,14 @@ def test_gradient_stop_copy_and_paste_applies_to_current_layer(
     monkeypatch.setattr(
         pp._GradientStopsPasteDialog,
         "exec",
-        lambda _self: QDialog.DialogCode.Accepted,
+        lambda _self: pytest.fail("有效渐变信息不应弹窗"),
     )
 
     panel._gradient_paste_btn.click()
 
     fill = emitted[-1].karaoke_colors.after.stroke2
+    assert notices[-1]["title"] == "粘贴成功"
+    assert notices[-1]["content"] == "渐变信息已应用到当前图层。"
     assert fill.mode == "gradient_horizontal"
     assert fill.gradient_stops == source_stops
     assert fill.start_color == "#112233"
@@ -4552,7 +4554,7 @@ def test_split_bar_copy_and_paste_preserves_hard_color_bands(qapp, monkeypatch):
     monkeypatch.setattr(
         pp._GradientStopsPasteDialog,
         "exec",
-        lambda _self: QDialog.DialogCode.Accepted,
+        lambda _self: pytest.fail("有效拼色信息不应弹窗"),
     )
     panel._split_paste_btn.click()
 
@@ -4560,6 +4562,42 @@ def test_split_bar_copy_and_paste_preserves_hard_color_bands(qapp, monkeypatch):
     assert fill.mode == "split_vertical"
     assert fill.split_stops == source_stops
     assert panel._split_editor._hard_edges is True
+    assert notices[-1]["title"] == "粘贴成功"
+    assert notices[-1]["content"] == "拼色信息已应用到当前图层。"
+
+
+@pytest.mark.parametrize(
+    ("mode", "button_name", "label"),
+    [
+        ("gradient_horizontal", "_gradient_paste_btn", "渐变"),
+        ("split_vertical", "_split_paste_btn", "拼色"),
+    ],
+)
+def test_color_bar_button_invalid_clipboard_opens_validation_dialog(
+    qapp, monkeypatch, mode, button_name, label
+):
+    panel = PropertyPanel()
+    panel._fill_mode_combo.setCurrentIndex(panel._fill_mode_combo.findData(mode))
+    warnings = []
+    successes = []
+    dialogs = []
+    monkeypatch.setattr(pp.InfoBar, "warning", lambda **kwargs: warnings.append(kwargs))
+    monkeypatch.setattr(pp.InfoBar, "success", lambda **kwargs: successes.append(kwargs))
+    monkeypatch.setattr(
+        pp._GradientStopsPasteDialog,
+        "exec",
+        lambda dialog: dialogs.append((dialog.windowTitle(), dialog.apply_button.isEnabled()))
+        or QDialog.DialogCode.Rejected,
+    )
+    QApplication.clipboard().setText("不是 JSON")
+
+    getattr(panel, button_name).click()
+
+    assert dialogs == [(f"粘贴{label}信息", False)]
+    assert warnings[0]["title"] == f"无法直接粘贴{label}信息"
+    assert "JSON 格式错误" in warnings[0]["content"]
+    assert warnings[0]["parent"] is panel
+    assert successes == []
 
 
 def test_split_bar_context_menu_exposes_copy_and_paste(qapp, monkeypatch):
