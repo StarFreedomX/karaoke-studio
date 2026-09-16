@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QStyle,
     QStyleOption,
+    QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
@@ -667,9 +668,12 @@ class TrackTimelineView(QWidget):
             frame = CardWidget(self)
             frame.setObjectName("TimelineMarginEditor")
             frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-            layout = QHBoxLayout(frame)
-            layout.setContentsMargins(8, 4, 8, 4)
+            # 两行布局：上行输入 + 确定，下行「恢复自动」，避免单行过扁
+            layout = QVBoxLayout(frame)
+            layout.setContentsMargins(8, 6, 8, 6)
             layout.setSpacing(6)
+            input_row = QHBoxLayout()
+            input_row.setSpacing(6)
             label = BodyLabel("ms", frame)
             label.setObjectName("TimelineMarginEditorLabel")
             edit = LineEdit(frame)
@@ -677,17 +681,22 @@ class TrackTimelineView(QWidget):
             edit.setClearButtonEnabled(False)
             edit.setPlaceholderText("0")
             edit.setFixedWidth(96)
+            ok = PrimaryPushButton("确定", frame)
+            ok.setDefault(True)
+            ok.setAutoDefault(True)
+            input_row.addWidget(edit, 1)
+            input_row.addWidget(label)
+            input_row.addWidget(ok)
+            action_row = QHBoxLayout()
+            action_row.setSpacing(6)
             reset = PushButton("恢复自动", frame)
             reset.setToolTip(
                 "清除本侧的手动覆盖，恢复按全局提前入场 / 延迟退场自动计算"
             )
-            ok = PrimaryPushButton("确定", frame)
-            ok.setDefault(True)
-            ok.setAutoDefault(True)
-            layout.addWidget(edit, 1)
-            layout.addWidget(label)
-            layout.addWidget(reset)
-            layout.addWidget(ok)
+            action_row.addWidget(reset)
+            action_row.addStretch(1)
+            layout.addLayout(input_row)
+            layout.addLayout(action_row)
             edit.returnPressed.connect(self._commit_margin_editor)
             ok.clicked.connect(self._commit_margin_editor)
             reset.clicked.connect(self._restore_margin_auto)
@@ -708,12 +717,13 @@ class TrackTimelineView(QWidget):
         self._margin_edit.blockSignals(False)
 
         lane_rect = self._lane_geometry()[lane_index][1]
-        width = 304
-        height = max(32, min(44, int(lane_rect.height())))
+        width = 224
+        height = 84
         x = int(handle_rect.center().x() - width / 2)
         x = max(self._plot_left(), min(x, self.width() - width - 6))
+        # 弹窗比轨道高，垂直方向以轨道中心对齐并夹在视图内
         y = int(lane_rect.center().y() - height / 2)
-        y = max(int(lane_rect.top()), min(y, int(lane_rect.bottom()) - height))
+        y = max(int(self._ruler_rect().bottom()) + 2, min(y, self.height() - height - 2))
         self._margin_editor.setGeometry(QRect(x, y, width, height))
         self._margin_editor.raise_()
         self._margin_editor.show()
