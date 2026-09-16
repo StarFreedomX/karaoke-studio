@@ -2184,6 +2184,14 @@ class PropertyPanel(QWidget):
         builder = self._title_page_builder
         if builder.cards_layout is None:
             return
+        # 重建会把卡片重置为默认展开：先按条目名记住各卡片折叠状态，重建后
+        # 回填，已折叠的卡片保持折叠（新增/删除/改名触发的重建都不再弹开
+        # 全部卡片）；没有记录的新条目保持展开。「添加标题」时旧条目名称
+        # 不变即可命中，重名最坏也只是状态串到同名卡片。
+        expanded_by_name = {
+            card.name_edit.text(): card.section.header.isChecked()
+            for card in self._title_cards
+        }
         for card in self._title_cards:
             card.section.setParent(None)
             card.section.deleteLater()
@@ -2195,6 +2203,9 @@ class PropertyPanel(QWidget):
                 overlay,
                 timecode_factory=builder.timecode_factory,
             )
+            name = overlay.name or f"标题 {index + 1}"
+            if name in expanded_by_name and not expanded_by_name[name]:
+                card.section.set_expanded(False)
             card.sync_layout_combo(overlay, self._style)
             card.sync_scheme_combo(overlay, self._style)
             self._title_cards.append(card)

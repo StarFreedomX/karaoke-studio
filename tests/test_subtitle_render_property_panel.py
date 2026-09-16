@@ -2575,6 +2575,27 @@ def test_title_head_tail_mode_has_independent_timing_rows(qapp):
     assert title.tail_fade_out_ms == 900
 
 
+def test_title_add_keeps_collapsed_cards_collapsed(qapp):
+    """「添加标题」触发卡片重建：已折叠的卡片保持折叠，只有新卡片展开。"""
+    panel = PropertyPanel()
+    panel.set_style(
+        Style(title_overlays=[
+            TitleOverlay(name="标题 1", enabled=True),
+            TitleOverlay(name="标题 2", enabled=True),
+        ])
+    )
+    # 用户折叠第一张卡片（header 勾选态是折叠逻辑状态）
+    panel._title_cards[0].section.set_expanded(False)
+    assert panel._title_cards[0].section.header.isChecked() is False
+
+    panel._on_title_add_requested()
+
+    assert len(panel._title_cards) == 3
+    assert panel._title_cards[0].section.header.isChecked() is False
+    assert panel._title_cards[1].section.header.isChecked() is True
+    assert panel._title_cards[2].section.header.isChecked() is True
+
+
 def test_timecode_parse_and_format_round_trip():
     """宽松解析接受纯秒数 / 分:秒.毫秒 / 时:分:秒，后台换算成毫秒。"""
     assert pp.parse_timecode_ms("") == 0
