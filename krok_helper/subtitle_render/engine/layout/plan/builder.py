@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from krok_helper.subtitle_render.engine.layout.plan.model import (
     LayoutOffsetWindow,
@@ -112,6 +113,14 @@ def assemble_track_layout_plan(
         for item in display_items
         if id(item.line) in index_of
     }
+    # 「吃掉走字时长」被顶掉的行：按其「出场动画保护时间」覆写退场动画
+    # 时长。必须放在 style_for_line_display_window 的钳制之后——该钳制按
+    # 「窗尾 − 走字尾」会把被吃进走字的行退场时长压成 0。
+    display_takeover_exit = {
+        index_of[id(item.line)]: int(item.takeover_exit_ms)
+        for item in display_items
+        if item.takeover_exit_ms is not None and id(item.line) in index_of
+    }
 
     plans = []
     for index, line in enumerate(track.lines):
@@ -126,13 +135,20 @@ def assemble_track_layout_plan(
                 ),
             )
         )
+        displace_exit = display_takeover_exit.get(index)
+        animation_style = animation_styles[index]
+        if displace_exit is not None:
+            animation_style = replace(
+                animation_style,
+                exit_fade_ms=displace_exit,
+            )
         plans.append(
             LineLayoutPlan(
                 track_index=index,
                 line=line,
                 render_line=render_lines[index],
                 layout_style=layout_styles[index],
-                animation_style=animation_styles[index],
+                animation_style=animation_style,
                 resolved_intervals=tuple(resolved_intervals[index]),
                 page_index=page_indices.get(index, -1),
                 page_line_count=page_line_counts.get(index, 0),
@@ -150,6 +166,7 @@ def assemble_track_layout_plan(
                     layout_styles[index],
                 ),
                 layout_offset_windows=tuple(page_offset_windows.get(index, ())),
+                displace_exit_ms=displace_exit,
             )
         )
     return TrackLayoutPlan(

@@ -51,6 +51,14 @@ class DisplayLine:
     计划与 GPU IR 同源生效，轨道视图与时间数据不受影响。
     """
 
+    takeover_exit_ms: int | None = None
+    """被顶掉句子的退场动画时长（= 其「出场动画保护时间」）。
+
+    顶掉边界 = 下一句最终上屏时刻 ``takeover_end_ms``；退场动画恰好在
+    边界结束，走字显示到边界减去本值为止。计划组装据此覆写该行的
+    ``exit_fade_ms``，CPU 与 GPU 共用同一份逐行动画样式。
+    """
+
 
 def assign_lanes(
     render_lines: list[TimingLine],

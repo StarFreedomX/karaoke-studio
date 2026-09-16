@@ -608,10 +608,13 @@ def apply_animation_time_guard(
 
     时间压缩两阶段到底后的残余冲突按 ``style.overlap_fallback_mode`` 处理：
     ``lift`` 留给空间避让（旧行为）；``displace`` 由将要演唱的下一句直接
-    顶掉还在走字的上一句——自动行把残余截进 ``display_end_ms``（允许吃掉
-    走字时长），手工行不参与自动压缩、``display_end_ms`` 保持原值，改为
-    记录渲染期顶掉时刻 ``takeover_end_ms``，由显示调度在渲染侧截断可见性。
-    两种模式都保留 ForceBottom 行位上移；页面平移避让见页偏移解析。
+    顶掉还在走字的上一句——顶掉边界是下一句最终上屏时刻，被顶掉的句子按
+    其「出场动画保护时间」播放退场动画、恰好在边界结束（退场动画充当交接
+    过渡，不再预留同轨间隔空白）。自动行把 ``display_end_ms`` 直接写到
+    边界；手工行不参与自动压缩、``display_end_ms`` 保持原值，由
+    ``takeover_end_ms`` 在显示调度侧钳制可见性；两种行都携带
+    ``takeover_exit_ms`` 供计划组装覆写退场动画时长。两种模式都保留
+    ForceBottom 行位上移；页面平移避让见页偏移解析。
     """
 
     if not display_lines:
@@ -696,6 +699,17 @@ def apply_animation_time_guard(
                     _previous_gap,
                 ) = measured[previous_pos]
                 if previous_page == incoming_page:
+                    continue
+                if (
+                    style.overlap_fallback_mode == "displace"
+                    and guarded[previous_index].takeover_end_ms is not None
+                    and int(guarded[previous_index].takeover_end_ms)
+                    <= int(guarded[incoming_index].display_start_ms)
+                ):
+                    # 该上一句已被顶掉（本句或更早的句子）：边界语义是
+                    # 「上一句退场动画恰好在本句上屏时结束」，同轨间隔
+                    # 判据对已顶掉的对不再适用，也不得再跑压缩阶梯
+                    # （否则会把已定边界二次截短）。
                     continue
                 if (
                     int(previous_band.display_end_ms) + max_lane_gap
@@ -789,20 +803,14 @@ def apply_animation_time_guard(
                     )
                 exit_take = exit_free_take + exit_zone_take
                 entry_take = entry_free_take + entry_zone_take
-                manual_displace_residual = 0
+                displace_residual = 0
                 if style.overlap_fallback_mode == "displace":
                     # 「吃掉走字时长」：压缩到底仍有残余时，由将要演唱的
-                    # 下一句直接顶掉还在走字的上一句。自动行（消失时刻未经
-                    # 手工调整）把残余全部加到消失截短上，可越过走字结束
-                    # 点、下限为自身上屏时刻；手工行不参与自动压缩
-                    # （``display_end_ms`` 保持原值），残余记为渲染期顶掉
-                    # 时刻，由显示调度在渲染侧截断可见性。
-                    if previous.line.display_end_override_ms is None:
-                        exit_take += overlap_ms - exit_take - entry_take
-                    else:
-                        manual_displace_residual = (
-                            overlap_ms - exit_take - entry_take
-                        )
+                    # 下一句直接顶掉还在走字的上一句——上一句不是瞬间消失，
+                    # 而是按其「出场动画保护时间」播放退场动画，动画恰好在
+                    # 下一句最终上屏时刻结束（走字显示到退场开始为止）。
+                    # 退场动画本身充当交接过渡，不再为同轨间隔预留空白。
+                    displace_residual = overlap_ms - exit_take - entry_take
 
                 pair_changed: list[int] = []
                 if exit_take > 0:
@@ -848,22 +856,40 @@ def apply_animation_time_guard(
                             display_start_ms=new_start,
                         )
                         pair_changed.append(incoming_index)
-                if manual_displace_residual > 0:
-                    # 手工行只在渲染期被顶掉：显示窗保持手工值，记录更早的
-                    # 渲染可见终点（只收紧，重复趟幂等，后续更强的顶掉仍可
-                    # 继续收紧）。
-                    takeover_end = max(
-                        int(previous.display_start_ms),
-                        int(previous.display_end_ms) - manual_displace_residual,
+                if displace_residual > 0:
+                    # 顶掉边界 T = 下一句（经入场压缩后的）最终上屏时刻，
+                    # 退场时长 P = 上一句的「出场动画保护时间」。自动行把
+                    # ``display_end_ms`` 直接写到 T；手工行不参与自动压缩、
+                    # ``display_end_ms`` 保持原值，仅由 ``takeover_end_ms``
+                    # 在渲染调度钳制。两种行都记录 ``takeover_exit_ms`` 供
+                    # 计划组装覆写退场动画时长。只收紧：更早的顶掉胜出，
+                    # 重复趟幂等。
+                    takeover_start = int(
+                        guarded[incoming_index].display_start_ms
                     )
-                    if takeover_end < int(previous.display_end_ms) and (
-                        previous.takeover_end_ms is None
-                        or int(previous.takeover_end_ms) > takeover_end
-                    ):
-                        guarded[previous_index] = replace(
-                            previous,
-                            takeover_end_ms=takeover_end,
-                        )
+                    takeover_exit = max(
+                        int(
+                            style_for_line(
+                                style, previous.line
+                            ).exit_anim_protect_ms
+                        ),
+                        0,
+                    )
+                    target = max(
+                        int(guarded[previous_index].display_start_ms),
+                        takeover_start,
+                    )
+                    current = guarded[previous_index]
+                    if current.takeover_end_ms is None or int(
+                        current.takeover_end_ms
+                    ) > target:
+                        updates: dict[str, int] = {
+                            "takeover_end_ms": target,
+                            "takeover_exit_ms": takeover_exit,
+                        }
+                        if current.line.display_end_override_ms is None:
+                            updates["display_end_ms"] = target
+                        guarded[previous_index] = replace(current, **updates)
                         pair_changed.append(previous_index)
                 if pair_changed:
                     adjusted = True

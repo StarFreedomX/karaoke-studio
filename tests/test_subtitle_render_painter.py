@@ -12833,7 +12833,7 @@ def test_animation_guard_lift_default_leaves_residual_conflict(qapp):
 
 
 def test_animation_guard_displace_eats_previous_sweep_for_residual(qapp):
-    """「吃掉走字时长」：压缩到底的残余改由下一句顶掉上一句的走字。"""
+    """「吃掉走字时长」：残余由下一句顶掉，退场动画恰好在下一句上屏结束。"""
 
     lines = _tight_handoff_lines()
     track = TimingTrack(lines=lines)
@@ -12853,12 +12853,16 @@ def test_animation_guard_displace_eats_previous_sweep_for_residual(qapp):
         enforce_inter_page_gap=True,
     )
 
-    # 下一句按压缩后的时刻照常入场（2_050），上一句显示窗被截进走字
-    # 区间 250ms（2_000 − 250 = 1_750），恰好让出 300ms 同轨间隔。
+    # 压缩（缓冲压光）后仍有 250ms 残余：自动行显示窗直接写到顶掉边界
+    # = 下一句最终上屏时刻 2_050，退场动画时长 = 出场动画保护时间
+    # （默认 100ms）→ 退场 [1_950, 2_050]，走字显示到 1_950 为止，
+    # 2_050 退场结束、新句上屏。退场动画充当交接过渡，不再让出
+    # 300ms 同轨间隔空白。
     assert guarded[1].display_start_ms == 2_050
-    assert guarded[0].display_end_ms == 1_750
-    assert guarded[0].display_end_ms < lines[0].end_ms
-    assert guarded[1].display_start_ms - guarded[0].display_end_ms == 300
+    assert guarded[0].display_end_ms == 2_050
+    assert guarded[0].takeover_end_ms == 2_050
+    assert guarded[0].takeover_exit_ms == 100
+    assert guarded[0].display_end_ms - guarded[0].takeover_exit_ms < lines[0].end_ms
 
 
 def test_animation_guard_displace_records_manual_takeover_not_window_cut(qapp):
@@ -12883,13 +12887,104 @@ def test_animation_guard_displace_records_manual_takeover_not_window_cut(qapp):
         enforce_inter_page_gap=True,
     )
 
-    # 手工值 3_000 原样保留（不参与自动压缩）；3_050ms 冲突中入场侧吸收
-    # 1_800ms，剩余 1_250ms 记为渲染期顶掉时刻：3_000 − 1_250 = 1_750，
-    # 恰好让出 300ms 同轨间隔，渲染时被顶掉的走字部分直接消失。
+    # 手工值 3_000 原样保留（不参与自动压缩）；顶掉边界 = 下一句最终
+    # 上屏时刻 2_050，退场时长 100ms → 渲染层在 [1_950, 2_050] 播放
+    # 退场动画，2_050 起新句上屏。
     assert guarded[0].display_end_ms == 3_000
-    assert guarded[0].takeover_end_ms == 1_750
+    assert guarded[0].takeover_end_ms == 2_050
+    assert guarded[0].takeover_exit_ms == 100
     assert guarded[1].display_start_ms == 2_050
-    assert guarded[1].display_start_ms - guarded[0].takeover_end_ms == 300
+
+
+def test_layout_plan_overrides_displaced_exit_duration():
+    """被顶掉行的退场时长覆写：动画恰好在顶掉边界结束，CPU/GPU 同源。"""
+
+    from krok_helper.subtitle_render.engine.layout.plan.builder import (
+        assemble_track_layout_plan,
+    )
+
+    lines = _tight_handoff_lines()
+    track = TimingTrack(lines=lines)
+    base = _tight_handoff_display_lines(lines)
+    # style_for_line_display_window 会把被吃进走字的行 exit_fade 钳成 0
+    # （模拟其输出），计划组装必须在其后覆写为顶掉退场时长。
+    animation_styles = [
+        replace(Style(), exit_fade_ms=0),
+        replace(Style(), exit_fade_ms=300),
+    ]
+    display_items = [
+        replace(
+            base[0],
+            takeover_end_ms=1_500,
+            takeover_exit_ms=250,
+        ),
+        base[1],
+    ]
+
+    plan = assemble_track_layout_plan(
+        track,
+        Style(),
+        logical_w=1_280,
+        logical_h=720,
+        display_items=display_items,
+        schedule={0: (0, 500, 1_500), 1: (0, 1_600, 5_000)},
+        page_offset_windows={},
+        render_lines=list(track.lines),
+        layout_styles=[Style(), Style()],
+        animation_styles=animation_styles,
+        resolved_intervals=[(), ()],
+    )
+
+    displaced = plan.lines[0]
+    assert displaced.displace_exit_ms == 250
+    assert displaced.animation_style.exit_fade_ms == 250
+    assert displaced.animation_style.exit_anim == Style().exit_anim
+    # 未被顶掉的行不受影响。
+    assert plan.lines[1].displace_exit_ms is None
+    assert plan.lines[1].animation_style.exit_fade_ms == 300
+
+
+def test_displace_render_plays_exit_animation_until_takeover(qapp):
+    """端到端：被顶掉的句子按保护时长退场，动画恰好在下一句上屏时结束。"""
+
+    lines = _tight_handoff_lines()
+    # 强制分页：两句各占一页同一视觉行（否则会被排进同一页的两行）。
+    lines[1].break_before = "page"
+    track = TimingTrack(lines=lines)
+    style = replace(
+        Style(font_family="Arial", font_family_latin="Arial"),
+        entry_anim="none",
+        exit_anim="fade",
+        exit_fade_ms=400,
+        exit_anim_protect_ms=250,
+        overlap_fallback_mode="displace",
+    )
+
+    schedule = subtitle_painter.display_schedule_for_style(
+        track, style, logical_w=1_280, logical_h=720
+    )
+    takeover = schedule[1][1]
+    # 顶掉边界 = 下一句最终上屏时刻；上一句渲染终点与它重合。
+    assert takeover == 2_050
+    assert schedule[0][2] == takeover
+
+    def ink_at(t_ms: int) -> int:
+        img = _blank(1_280, 720)
+        paint_frame(img, track, t_ms, style)
+        rows = _img_rows_rgba(img).reshape(img.height(), img.width() * 4)
+        # 背景为不透明纯黑，用亮度总和度量字幕墨迹强度（退场淡出时按
+        # 不透明度整体衰减）。
+        luminance = rows[:, 0::4].astype(int)
+        return int(luminance.sum())
+
+    before_exit = ink_at(takeover - 800)
+    mid_exit = ink_at(takeover - 100)
+    after_takeover = ink_at(takeover + 50)
+
+    # 退场窗口 [takeover − 250, takeover]：深处不透明的走字墨迹衰减，
+    # 但仍可见（旧「直接消失」行为在这里是 0）；换句后新句立即在场。
+    assert before_exit > mid_exit > 0
+    assert after_takeover > 0
 
 
 def test_display_schedule_clamps_takeover_but_windows_keep_manual_end():

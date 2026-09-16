@@ -33,6 +33,13 @@ class LineLayoutPlan:
     display_end_ms: int | None = None
     center_override: bool = False
     layout_offset_windows: tuple[LayoutOffsetWindow, ...] = ()
+    displace_exit_ms: int | None = None
+    """「吃掉走字时长」被顶掉行的退场动画时长（= 出场动画保护时间）。
+
+    非空时该行 ``animation_style.exit_fade_ms`` 已被覆写为本值，使退场
+    动画恰好在顶掉边界（下一句上屏时刻）结束；CPU 绘制与 GPU IR 都消费
+    这份逐行动画样式。缓存重绑时按本值重新应用覆写。
+    """
 
 
 @dataclass(frozen=True)

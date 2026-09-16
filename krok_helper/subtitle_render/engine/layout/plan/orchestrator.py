@@ -111,6 +111,13 @@ def _rebind_plan_line_styles(
                 line_plan.display_start_ms,
                 line_plan.display_end_ms,
             )
+            if line_plan.displace_exit_ms is not None:
+                # 被顶掉行的退场动画时长覆写必须在窗口钳制之后重应用，
+                # 否则缓存命中重绑会把 exit_fade 压回钳制值。
+                animation_style = replace(
+                    animation_style,
+                    exit_fade_ms=line_plan.displace_exit_ms,
+                )
             # style_for_line 每次调用都 replace 出新对象，按值比较判断
             # 是否真的变化：未变时保持 plan 对象同一性（缓存复用方依赖）。
             if (
