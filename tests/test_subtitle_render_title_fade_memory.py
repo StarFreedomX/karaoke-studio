@@ -73,6 +73,15 @@ def _edit_title(window: SubtitleRenderWindow, **changes) -> None:
     QApplication.instance().processEvents()
 
 
+def _set_titles(window: SubtitleRenderWindow, overlays: list) -> None:
+    """整表写回标题条目，模拟多标题工程里的单条编辑/增删。"""
+    window._property_panel.set_style(
+        replace(window._style, title_overlays=overlays),
+        emit=True,
+    )
+    QApplication.instance().processEvents()
+
+
 def test_editing_the_fade_updates_the_app_default(make_window) -> None:
     window = make_window()
 
@@ -245,6 +254,60 @@ def test_editing_the_scheme_reference_is_remembered(make_window) -> None:
     second._save_persisted_state()
     third = make_window()
     assert third._app_default_style.title_overlays[0].scheme_name is None
+
+
+def test_the_edited_entry_is_the_one_remembered(make_window) -> None:
+    """多标题并存：改哪条记哪条，而不是固定采样首个启用条目。"""
+    window = make_window()
+    _set_titles(
+        window,
+        [
+            TitleOverlay(enabled=True, name="标题 1", fade_in_ms=999),
+            TitleOverlay(enabled=True, name="标题 2", fade_in_ms=300),
+        ],
+    )
+
+    # 只编辑第二条：淡入 + 切「全程显示」；第一条原样不动。
+    titles = list(window._style.title_overlays)
+    _set_titles(
+        window,
+        [
+            titles[0],
+            replace(titles[1], show_mode="whole", fade_in_ms=250),
+        ],
+    )
+
+    app_title = window._app_default_style.title_overlays[0]
+    assert app_title.fade_in_ms == 250
+    assert app_title.show_mode == "whole"
+
+
+def test_deleting_an_entry_does_not_shift_the_memory(make_window) -> None:
+    """删除条目不是编辑属性：已有习惯不被移位条目的值覆盖。"""
+    window = make_window()
+    # 分两步播种（与真实 UI 一致：新增条目是独立的追加操作），
+    # 让记忆最终落在第二条的 250 / 全程显示上。
+    _set_titles(
+        window,
+        [TitleOverlay(enabled=True, name="标题 1", fade_in_ms=999, show_mode="head")],
+    )
+    _set_titles(
+        window,
+        [
+            window._style.title_overlays[0],
+            TitleOverlay(
+                enabled=True, name="标题 2", fade_in_ms=250, show_mode="whole"
+            ),
+        ],
+    )
+    assert window._app_default_style.title_overlays[0].fade_in_ms == 250
+
+    # 删掉第二条（其属性正是当前记忆），记忆保持不变，不会被第一条顶掉。
+    _set_titles(window, [window._style.title_overlays[0]])
+
+    app_title = window._app_default_style.title_overlays[0]
+    assert app_title.fade_in_ms == 250
+    assert app_title.show_mode == "whole"
 
 
 def test_the_tail_duration_none_and_explicit_values_round_trip(make_window) -> None:

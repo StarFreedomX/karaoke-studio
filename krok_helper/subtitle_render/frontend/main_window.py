@@ -464,6 +464,27 @@ _TITLE_TIMING_FIELDS = (
 )
 
 
+def _edited_title_index(previous: Style, current: Style) -> Optional[int]:
+    """差分定位「正在编辑的那个标题条目」。
+
+    首个值不同的下标；新增条目取其落位下标（此时基线按出厂默认比较，
+    记忆结果与既有偏好收敛，通常是无操作）。纯删除条目返回 ``None``——
+    那不是在编辑标题属性，被移位条目的值不该意外覆盖已有习惯。
+    """
+    previous_overlays = previous.title_overlays
+    current_overlays = current.title_overlays
+    if len(current_overlays) < len(previous_overlays):
+        return None
+    for index, (before, after) in enumerate(
+        zip(previous_overlays, current_overlays)
+    ):
+        if before != after:
+            return index
+    if len(current_overlays) > len(previous_overlays):
+        return len(previous_overlays)
+    return None
+
+
 # 纯上色字段：只决定用什么颜色画，不影响字形几何、行宽或演唱时间。
 # 只列这些，其余一律当几何字段——将来 Style 加了新字段而忘了归类，判定会保守地
 # 认为「不是纯上色」，从而照常重算，不会漏掉该更新的东西。
@@ -7570,14 +7591,19 @@ class SubtitleRenderWindow(QWidget):
         return overlays[0] if overlays else TitleOverlay()
 
     def _remember_style_preferences(self, previous: Style, current: Style) -> None:
-        """Copy user-edited title/layout habits into new-project defaults."""
+        """Copy user-edited title/layout habits into new-project defaults.
+
+        标题记忆的是「正在编辑的那个条目」的属性：按前后样式差分定位被改
+        条目（改哪条记哪条），而不是固定采样首个启用条目 —— 多标题并存时
+        二者会指向不同条目。纯删除条目不算编辑属性，不触发记忆，避免被
+        移位条目的属性意外覆盖已有习惯。落盘本身有停手防抖
+        （``_PERSISTED_STATE_SAVE_DEBOUNCE_MS``），连续输入只在停手后写盘。
+        """
 
         layout_changed = any(
             getattr(previous, field_name) != getattr(current, field_name)
             for field_name in _LAYOUT_DEFAULT_STYLE_FIELDS
         )
-        previous_title = self._preferred_title_for_preferences(previous)
-        current_title = self._preferred_title_for_preferences(current)
 
         def _title_preference_signature(title: TitleOverlay) -> tuple:
             return (
@@ -7588,9 +7614,22 @@ class SubtitleRenderWindow(QWidget):
                 *(getattr(title, name) for name in _TITLE_TIMING_FIELDS),
             )
 
-        title_preference_changed = _title_preference_signature(
-            previous_title
-        ) != _title_preference_signature(current_title)
+        edited_index = _edited_title_index(previous, current)
+        if edited_index is not None:
+            previous_title = (
+                previous.title_overlays[edited_index]
+                if edited_index < len(previous.title_overlays)
+                else TitleOverlay()
+            )
+            current_title = current.title_overlays[edited_index]
+            title_preference_changed = _title_preference_signature(
+                previous_title
+            ) != _title_preference_signature(current_title)
+        else:
+            # 未编辑标题（或纯删除条目）：下方分支只在 title_preference_changed
+            # 为真时才读取 current_title，这里置空即可。
+            previous_title = current_title = None
+            title_preference_changed = False
         app_title = self._preferred_title_for_preferences(self._app_default_style)
         remembered_layout_name = self._layout_name_for_index(
             self._app_default_style, app_title.layout_index
