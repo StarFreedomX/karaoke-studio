@@ -3749,14 +3749,19 @@ def test_title_role_latin_width_reaches_title_font(qapp):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Uses the installed Windows Arial font")
-def test_latin_stretch_changes_real_glyph_and_layout_width(qapp):
+def test_latin_stretch_changes_real_glyph_and_layout_width(qapp, request):
     from krok_helper.subtitle_render.engine.ruby.layout import ruby_unit_layouts
     from krok_helper.subtitle_render.engine.ruby.style import build_ruby_font_for_text
     from krok_helper.subtitle_render.engine.text.metrics import (
         build_font, build_latin_font, char_ink_width, char_layout_width, make_font_for,
     )
 
-    assert QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\arial.ttf") >= 0
+    handle = QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\arial.ttf")
+    assert handle >= 0
+    # 应用字体是进程级污染：offscreen 下注册 arial.ttf 后 QFontDatabase 对
+    # "Arial" 的样式枚举从空（字重下拉走兜底全集）变成仅 400，后继测试的
+    # findData(600) 等会落空。结束后注销，恢复进程字体环境。
+    request.addfinalizer(lambda: QFontDatabase.removeApplicationFont(handle))
 
     def measured(style, text):
         japanese = build_font(style)
