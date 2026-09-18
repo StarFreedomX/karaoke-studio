@@ -1037,8 +1037,10 @@ def kill_pid(pid: int, *, wait_timeout_ms: int = 5000) -> bool:
         try:
             if not kernel32.TerminateProcess(handle, 1):
                 return False
-            kernel32.WaitForSingleObject(handle, wait_timeout_ms)
-            return True
+            # TerminateProcess initiates termination; only WAIT_OBJECT_0 proves
+            # that the process has exited and released its handles.
+            WAIT_OBJECT_0 = 0x00000000
+            return kernel32.WaitForSingleObject(handle, wait_timeout_ms) == WAIT_OBJECT_0
         finally:
             kernel32.CloseHandle(handle)
     except Exception:

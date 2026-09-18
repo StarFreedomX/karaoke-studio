@@ -63,6 +63,59 @@ _blocked_lock: BlockedLockInfo | None = None
 # GUI 模式下 run_gui 的 (args, run_func)，失败弹窗重试时重建 worker 用。
 _retry_context: tuple | None = None
 _diagnostic_app_dir = None
+_diagnostic_host_pid = None
+
+
+def _reap_verified_product_lockers(entries, handle_entries, log) -> int:
+    """End only diagnosed lockers proven to be this install's host descendants."""
+    if not _diagnostic_app_dir or not _diagnostic_host_pid:
+        return 0
+    rows = lock_diag.snapshot_processes()
+    updater_lineage = lock_diag.process_lineage(os.getpid(), rows)
+    known = {
+        entry.pid for entry in lock_diag.descendant_processes(
+            _diagnostic_host_pid, rows, exclude_pids=updater_lineage
+        )
+    }
+    try:
+        inherited = json.loads(os.environ.get(_UPDATE_DESCENDANTS_ENV, "[]"))
+        if isinstance(inherited, list):
+            known.update(int(item["pid"]) for item in inherited if isinstance(item, dict))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    candidates = {int(pid) for pid, _name in entries if int(pid) > 0}
+    candidates.update(
+        int(item["pid"]) for item in handle_entries
+        if isinstance(item, dict) and str(item.get("pid", "")).isdigit()
+    )
+    install_dir = os.path.normcase(os.path.abspath(os.fspath(_diagnostic_app_dir)))
+    reaped = 0
+    for pid in sorted(candidates):
+        if pid not in known or pid in updater_lineage or pid == os.getpid():
+            log.info("占用 PID %d 非已验证的主程序子进程，不自动结束", pid)
+            continue
+        image_path = lock_diag.process_image_path(pid)
+        normalized = os.path.normcase(os.path.abspath(image_path)) if image_path else ""
+        if (
+            os.path.dirname(normalized) != install_dir
+            or os.path.basename(normalized).casefold() not in _TERMINABLE_PROCESS_IMAGES
+        ):
+            log.info("占用 PID %d 的可执行文件不属于本次安装的产品进程，保留", pid)
+            continue
+        created = lock_diag._process_created_ticks(pid)
+        if (
+            created is None
+            or lock_diag._process_created_ticks(pid) != created
+            or os.path.normcase(lock_diag.process_image_path(pid)) != normalized
+        ):
+            log.info("占用 PID %d 身份无法稳定核验，保留", pid)
+            continue
+        log.warning("自动结束已验证的残留产品进程: %s (PID=%d)", image_path, pid)
+        if lock_diag.kill_pid(pid):
+            reaped += 1
+        else:
+            log.warning("结束占用进程 PID %d 未确认成功，继续等待目录可替换", pid)
+    return reaped
 
 
 _original_run_incremental = updater_main.run_incremental
@@ -262,6 +315,12 @@ def _retry_workbench(op_desc, func, log, max_retries=None, interval=FILE_LOCK_RE
             diagnosis.win32_error,
         )
 
+    sug_backup = op_desc == "备份 _internal/strange_uta_game"
+    if sug_backup:
+        _best_effort_diagnostic(
+            _reap_verified_product_lockers, entries, handle_entries, log
+        )
+
     log.info("%s 诊断完成，执行最终重试", op_desc)
     final_started_ns = time.monotonic_ns()
     try:
@@ -307,6 +366,41 @@ def _retry_workbench(op_desc, func, log, max_retries=None, interval=FILE_LOCK_RE
         outcome="failed",
         exc=final_exc,
     )
+    if sug_backup:
+        # Keep the old directory intact while waiting for an external lock to
+        # clear. Never write into a loaded DLL merely to probe its availability.
+        attempt = 0
+        while True:
+            attempt += 1
+            log.warning("%s 仍被占用，%.1fs 后继续等待并重试", op_desc, interval)
+            _flush_logger(log)
+            time.sleep(interval)
+            try:
+                return func()
+            except OSError as exc:
+                if not isinstance(exc, PermissionError) and getattr(exc, "winerror", None) not in (5, 32):
+                    raise
+                final_exc = exc
+            if attempt % max_retries == 0:
+                refreshed = _best_effort_diagnostic(
+                    lock_diag.diagnose_lockers_for_exception, final_exc
+                )
+                refreshed_entries = refreshed.entries if refreshed is not None else []
+                paths = [
+                    path for path in (
+                        getattr(final_exc, "filename", None),
+                        getattr(final_exc, "filename2", None),
+                    ) if path
+                ]
+                refreshed_handles = _best_effort_diagnostic(
+                    lock_diag.diagnose_directory_handles, paths
+                ) or {}
+                _best_effort_diagnostic(
+                    _reap_verified_product_lockers,
+                    refreshed_entries,
+                    refreshed_handles.get("entries", []),
+                    log,
+                )
     _flush_logger(log)
     bundle_path = _persist_diagnostic_failure(
         f"{op_desc}: final_retry_failed",
@@ -384,7 +478,10 @@ def _wait_for_pid_exit_workbench(pid, log, timeout=None) -> bool:
     resolved_timeout = (
         updater_main.WAIT_PID_TIMEOUT if timeout is None else timeout
     )
-    exited = _original_wait_for_pid_exit(pid, log, resolved_timeout)
+    while not _original_wait_for_pid_exit(pid, log, resolved_timeout):
+        log.warning("主程序仍未退出 (PID=%d)，继续等待，不会替换程序文件", pid)
+        _flush_logger(log)
+    exited = True
 
     after = lock_diag.snapshot_processes()
     updater_lineage.update(lock_diag.process_lineage(os.getpid(), after))
@@ -408,65 +505,56 @@ def _wait_for_pid_exit_workbench(pid, log, timeout=None) -> bool:
     ) or []
 
     outcomes: list[dict[str, object]] = []
-    if not exited:
-        for entry in merged.values():
-            outcomes.append(
-                {
-                    "pid": entry.pid,
-                    "parent_pid": entry.parent_pid,
-                    "image_name": entry.image_name,
-                    "outcome": "parent_still_running",
-                }
-            )
-    else:
-        # Children first: a parent cannot immediately recreate a child after the
-        # latter has been reaped, and the Updater's own bootloader lineage is excluded.
-        for entry in reversed(list(merged.values())):
-            if entry.pid in updater_lineage or entry.pid == os.getpid():
-                continue
-            if not updater_main._is_pid_alive(entry.pid):
-                outcome = "already_exited"
+    # Children first: a parent cannot immediately recreate a child after the
+    # latter has been reaped, and the Updater's own bootloader lineage is excluded.
+    for entry in reversed(list(merged.values())):
+        if entry.pid in updater_lineage or entry.pid == os.getpid():
+            continue
+        if not updater_main._is_pid_alive(entry.pid):
+            outcome = "already_exited"
+        else:
+            current_name = lock_diag.process_image_name(entry.pid)
+            if not current_name:
+                outcome = "image_unverified_skipped"
+                log.warning("无法验证残留子进程身份，保留并写入诊断: PID=%d", entry.pid)
+            elif entry.image_name and current_name.casefold() != entry.image_name.casefold():
+                outcome = "pid_reused_skipped"
+            elif current_name.casefold() not in _MANAGED_DESCENDANT_PROCESS_IMAGES:
+                outcome = "unmanaged_process_skipped"
+                log.warning(
+                    "主程序退出后仍有未识别子进程，保留并写入诊断: %s (PID=%d)",
+                    current_name, entry.pid,
+                )
             else:
-                current_name = lock_diag.process_image_name(entry.pid)
-                if not current_name:
-                    outcome = "image_unverified_skipped"
-                    log.warning(
-                        "无法验证残留子进程身份，保留并写入诊断: PID=%d",
-                        entry.pid,
-                    )
-                elif (
-                    current_name
-                    and entry.image_name
-                    and current_name.casefold() != entry.image_name.casefold()
-                ):
-                    outcome = "pid_reused_skipped"
-                elif current_name.casefold() not in (
-                    _MANAGED_DESCENDANT_PROCESS_IMAGES
-                ):
-                    outcome = "unmanaged_process_skipped"
-                    log.warning(
-                        "主程序退出后仍有未识别子进程，保留并写入诊断: %s (PID=%d)",
-                        current_name,
-                        entry.pid,
-                    )
+                log.warning(
+                    "主程序退出后仍有子进程存活，正在结束: %s (PID=%d)",
+                    current_name, entry.pid,
+                )
+                if lock_diag.kill_pid(entry.pid):
+                    outcome = "terminated"
                 else:
-                    shown_name = current_name
-                    log.warning(
-                        "主程序退出后仍有子进程存活，正在结束: %s (PID=%d)",
-                        shown_name,
-                        entry.pid,
-                    )
-                    outcome = (
-                        "terminated" if lock_diag.kill_pid(entry.pid) else "terminate_failed"
-                    )
-            outcomes.append(
-                {
-                    "pid": entry.pid,
-                    "parent_pid": entry.parent_pid,
-                    "image_name": entry.image_name,
-                    "outcome": outcome,
-                }
-            )
+                    # TerminateProcess may need longer than kill_pid's first wait.
+                    # Keep waiting, including when querying the image temporarily
+                    # fails; only a different image is evidence of PID reuse.
+                    while updater_main._is_pid_alive(entry.pid):
+                        image_name = lock_diag.process_image_name(entry.pid)
+                        if image_name and image_name.casefold() != current_name.casefold():
+                            break
+                        log.warning(
+                            "受控子进程仍未退出: %s (PID=%d)，继续等待",
+                            current_name, entry.pid,
+                        )
+                        _flush_logger(log)
+                        _original_wait_for_pid_exit(entry.pid, log, resolved_timeout)
+                    outcome = "exited_after_wait"
+        outcomes.append(
+            {
+                "pid": entry.pid,
+                "parent_pid": entry.parent_pid,
+                "image_name": entry.image_name,
+                "outcome": outcome,
+            }
+        )
 
     _best_effort_diagnostic(
         diagnostics.record_process_cleanup,
@@ -483,15 +571,12 @@ def _wait_for_pid_exit_workbench(pid, log, timeout=None) -> bool:
         },
     )
     terminated = sum(item["outcome"] == "terminated" for item in outcomes)
-    failed = sum(item["outcome"] == "terminate_failed" for item in outcomes)
     log.info(
-        "主程序子进程清理完成：候选 %d，结束 %d，失败 %d",
+        "主程序子进程清理完成：候选 %d，结束 %d，延长等待 %d",
         len(outcomes),
         terminated,
-        failed,
+        sum(item["outcome"] == "exited_after_wait" for item in outcomes),
     )
-    if terminated:
-        time.sleep(0.5)
     return exited
 
 
@@ -915,8 +1000,9 @@ def _setup_workbench_logger(log_path):
 
 def _run_with_diagnostics(args, run_func, *run_args, **run_kwargs):
     """Run one updater attempt with a non-interfering diagnostic session."""
-    global _diagnostic_app_dir
+    global _diagnostic_app_dir, _diagnostic_host_pid
     _diagnostic_app_dir = getattr(args, "app_dir", None)
+    _diagnostic_host_pid = getattr(args, "pid", None)
     _best_effort_diagnostic(diagnostics.begin_session, args)
     try:
         code = run_func(args, *run_args, **run_kwargs)
@@ -927,14 +1013,17 @@ def _run_with_diagnostics(args, run_func, *run_args, **run_kwargs):
         _best_effort_diagnostic(diagnostics.finish_session, 99, exc=exc)
         _flush_logger(log)
         _diagnostic_app_dir = None
+        _diagnostic_host_pid = None
         return 99
     except BaseException as exc:
         _best_effort_diagnostic(diagnostics.finish_session, 99, exc=exc)
         _diagnostic_app_dir = None
+        _diagnostic_host_pid = None
         raise
     _best_effort_diagnostic(diagnostics.finish_session, code)
     _flush_logger(logging.getLogger("sug.updater"))
     _diagnostic_app_dir = None
+    _diagnostic_host_pid = None
     return code
 
 

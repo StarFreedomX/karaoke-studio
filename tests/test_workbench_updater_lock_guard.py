@@ -133,6 +133,51 @@ def test_wait_for_pid_exit_records_zero_candidates(
     assert recorded[0]["processes"] == []
 
 
+def test_wait_for_pid_exit_keeps_waiting_after_host_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[int] = []
+    monkeypatch.setattr(workbench_updater.lock_diag, "snapshot_processes", lambda: [])
+    monkeypatch.setattr(
+        workbench_updater, "_original_wait_for_pid_exit",
+        lambda pid, *_args: waits.append(pid) is None and len(waits) >= 3,
+    )
+
+    assert workbench_updater._wait_for_pid_exit_workbench(
+        100, logging.getLogger("sug.updater"), timeout=1
+    )
+    assert waits == [100, 100, 100]
+
+
+def test_wait_for_pid_exit_keeps_waiting_for_managed_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [lock_diag.ProcessTreeEntry(100, 1, "Lin-K Lyrics.exe")]
+    alive_checks: list[int] = []
+    waits: list[int] = []
+    monkeypatch.setenv(
+        workbench_updater._UPDATE_DESCENDANTS_ENV,
+        '[{"pid":120,"parent_pid":100,"image_name":"python.exe"}]',
+    )
+    monkeypatch.setattr(workbench_updater.lock_diag, "snapshot_processes", lambda: rows)
+    monkeypatch.setattr(workbench_updater, "_original_wait_for_pid_exit", lambda *_args: True)
+    monkeypatch.setattr(
+        workbench_updater.updater_main, "_is_pid_alive",
+        lambda pid: alive_checks.append(pid) is None and len(alive_checks) <= 3,
+    )
+    monkeypatch.setattr(workbench_updater.lock_diag, "process_image_name", lambda pid: "python.exe")
+    monkeypatch.setattr(workbench_updater.lock_diag, "kill_pid", lambda pid: False)
+    monkeypatch.setattr(
+        workbench_updater, "_original_wait_for_pid_exit",
+        lambda pid, *_args: waits.append(pid) is None or True,
+    )
+
+    assert workbench_updater._wait_for_pid_exit_workbench(
+        100, logging.getLogger("sug.updater"), timeout=1
+    )
+    assert waits == [100, 120, 120]
+
+
 def test_retry_uses_three_second_intervals_and_names_holders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -156,7 +201,7 @@ def test_retry_uses_three_second_intervals_and_names_holders(
     with caplog.at_level(logging.INFO, logger="sug.updater"):
         log = logging.getLogger("sug.updater")
         with pytest.raises(workbench_updater.PersistentFileLock) as excinfo:
-            workbench_updater._retry_workbench("备份 _internal/strange_uta_game", always_locked, log)
+            workbench_updater._retry_workbench("备份 a", always_locked, log)
 
     assert calls == 7
     assert sleeps == [workbench_updater.FILE_LOCK_RETRY_INTERVAL] * 5
@@ -164,6 +209,74 @@ def test_retry_uses_three_second_intervals_and_names_holders(
     assert workbench_updater._blocked_lock is not None
     assert workbench_updater._blocked_lock.entries == [(42, "demo.exe")]
     assert any("最终重试仍被系统拒绝" in message for message in caplog.messages)
+
+
+def test_sug_backup_reaps_verified_locker_and_keeps_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    exe = app_dir / "krok_subtitle_renderer.exe"
+    exe.write_bytes(b"exe")
+    rows = [
+        lock_diag.ProcessTreeEntry(100, 1, "Lin-K Lyrics.exe"),
+        lock_diag.ProcessTreeEntry(120, 100, exe.name),
+    ]
+    killed: list[int] = []
+    calls = 0
+    monkeypatch.setattr(workbench_updater, "_diagnostic_app_dir", app_dir)
+    monkeypatch.setattr(workbench_updater, "_diagnostic_host_pid", 100)
+    monkeypatch.setattr(workbench_updater.lock_diag, "snapshot_processes", lambda: rows)
+    monkeypatch.setattr(workbench_updater.lock_diag, "process_image_path", lambda pid: str(exe) if pid == 120 else "")
+    monkeypatch.setattr(workbench_updater.lock_diag, "_process_created_ticks", lambda pid: 123)
+    monkeypatch.setattr(workbench_updater.lock_diag, "kill_pid", lambda pid: killed.append(pid) is None or True)
+    monkeypatch.setattr(workbench_updater.lock_diag, "diagnose_lockers_for_exception", lambda exc: _rm_diagnosis([(120, "renderer")]))
+    monkeypatch.setattr(workbench_updater.lock_diag, "diagnose_directory_handles", lambda paths: {"entries": []})
+    monkeypatch.setattr(workbench_updater.time, "sleep", lambda seconds: None)
+
+    def blocked_then_ready():
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise _lock_error(app_dir / "_internal" / "strange_uta_game", app_dir / "_internal" / "strange_uta_game.bak")
+        return "ready"
+
+    assert workbench_updater._retry_workbench(
+        "备份 _internal/strange_uta_game", blocked_then_ready,
+        logging.getLogger("sug.updater"), max_retries=1, interval=0,
+    ) == "ready"
+    assert calls == 3
+    assert killed == [120]
+
+
+def test_auto_reap_does_not_kill_unrelated_or_unverified_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    rows = [
+        lock_diag.ProcessTreeEntry(100, 1, "Lin-K Lyrics.exe"),
+        lock_diag.ProcessTreeEntry(120, 100, "krok_subtitle_renderer.exe"),
+        lock_diag.ProcessTreeEntry(130, 100, "explorer.exe"),
+        lock_diag.ProcessTreeEntry(140, 1, "Lin-K Lyrics.exe"),
+    ]
+    monkeypatch.setattr(workbench_updater, "_diagnostic_app_dir", app_dir)
+    monkeypatch.setattr(workbench_updater, "_diagnostic_host_pid", 100)
+    monkeypatch.setattr(workbench_updater.lock_diag, "snapshot_processes", lambda: rows)
+    monkeypatch.setattr(
+        workbench_updater.lock_diag, "process_image_path",
+        lambda pid: str(app_dir / ("explorer.exe" if pid == 130 else "Lin-K Lyrics.exe"))
+        if pid != 120 else str(tmp_path / "other" / "krok_subtitle_renderer.exe"),
+    )
+    killed: list[int] = []
+    monkeypatch.setattr(workbench_updater.lock_diag, "_process_created_ticks", lambda pid: 123)
+    monkeypatch.setattr(workbench_updater.lock_diag, "kill_pid", lambda pid: killed.append(pid) is None or True)
+
+    assert workbench_updater._reap_verified_product_lockers(
+        [(120, "sidecar"), (130, "explorer"), (140, "other instance")], [],
+        logging.getLogger("sug.updater"),
+    ) == 0
+    assert killed == []
 
 
 def test_retry_records_directory_handle_and_permission_diagnostics(
@@ -653,6 +766,31 @@ def test_kill_pid_terminates_disposable_child() -> None:
     # 自身与非法 PID 永不结束。
     assert workbench_updater.lock_diag.kill_pid(os.getpid()) is False
     assert workbench_updater.lock_diag.kill_pid(0) is False
+
+
+@pytest.mark.parametrize("wait_result, expected", [(0, True), (0x102, False), (0xFFFFFFFF, False)])
+def test_kill_pid_requires_confirmed_process_exit(
+    monkeypatch: pytest.MonkeyPatch, wait_result: int, expected: bool
+) -> None:
+    import ctypes
+    import os
+    from types import SimpleNamespace
+
+    if os.name != "nt":
+        pytest.skip("仅 Windows")
+
+    def open_process(*_args):
+        return 123
+
+    kernel32 = SimpleNamespace(
+        OpenProcess=open_process,
+        TerminateProcess=lambda *_args: True,
+        WaitForSingleObject=lambda *_args: wait_result,
+        CloseHandle=lambda *_args: None,
+    )
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32))
+
+    assert workbench_updater.lock_diag.kill_pid(999999) is expected
 
 
 def test_find_lockers_returns_structured_entries(
