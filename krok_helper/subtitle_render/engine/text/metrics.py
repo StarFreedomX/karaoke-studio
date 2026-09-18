@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import unicodedata
 from collections.abc import Callable
 
 from PyQt6.QtGui import QFont, QFontMetrics, QPainterPath
@@ -57,9 +56,10 @@ def latin_font_weight(style: Style) -> int:
 
 def is_n3_latin_text(text: str) -> bool:
     return bool(text) and all(
-        "\u0020" <= char <= "\u007e"
-        or "\u00c0" <= char <= "\u00ff"
-        or unicodedata.category(char).startswith("P")
+        ("0" <= char <= "9" or "A" <= char <= "Z" or "a" <= char <= "z")
+        or ("\u00c0" <= char <= "\u00d6"
+            or "\u00d8" <= char <= "\u00f6"
+            or "\u00f8" <= char <= "\u00ff")
         for char in text
     )
 

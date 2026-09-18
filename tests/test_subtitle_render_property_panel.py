@@ -3840,7 +3840,7 @@ def test_role_japanese_font_size_controls_korean_and_chinese(qapp):
         inline_styles=True,
     )
     assert [glyph.font.pixelSize() for glyph in layout.glyphs] == [
-        92, 92, 72, 72, 72,
+        92, 92, 92, 92, 72,
     ]
     panel.deleteLater()
     qapp.processEvents()
