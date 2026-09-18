@@ -221,6 +221,7 @@ def line_has_active_signal(
     style: Style,
     *,
     is_signal_head: bool = True,
+    display_end_ms: int | None = None,
 ) -> bool:
     if not is_signal_head:
         return False
@@ -229,7 +230,14 @@ def line_has_active_signal(
     if active_duration <= 0:
         return False
     signal_end = line_start_ms(line) + int(style.lit_time_offset_ms)
-    display_end = line_end_ms(line) + max(int(style.line_tail_ms), 0)
+    # union 窗口必须与柱体可见窗口共用同一显示终点（display_end_ms）；直接
+    # 用 line_end + tail 会在「拖过消失时间 / 同步退场延长」的延长段里让文字
+    # 先退回单独锚定，而柱体仍按 union 框绘制，重叠或跳到视口左边距。
+    display_end = (
+        int(display_end_ms)
+        if display_end_ms is not None
+        else line_end_ms(line) + max(int(style.line_tail_ms), 0)
+    )
     return signal_end - active_duration <= t_ms <= display_end
 
 

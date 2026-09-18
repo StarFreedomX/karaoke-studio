@@ -1460,10 +1460,10 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             }
             return value + animation.dx;
         };
-        float dx = alignedDx(
-            line->hasInlineStyles ? lyricLeft : unionLeft,
-            line->hasInlineStyles ? lyricRight : unionRight
-        ) + placementOffsetX;
+        // 正文与音量柱共用同一 union 盒对齐（Sayatoo 对齐完整 LineDrawingData）。
+        // 行内混排行（角色标签）此前按歌词盒单独锚定，柱体仍按 union 放置，
+        // 居中对齐下柱体会右侵 groupWidth/2 压住正文——与 Painter 侧同修。
+        float dx = alignedDx(unionLeft, unionRight) + placementOffsetX;
         float signalDx = alignedDx(unionLeft, unionRight) + placementOffsetX;
         // 形状灯悬浮在文字实际起点上：跟随文字变换（音量柱 union 生效时
         // 文字已被右移），而不是按无音量柱的歌词盒单独对齐——这与 Painter

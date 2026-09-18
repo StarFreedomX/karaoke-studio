@@ -1100,10 +1100,9 @@ def _paint_track_to_painter(
         for display_line in display_lines:
             line_plan = line_plans.get(id(display_line.line))
             line_layout = line_layouts.get(id(display_line.line))
-            has_role_labels = _line_has_role_labels(display_line.line)
-            line_x = None
-            if line_layout is not None and not has_role_labels:
-                line_x = line_layout.text_x
+            # 角色混排行同样消费 union 的 text_x：音量柱参与行宽布局时文字
+            # 右移让位，否则柱体按 union 框放置会压住独立锚定的正文前几个字。
+            line_x = line_layout.text_x if line_layout is not None else None
             offset_x, offset_y = line_offsets.get(
                 id(display_line.line), (0.0, 0.0)
             )
@@ -1382,8 +1381,7 @@ def _display_line_vertical_bounds(
         return None
 
     line_layout = line_layouts.get(id(display_line.line))
-    has_role_labels = _line_has_role_labels(line)
-    line_x = line_layout.text_x if line_layout is not None and not has_role_labels else None
+    line_x = line_layout.text_x if line_layout is not None else None
     layout = _layout_line(
         track,
         line,
@@ -1666,12 +1664,7 @@ def _display_line_horizontal_ink_rect(
     line = display_line.line
     line_style = _style_for_line(style, display_line.line)
     line_layout = line_layouts.get(id(line))
-    has_role_labels = _line_has_role_labels(line)
-    line_x = (
-        line_layout.text_x
-        if line_layout is not None and not has_role_labels
-        else None
-    )
+    line_x = line_layout.text_x if line_layout is not None else None
     baseline_y = (
         line_layout.baseline_y
         if line_layout is not None
@@ -2181,6 +2174,7 @@ def _resolve_sayatoo_line_layouts(
                     signal_head_ids is None
                     or index_of_signal_lines.get(id(line)) in signal_head_ids
                 ),
+                display_end_ms=display_line.display_end_ms,
             )
         ):
             # Sayatoo CoreSuites aligns the *union* of the lyric text box and the

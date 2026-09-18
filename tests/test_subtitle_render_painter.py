@@ -115,6 +115,7 @@ from krok_helper.subtitle_render.engine.painter import (  # noqa: E402
     _utopia_main_group_for_index,
     _utopia_transition_scope_layers,
     _visual_text_padding,
+    _display_line_horizontal_ink_rect,
     _display_style_for_signal_window,
     _effective_ruby_for_target,
     _effective_ruby_karaoke_colors,
@@ -1015,6 +1016,97 @@ def test_signal_volume_uses_sayatoo_default_shape_and_line_anchor(qapp):
         right=int(layout.text_x) - 1,
     )
     assert bounds[2] >= layout.text_x
+
+
+def test_signal_volume_union_shifts_role_line_text_beside_bars(qapp):
+    # 回归：角色混排行必须与音量柱共享 union 框（正文右移让位、柱体贴左）。
+    # 此前角色行正文独立锚定而柱体按 union 放置，居中对齐下柱组右缘侵入
+    # 正文约半个组宽、左对齐整组压住行首（2026-09 用户反馈「指示灯->音量柱
+    # 有时与文字重叠」，仅角色标签/混排行触发）。
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(text="A", start_ms=1000, role_label="大"),
+                    TimingChar(text="B", start_ms=2000, role_label="小"),
+                ],
+                end_ms=4000,
+            )
+        ]
+    )
+    style = Style(
+        font_family="Arial",
+        font_family_latin="Arial",
+        font_size_px=48,
+        volume_enabled=True,
+        volume_duration_ms=2000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        volume_column_count=4,
+        volume_column_width=14,
+        volume_column_spacing=8,
+        volume_stroke_width=2,
+        custom_style_schemes={
+            "大": SubtitleStyleScheme(font_size_px=72),
+            "小": SubtitleStyleScheme(font_size_px=36),
+        },
+    )
+    w, h, t_ms = 800, 450, 1500
+    display_style = _display_style_for_signal_window(style)
+    display_lines = _visible_lines_for_style(track, t_ms, display_style)
+    baselines = _resolve_display_baselines(h, track, display_lines, display_style)
+    line_layouts = _resolve_sayatoo_line_layouts(
+        w, h, track, display_lines, baselines, t_ms, display_style
+    )
+    layout = line_layouts[id(track.lines[0])]
+    assert layout.signal_x is not None
+
+    geometry = _volume_signal_geometry(style)
+    bars_right = max(
+        rect.right()
+        for rect in _volume_signal_column_rects(layout.signal_x, 0.0, geometry)
+    )
+    ink = _display_line_horizontal_ink_rect(
+        w, h, track, display_lines[0], style, baselines, line_layouts,
+        layout_cache_sig=None,
+    )
+    assert ink is not None
+    text_left = ink[0]
+    # 柱组右缘不得越过正文墨迹左缘（描边内缩量以内视为贴齐）。
+    assert bars_right <= text_left + geometry.stroke_extent
+    # 正文消费了 union 的 text_x（右移让位），而不是脱离 union 重新锚定。
+    assert text_left >= layout.text_x - 2
+
+
+def test_signal_union_window_follows_extended_display_end(qapp):
+    # 回归：union 生效窗口必须跟随真实显示窗口终点。「拖过消失时间 / 同步
+    # 退场延长」把 display_end 拉长后，旧行为在延长段里让文字先退回单独锚定，
+    # 而柱体仍按可见窗口绘制并落到视口左边距兜底，与文字重叠或脱离行首。
+    line = TimingLine(chars=[TimingChar(text="AB", start_ms=1000)], end_ms=2000)
+    track = TimingTrack(lines=[line])
+    style = Style(
+        font_size_px=32,
+        volume_enabled=True,
+        volume_duration_ms=1000,
+        volume_waiting_time_ms=0,
+        volume_time_offset_ms=0,
+        line_tail_ms=200,
+    )
+    extended_end = line.end_ms + style.line_tail_ms + 1500  # 手动拖长消失时间
+    late_t = line.end_ms + style.line_tail_ms + 500  # 落在延长段内
+    display_line = DisplayLine(
+        line=line,
+        lane=0,
+        display_start_ms=500,
+        display_end_ms=extended_end,
+    )
+    baselines = _resolve_display_baselines(180, track, [display_line], style)
+    layouts = _resolve_sayatoo_line_layouts(
+        320, 180, track, [display_line], baselines, late_t, style
+    )
+    layout = layouts[id(line)]
+    assert layout.signal_x is not None
+    assert layout.text_x > layout.signal_x
 
 
 def test_signal_volume_local_bounds_match_sayatoo_offset_origin(qapp):
