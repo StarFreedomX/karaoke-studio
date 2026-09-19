@@ -1534,6 +1534,81 @@ def test_gpu_main_glow_splits_before_after_radii(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_inline_glow_keeps_full_halo_outside_wiping_phase(monkeypatch) -> None:
+    """行内混排行（角色标签 → inline 发光路径）的发光源裁切按字符相位执行。
+
+    旧实现在整行未走完时一律用整行走字前沿裁发光源：上屏等待期该前沿停在
+    line->bounds.left（纯墨水盒左缘），而首字 wipe-left 与发光描边环都在它
+    左侧，首字走字前发光的左半圈亮核被切掉。分组主发光路径（无逐字样式）
+    与 CPU Painter 都按相位不裁未唱字符。两条 GPU 路径共用同一 D2D 模糊，
+    同帧逐列峰值 alpha 应一致；上屏等待 / 走字中途 / 走字完成三类帧都比对，
+    中途帧同时守住 Wiping 相仍按本字前沿分侧。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    def track(inline: bool) -> TimingTrack:
+        label = "主" if inline else None
+        return TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[
+                        TimingChar("歌", 600, role_label=label),
+                        TimingChar("詞", 1_100, role_label=label),
+                    ],
+                    end_ms=1_500,
+                )
+            ]
+        )
+
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        stroke_width_px=4,
+        stroke2_enabled=False,
+        decoration_kind="glow",
+        glow_before_radius_px=28,
+        glow_after_radius_px=28,
+        glow_concentration_level=0,
+        line_lead_in_ms=1_000,
+        line_tail_ms=500,
+    )
+    frames: dict[str, list[bytes]] = {}
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        for name, source in (("inline", track(True)), ("grouped", track(False))):
+            _configured, frames[name] = _render_g1_frames(
+                renderer,
+                style,
+                (100, 850, 1_700),
+                force_warp=True,
+                track=source,
+            )
+
+    for index in range(3):
+        inline_frame = frames["inline"][index]
+        grouped_frame = frames["grouped"][index]
+        assert _alpha_count(inline_frame) > 0
+        assert _alpha_count(grouped_frame) > 0
+        inline_alpha = np.frombuffer(inline_frame, dtype=np.uint8).reshape(
+            360, 640, 4
+        )[:, :, 3]
+        grouped_alpha = np.frombuffer(grouped_frame, dtype=np.uint8).reshape(
+            360, 640, 4
+        )[:, :, 3]
+        inline_cols = inline_alpha.max(axis=0)
+        grouped_cols = grouped_alpha.max(axis=0)
+        # 只比分组行确有墨的列。上屏等待 / 走字完成两帧要求逐列一致（旧实现
+        # 首字左缘 (stroke+stroke2+radius)/2 宽的亮核被整行前沿裁掉，实测峰值
+        # 差 ≥42）；走字中途帧两条路径存在 ≤20 的既有 AA 残差，放宽到 30 只
+        # 守住 Wiping 相仍按前沿分侧（完全丢裁切时峰值差会到数百）。
+        mask = grouped_cols >= 50
+        assert mask.any()
+        column_delta = np.abs(
+            inline_cols[mask].astype(np.int32) - grouped_cols[mask].astype(np.int32)
+        )
+        assert column_delta.max() <= (30 if index == 1 else 12)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_no_wipe_holds_before_pixels_then_switches_at_end(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track = _g1_track()

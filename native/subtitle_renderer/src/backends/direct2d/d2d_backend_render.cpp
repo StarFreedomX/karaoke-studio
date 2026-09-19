@@ -3795,35 +3795,27 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     );
                     D2D1_RECT_F clip{};
                     bool needClip = false;
-                    if (useUtopiaTransition) {
-                        if (phase == N3WipePhase::Wiping) {
+                    if (phase == N3WipePhase::Wiping) {
+                        // Clip by this character's phase, not the line-wide
+                        // front: before the first character starts that front
+                        // rests at line->bounds.left (bare ink union), which
+                        // sits right of the first glyph's wipe-left and glow
+                        // stroke ring, so clipping a Before-phase glyph there
+                        // cuts the left half of its before-glow.
+                        if (useUtopiaTransition) {
                             const auto [animatedBounds, animatedEdge] =
                                 utopiaCharWipe(charIndex);
                             clip = directionalWipeClip(
                                 animatedBounds, animatedEdge, pad, after
                             );
-                            needClip = true;
+                        } else {
+                            clip = directionalWipeClip(
+                                line->bounds,
+                                delegatedWipeCoordinateAt(line->chars, charIndex),
+                                pad,
+                                after
+                            );
                         }
-                    } else if (!mainWipeComplete) {
-                        clip = rtl
-                            ? (after
-                                ? D2D1::RectF(
-                                    wipeEdge, fullWipeClipTop,
-                                    ch.right + pad, fullWipeClipBottom
-                                )
-                                : D2D1::RectF(
-                                    ch.left - pad, fullWipeClipTop,
-                                    wipeEdge, fullWipeClipBottom
-                                ))
-                            : (after
-                                ? D2D1::RectF(
-                                    ch.left - pad, fullWipeClipTop,
-                                    wipeEdge, fullWipeClipBottom
-                                )
-                                : D2D1::RectF(
-                                    wipeEdge, fullWipeClipTop,
-                                    ch.right + pad, fullWipeClipBottom
-                                ));
                         needClip = true;
                     }
                     if (needClip) {
@@ -3846,17 +3838,16 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 if (geometry == nullptr) {
                     continue;
                 }
-                bool needClip = false;
                 const N3WipePhase phase = wipePhaseAt(line->chars, charIndex);
                 if ((phase == N3WipePhase::Before && after)
                     || (phase == N3WipePhase::After && !after)) {
                     continue;
                 }
-                if (useUtopiaTransition) {
-                    needClip = phase == N3WipePhase::Wiping;
-                } else {
-                    needClip = !mainWipeComplete;
-                }
+                // Same phase-based rule as the per-character branch and the
+                // grouped main path's pushGlowClip: only a Wiping glyph splits
+                // its glow source at the (delegated) front; Before/After-phase
+                // glyphs keep their full halo.
+                const bool needClip = phase == N3WipePhase::Wiping;
                 brush->SetOpacity(
                     globalOpacity * characterOpacityAt(charIndex)
                 );
@@ -3869,25 +3860,12 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                             animatedBounds, animatedEdge, pad, after
                         );
                     } else {
-                        clip = rtl
-                            ? (after
-                                ? D2D1::RectF(
-                                    wipeEdge, fullWipeClipTop,
-                                    ch.right + pad, fullWipeClipBottom
-                                )
-                                : D2D1::RectF(
-                                    ch.left - pad, fullWipeClipTop,
-                                    wipeEdge, fullWipeClipBottom
-                                ))
-                            : (after
-                                ? D2D1::RectF(
-                                    ch.left - pad, fullWipeClipTop,
-                                    wipeEdge, fullWipeClipBottom
-                                )
-                                : D2D1::RectF(
-                                    wipeEdge, fullWipeClipTop,
-                                    ch.right + pad, fullWipeClipBottom
-                                ));
+                        clip = directionalWipeClip(
+                            line->bounds,
+                            delegatedWipeCoordinateAt(line->chars, charIndex),
+                            pad,
+                            after
+                        );
                     }
                     pushAxisAlignedClip(
                         clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
