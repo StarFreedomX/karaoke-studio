@@ -342,6 +342,13 @@ def test_workflow_handoff_splits_grouped_sug_into_sources(qapp, monkeypatch, tmp
     ] == ["酱"]
     assert win._extra_sources[0].sug_axis_singer_ids == frozenset({"b"})
     assert win._project_document.subtitle_axis_singer_ids == frozenset({"a"})
+    # 分组装完后下拉必须立刻出现分组名（分组副源装进 _extra_sources 发生在
+    # _apply_timing_track 的下拉刷新之后）；否则下拉只剩「主字幕 + 标题 1」，
+    # 用户会把默认标题条目误认成分组。
+    combo = win._lyrics_panel._source_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "主字幕", "副轴", "标题 1"
+    ]
 
 
 def test_workflow_handoff_same_groups_reload_updates_all_axes(

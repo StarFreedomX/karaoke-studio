@@ -3164,6 +3164,10 @@ class SubtitleRenderWindow(QWidget):
                 )
             )
         self._extra_sources = kept
+        # _apply_timing_track 里的下拉刷新跑在本方法之前，那时分组副源还没装进
+        # _extra_sources；不补刷新的话下拉里只剩「主字幕 + 标题条目」，分组名
+        # 永远不出现，看起来就像分组被当成了标题。
+        self._refresh_source_ui()
         # _apply_timing_track 只物化了主轴的角色配色预设；仅出现在副轴的角色
         # （如和声组）在这里补齐（幂等，已有方案的角色会被跳过）。
         self._apply_imported_role_preset_choices(self._content_role_options())
