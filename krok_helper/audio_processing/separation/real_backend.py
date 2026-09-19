@@ -269,6 +269,9 @@ class RealSeparationBackend(SeparationBackend):
         self._release_demux()
         self._log(f"操作失败：{message}")
         self._set_state(ServiceState.ERROR, error=message)
+        # 有任务挂起时补发失败结果：否则 ERROR + pending 置位的组合
+        # 会让等待 resultReady 的嵌入方（AI 打轴宿主）永久挂起
+        self._report_pending_task_failure(message)
 
     def _restore_configuration(self) -> None:
         install_dir = resolve_install_dir(
@@ -1783,11 +1786,20 @@ class RealSeparationBackend(SeparationBackend):
                 self._log("PyMSS Runtime 完整校验通过，保留原始运行错误。")
                 self._fail(original_error)
                 return
+            task = self._snap.pending_task
             with self._lock:
-                self._snap.pending_task = None
                 self._apply_runtime_validation(result)
                 self._rebuild_dependencies()
             self._log(f"PyMSS Runtime 完整校验失败：{result.message}")
+            if task is not None:
+                # 校验失败此前只清 pending 不发结果——等待结果信号的
+                # 嵌入方（AI 打轴宿主）会永久挂起，补发失败结果
+                # （pending 的清理由 _emit_task_failure_result 完成）
+                self._emit_task_failure_result(
+                    task,
+                    f"分离失败：PyMSS Runtime 校验未通过"
+                    f"（{result.message}）；原始错误：{original_error}",
+                )
             self._emit()
 
         def failure(diagnostic_error: Exception) -> None:
@@ -1856,6 +1868,9 @@ class RealSeparationBackend(SeparationBackend):
             with self._lock:
                 self._rebuild_dependencies()
             self._set_state(ServiceState.INSTALLED_STOPPED, error="PyMSS 服务进程已退出。")
+            # 服务进程退出时挂起中的任务不会再有结果，补发失败结果
+            # 防止等待方（AI 打轴宿主）永久挂起
+            self._report_pending_task_failure("PyMSS 服务进程已退出，任务中断。")
             return
 
         def operation():
@@ -1882,6 +1897,8 @@ class RealSeparationBackend(SeparationBackend):
                 with self._lock:
                     self._rebuild_dependencies()
                 self._set_state(ServiceState.EXTERNAL_OFFLINE, error=str(exc))
+                # 外部服务掉线时若仍有挂起任务，补发失败结果防等待方挂死
+                self._report_pending_task_failure(f"外部 PyMSS 服务连接断开：{exc}")
             elif self._service is not None:
                 self._fail(exc)
 
@@ -1951,6 +1968,37 @@ class RealSeparationBackend(SeparationBackend):
         self._log(f"{TASK_SPECS[task].title}失败：{reason}")
         if not self._finish_queue_item():
             self._set_ready_state()
+
+    def _emit_task_failure_result(self, task: TaskType, reason: str) -> None:
+        """系统级终态（服务崩溃/Runtime 校验失败等）下为任务补发失败结果。
+
+        这些终态此前只改快照状态：pending_task 保持置位、不发
+        resultReady——分离页靠用户手动重试还能恢复，但等待结果信号的
+        嵌入方（AI 打轴宿主）会永久挂起。统一在这里清 pending 并补发
+        一条失败结果；队列不推进（系统级故障下剩余项也会同样失败，
+        由用户重新发起整批）。pending 与任务不符（已被其他终态路径
+        处理过）时跳过，保证同一任务只补发一条。
+        """
+        with self._lock:
+            if self._snap.pending_task != task:
+                return
+            self._snap.pending_task = None
+        self.resultReady.emit(
+            TaskResult(
+                task=task,
+                title=TASK_SPECS[task].title,
+                finished_at=time.strftime("%H:%M:%S"),
+                files=[],
+                error=reason,
+            )
+        )
+
+    def _report_pending_task_failure(self, reason: str) -> None:
+        """有任务挂起时的系统级失败：按当前 pending 任务补发结果。"""
+        task = self._snap.pending_task
+        if task is not None:
+            self._log(f"{TASK_SPECS[task].title}失败：{reason}")
+            self._emit_task_failure_result(task, reason)
 
     def request_task(
         self,
@@ -2497,6 +2545,10 @@ class RealSeparationBackend(SeparationBackend):
                     self._rebuild_dependencies()
                 self._log(
                     f"外部模型未通过真实加载验证：{TASK_SPECS[exc.task].title}：{exc}"
+                )
+                # 终态只改状态不发结果会让等待方永久挂起，补发失败结果
+                self._emit_task_failure_result(
+                    exc.task, f"外部模型未通过加载验证：{exc}"
                 )
                 self._set_state(ServiceState.EXTERNAL_MODEL_UNSUPPORTED, error=str(exc))
                 return

@@ -43,9 +43,15 @@ class _StubBackend(QObject):
         self.requests = []
         self.cancelled = False
         self._next_result = None
+        # 依次发出的结果（模拟第 2 步批次并发完成的场景）
+        self.results_to_emit: list = []
+        # request_task 提交后的行为钩子（改快照状态等）
+        self.on_request = None
         self.install_dir = ""
         self.started_service = False
         self.stopped_service = False
+        self.model_downloads = 0
+        self._download_resume_result = None
 
     def start_service(self):
         self.started_service = True
@@ -67,6 +73,7 @@ class _StubBackend(QObject):
 
     def request_task(self, task, *, input_path, output_dir, output_format):
         self.requests.append((task, input_path, output_dir, output_format))
+        self._snap.pending_task = task
         if self._next_result is not None:
             result, self._next_result = self._next_result, None
             self.taskProgressChanged.emit(
@@ -74,10 +81,29 @@ class _StubBackend(QObject):
                              processing_done=5, processing_total=10)
             )
             self.resultReady.emit(result)
+        while self.results_to_emit:
+            self.resultReady.emit(self.results_to_emit.pop(0))
+        if self.on_request is not None:
+            self.on_request()
+
+    def start_model_download(self):
+        self.model_downloads += 1
+        if self._download_resume_result is not None:
+            result, self._download_resume_result = self._download_resume_result, None
+            self._snap.state = ServiceState.PROCESSING
+            self.resultReady.emit(result)
 
     def cancel_task(self):
         self.cancelled = True
         self._snap.pending_task = None
+
+
+@pytest.fixture(autouse=True)
+def _silence_host_ailog(monkeypatch):
+    """宿主分离日志在测试中不落盘（避免污染真实 ai_timing.log）。"""
+    from krok_helper.audio_processing.separation import ai_timing_host as _module
+
+    monkeypatch.setattr(_module, "_ailog", lambda _message: None)
 
 
 def _host(tmp_path, backend):
@@ -587,3 +613,106 @@ class TestOpenSeparationPage:
             _StubBackend(), tmp_path / "cache", navigate=_boom
         )
         assert host.open_separation_page() is False
+
+
+class TestSeparateVocalHardening:
+    """B2 加固（2026-09「AI 打轴卡在分离」修复）：
+
+    后端存在「到达终态但既不发 resultReady、也不满足 ERROR 信号判据」
+    的路径（服务进程中途退出、Runtime 校验失败等），原等待循环会永久
+    挂起。这里逐条验证轮询兜底、任务过滤、自动下载与看门狗。
+    """
+
+    def _fast_host(self, tmp_path, backend):
+        host = _host(tmp_path, backend)
+        # 测试里每个等待周期（0.2s）都读快照，避免用例拖慢
+        host._SNAPSHOT_POLL_EVERY = 1
+        return host
+
+    def test_busy_task_reports_busy_field(self, tmp_path, qapp):
+        """SUG（d5edb9fb）靠 busy 字段区分「忙」与「未配置」，不静默回落。"""
+        backend = _StubBackend()
+        backend._snap.pending_task = TaskType.VOCAL
+        status = _host(tmp_path, backend).separation_status()
+        assert status["available"] is False
+        assert status.get("busy") is True
+
+    def test_error_state_with_pending_task_wakes_via_polling(
+        self, tmp_path, qapp, media
+    ):
+        """ERROR + pending 置位且无任何信号（服务中途死掉的经典形态）：
+        信号谓词不满足，必须靠快照轮询报错唤醒，不能永久挂起。"""
+
+        def _to_error():
+            backend._snap.state = ServiceState.ERROR
+            backend._snap.error = "PyMSS 服务进程已退出"
+
+        backend = _StubBackend()
+        backend.on_request = _to_error
+        host = self._fast_host(tmp_path, backend)
+        with pytest.raises(AiTimingHostError, match="服务进程已退出"):
+            host.separate_vocal(media, lambda *a: None, lambda: False)
+
+    def test_hard_parked_state_wakes_via_polling(self, tmp_path, qapp, media):
+        """外部模型不支持等硬终态：无结果信号，轮询发现即报错。"""
+
+        def _to_unsupported():
+            backend._snap.state = ServiceState.EXTERNAL_MODEL_UNSUPPORTED
+            backend._snap.error = "外部模型未通过加载验证"
+
+        backend = _StubBackend()
+        backend.on_request = _to_unsupported
+        host = self._fast_host(tmp_path, backend)
+        with pytest.raises(AiTimingHostError, match="外部模型"):
+            host.separate_vocal(media, lambda *a: None, lambda: False)
+
+    def test_nonvocal_results_ignored(self, tmp_path, qapp, media):
+        """第 2 步批次并发完成时 resultReady 会带来其他任务类型的结果：
+        只认人声任务，伴奏产物不能被当成人声返回。"""
+        accompaniment = media.parent / "song_伴奏.wav"
+        accompaniment.write_bytes(b"i")
+        vocal = media.parent / "song_人声.wav"
+        vocal.write_bytes(b"v")
+        backend = _StubBackend()
+        backend.results_to_emit = [
+            _record(TaskType.INSTRUMENTAL, accompaniment),
+            _record(TaskType.VOCAL, vocal),
+        ]
+        host = self._fast_host(tmp_path, backend)
+        assert host.separate_vocal(media, lambda *a: None, lambda: False) == vocal
+
+    def test_model_required_auto_downloads_once(self, tmp_path, qapp, media):
+        """MODEL_REQUIRED 停车（后端在等页面上点「下载模型」）：AI 打轴
+        路径上没人点，宿主自动触发一次下载续跑，不挂死。"""
+        vocal = media.parent / "song_人声.wav"
+        vocal.write_bytes(b"v")
+        backend = _StubBackend()
+        backend._download_resume_result = _record(TaskType.VOCAL, vocal)
+        backend.on_request = lambda: setattr(
+            backend._snap, "state", ServiceState.MODEL_REQUIRED
+        )
+        host = self._fast_host(tmp_path, backend)
+        assert host.separate_vocal(media, lambda *a: None, lambda: False) == vocal
+        assert backend.model_downloads == 1
+
+    def test_model_required_persisting_after_download_blocks(
+        self, tmp_path, qapp, media
+    ):
+        """自动下载后仍停在 MODEL_REQUIRED：明确报错引导去第 2 步。"""
+        backend = _StubBackend()
+        backend.on_request = lambda: setattr(
+            backend._snap, "state", ServiceState.MODEL_REQUIRED
+        )
+        host = self._fast_host(tmp_path, backend)
+        with pytest.raises(AiTimingHostError, match="第 2 步"):
+            host.separate_vocal(media, lambda *a: None, lambda: False)
+        assert backend.model_downloads == 1
+
+    def test_stall_watchdog_cancels_task(self, tmp_path, qapp, media):
+        """无任何进展超过看门狗时限：取消任务并给出中文报错。"""
+        backend = _StubBackend()
+        host = self._fast_host(tmp_path, backend)
+        host._STALL_TIMEOUT_S = 0.3
+        with pytest.raises(AiTimingHostError, match="长时间无响应"):
+            host.separate_vocal(media, lambda *a: None, lambda: False)
+        assert backend.cancelled is True

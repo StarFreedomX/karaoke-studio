@@ -1898,3 +1898,87 @@ def test_audio_input_never_reaches_the_demuxer(tmp_path, monkeypatch):
         audio, lambda *_args, **_kwargs: None
     ) == audio
     backend._release_demux()
+
+
+# ── B1：系统级终态补发任务失败结果（2026-09「AI 打轴卡在分离」修复） ──
+#
+# _fail / Runtime 校验失败 / 外部模型不支持等终态此前只改快照状态：
+# pending_task 保持置位、不发 resultReady——分离页靠用户手动重试还能
+# 恢复，但等待结果信号的嵌入方（AI 打轴宿主）会永久挂起。
+
+
+def _collect_results(backend) -> list:
+    results: list = []
+    backend.resultReady.connect(results.append)
+    return results
+
+
+def test_fail_with_pending_task_emits_failure_result():
+    """_fail 时有挂起任务：清 pending 并补发失败结果。"""
+    backend = RealSeparationBackend({})
+    results = _collect_results(backend)
+    backend._snap.pending_task = TaskType.VOCAL
+
+    backend._fail("PyMSS 服务进程已退出")
+
+    assert backend._snap.pending_task is None
+    assert backend._snap.state is ServiceState.ERROR
+    assert len(results) == 1
+    assert results[0].task is TaskType.VOCAL
+    assert results[0].failed
+    assert "服务进程已退出" in results[0].error
+
+
+def test_fail_without_pending_task_keeps_old_behavior():
+    """无挂起任务时 _fail 维持原语义：只置 ERROR，不发结果。"""
+    backend = RealSeparationBackend({})
+    results = _collect_results(backend)
+
+    backend._fail("启动服务失败")
+
+    assert results == []
+    assert backend._snap.state is ServiceState.ERROR
+
+
+def test_runtime_verify_failure_reports_pending_task(tmp_path, monkeypatch):
+    """Runtime 完整校验失败的终态：此前只清 pending 不发结果。"""
+    backend = RealSeparationBackend({})
+    results = _collect_results(backend)
+    backend._snap.install_dir = str(tmp_path / "rt")
+    backend._snap.pending_task = TaskType.VOCAL
+    monkeypatch.setattr(
+        real_backend_module,
+        "validate_runtime",
+        lambda _dir, full=False: RuntimeValidation(
+            status=RuntimeStatus.DAMAGED,
+            message="文件缺失或损坏",
+        ),
+    )
+
+    backend._diagnose_managed_runtime_failure("分离失败：桥接进程退出")
+
+    _wait_until(lambda: bool(results))
+    assert backend._snap.pending_task is None
+    assert results[0].task is TaskType.VOCAL
+    assert results[0].failed
+    # 原始错误与校验结论都带上了
+    assert "文件缺失或损坏" in results[0].error
+    assert "桥接进程退出" in results[0].error
+
+
+def test_task_failure_result_helper_clears_pending_once():
+    """补发助手幂等：pending 不匹配（已被处理）时不再发第二条。"""
+    backend = RealSeparationBackend({})
+    results = _collect_results(backend)
+    backend._snap.pending_task = TaskType.VOCAL
+
+    backend._emit_task_failure_result(
+        TaskType.VOCAL, "外部模型未通过加载验证：xxx"
+    )
+    backend._emit_task_failure_result(
+        TaskType.VOCAL, "重复上报不应再发"
+    )
+
+    assert backend._snap.pending_task is None
+    assert len(results) == 1
+    assert "外部模型" in results[0].error
