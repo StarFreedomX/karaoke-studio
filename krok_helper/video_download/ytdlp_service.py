@@ -667,16 +667,46 @@ class YtDlpService:
             )
         except VideoDownloadError as exc:
             if self._should_retry_youtube_with_fallback(task.url, str(exc), extractor_args_hint):
+                try:
+                    self._download_with_python_api(
+                        youtube_dl,
+                        task,
+                        options,
+                        progress_callback,
+                        save_dir=save_dir,
+                        output_stem=output_stem,
+                        outtmpl=outtmpl,
+                        selected_format=selected_format,
+                        extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+                    )
+                except VideoDownloadError as fallback_exc:
+                    if not self._should_retry_youtube_without_cookies(task.url, options, str(fallback_exc)):
+                        raise
+                    self._clear_partial_downloads(save_dir, output_stem)
+                    self._download_with_python_api(
+                        youtube_dl,
+                        task,
+                        replace(options, cookie_file=""),
+                        progress_callback,
+                        save_dir=save_dir,
+                        output_stem=output_stem,
+                        outtmpl=outtmpl,
+                        selected_format=selected_format,
+                        extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+                    )
+                return
+            if self._should_retry_youtube_without_cookies(task.url, options, str(exc)):
+                self._clear_partial_downloads(save_dir, output_stem)
                 self._download_with_python_api(
                     youtube_dl,
                     task,
-                    options,
+                    replace(options, cookie_file=""),
                     progress_callback,
                     save_dir=save_dir,
                     output_stem=output_stem,
                     outtmpl=outtmpl,
                     selected_format=selected_format,
-                    extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+                    extractor_args_hint=extractor_args_hint,
                 )
                 return
             if self._should_retry_without_aria2c(task.url, options, str(exc)):
@@ -786,15 +816,43 @@ class YtDlpService:
             )
         except VideoDownloadError as exc:
             if self._should_retry_youtube_with_fallback(task.url, str(exc), extractor_args_hint):
+                try:
+                    self._download_with_cli(
+                        task,
+                        options,
+                        progress_callback,
+                        save_dir=save_dir,
+                        output_stem=output_stem,
+                        outtmpl=outtmpl,
+                        selected_format=selected_format,
+                        extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+                    )
+                except VideoDownloadError as fallback_exc:
+                    if not self._should_retry_youtube_without_cookies(task.url, options, str(fallback_exc)):
+                        raise
+                    self._clear_partial_downloads(save_dir, output_stem)
+                    self._download_with_cli(
+                        task,
+                        replace(options, cookie_file=""),
+                        progress_callback,
+                        save_dir=save_dir,
+                        output_stem=output_stem,
+                        outtmpl=outtmpl,
+                        selected_format=selected_format,
+                        extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+                    )
+                return
+            if self._should_retry_youtube_without_cookies(task.url, options, str(exc)):
+                self._clear_partial_downloads(save_dir, output_stem)
                 self._download_with_cli(
                     task,
-                    options,
+                    replace(options, cookie_file=""),
                     progress_callback,
                     save_dir=save_dir,
                     output_stem=output_stem,
                     outtmpl=outtmpl,
                     selected_format=selected_format,
-                    extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+                    extractor_args_hint=extractor_args_hint,
                 )
                 return
             raise
@@ -1765,6 +1823,26 @@ class YtDlpService:
             or "YouTube 播放客户端返回临时错误" in message
             or "访问被拒绝" in message
         )
+
+    def _should_retry_youtube_without_cookies(
+        self,
+        url: str,
+        options: DownloadOptions,
+        message: str,
+    ) -> bool:
+        """Retry public YouTube streams when login cookies poison GVS URLs.
+
+        Some otherwise valid Firefox cookies make YouTube return a stream URL
+        that consistently fails around the same byte offset with HTTP 403.  A
+        fresh anonymous request succeeds, but only after removing the stale
+        partial file so yt-dlp does not resume at the rejected range.
+        """
+        if self.detect_source(url) != SOURCE_YOUTUBE:
+            return False
+        if not self._usable_cookie_file(options.cookie_file):
+            return False
+        lower = message.lower()
+        return "http error 403" in lower or "访问被拒绝" in message
 
     def _normalize_error_message(self, exc: Exception) -> str:
         # yt-dlp 会给 "ERROR:" 加 ANSI 颜色码，直接塞进 Qt label 会显示成
