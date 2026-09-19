@@ -16,6 +16,7 @@ from krok_helper.subtitle_render.frontend.editor.timeline_view import (  # noqa:
     TrackTimelineView,
     _format_precise_ms,
     _line_block_tooltip,
+    _parse_margin_text_ms,
     build_lanes,
 )
 from krok_helper.subtitle_render.domain.models import (  # noqa: E402
@@ -676,6 +677,103 @@ def test_double_click_left_handle_edits_entry_margin(qapp) -> None:
     assert track.lines[0].display_start_override_ms == 400
     assert widget._windows[0][0] == (400, 3000)
     assert edits == [(0, 0, (None, None), (400, None))]
+
+
+def test_parse_margin_text_ms_auto_detects_units() -> None:
+    """整数=毫秒；小数=秒；带冒号=分:秒.毫秒；空/非法按 0，越界钳制。"""
+    assert _parse_margin_text_ms("200") == 200
+    assert _parse_margin_text_ms("0") == 0
+    assert _parse_margin_text_ms("") == 0
+    # 小数 → 秒
+    assert _parse_margin_text_ms("1.5") == 1500
+    assert _parse_margin_text_ms("0.25") == 250
+    assert _parse_margin_text_ms(".5") == 500
+    # 冒号 → 分:秒.毫秒
+    assert _parse_margin_text_ms("1:30") == 90_000
+    assert _parse_margin_text_ms("1:30.5") == 90_500
+    assert _parse_margin_text_ms("0:00.250") == 250
+    assert _parse_margin_text_ms("2:05.25") == 125_250
+    # 钳制与兜底
+    assert _parse_margin_text_ms("6000000") == 5_999_990
+    assert _parse_margin_text_ms("-5") == 0
+    assert _parse_margin_text_ms("1:2:3") == 0
+    assert _parse_margin_text_ms("abc") == 0
+    assert _parse_margin_text_ms("nan") == 0
+
+
+def test_margin_editor_validator_blocks_malformed_time(qapp) -> None:
+    """输入校验只放行整数 / 小数 / mm:ss.ms 三种写法。"""
+    track = _make_track()
+    widget = TrackTimelineView()
+    widget.resize(800, 180)
+    widget.set_tracks([("主字幕", track)])
+    widget.set_duration(10_000)
+    widget.set_display_windows([{0: (800, 3000)}])
+
+    _lane, lane_rect = widget._lane_geometry()[0]
+    _click(widget, widget._x_for_ms(1650), lane_rect.center().y())
+    left_rect, _right, _lane_idx, _block = widget._handle_rects()
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+
+    validator = widget._margin_edit.validator()
+    assert validator is not None
+    for accepted in ("200", "1.5", "1:30.5", "0:00.250", "", "1:"):
+        assert validator.validate(accepted, 0)[0].name == "Acceptable", accepted
+    for rejected in ("1e5", "60000000", "1:2:3", "1.2345", "-5", "abc"):
+        assert validator.validate(rejected, 0)[0].name == "Invalid", rejected
+
+
+def test_double_click_margin_editor_accepts_time_format(qapp) -> None:
+    """时间写法 = 期望的绝对上屏/消失时刻，自动反算余量；整数毫秒不变。
+
+    ``_make_track`` 首句演唱区间为 1000ms → 2600ms。"""
+    track = _make_track()
+    widget = TrackTimelineView()
+    widget.resize(800, 180)
+    widget.set_tracks([("主字幕", track)])
+    widget.set_duration(10_000)
+    widget.set_display_windows([{0: (800, 3000)}])
+
+    _lane, lane_rect = widget._lane_geometry()[0]
+    _click(widget, widget._x_for_ms(1650), lane_rect.center().y())
+    _left, right_rect, _lane_idx, _block = widget._handle_rects()
+
+    # 退场侧输入期望消失时刻 1:05 → 覆盖值即输入时刻
+    _double_click(widget, right_rect.center().x(), right_rect.center().y())
+    widget._margin_edit.setText("1:05")
+    widget._commit_margin_editor()
+    assert track.lines[0].display_end_override_ms == 65_000
+    assert widget._windows[0][0] == (800, 65_000)
+
+    # 入场侧输入期望上屏时刻 0:00.8 / 0.5（秒写法）→ 覆盖值即输入时刻
+    _click(widget, widget._x_for_ms(1650), lane_rect.center().y())
+    left_rect, _r, _li, _b = widget._handle_rects()
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+    widget._margin_edit.setText("0:00.8")
+    widget._commit_margin_editor()
+    assert track.lines[0].display_start_override_ms == 800
+
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+    widget._margin_edit.setText("0.5")
+    widget._commit_margin_editor()
+    assert track.lines[0].display_start_override_ms == 500
+
+    # 期望时刻越过演唱区间边界：钳到边界（入场不晚于开始、退场不早于结束）
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+    widget._margin_edit.setText("0:02")
+    widget._commit_margin_editor()
+    assert track.lines[0].display_start_override_ms == 1000
+
+    _double_click(widget, right_rect.center().x(), right_rect.center().y())
+    widget._margin_edit.setText("0:01")
+    widget._commit_margin_editor()
+    assert track.lines[0].display_end_override_ms == 2600
+
+    # 整数毫秒回归：600 → 上屏提前到 400
+    _double_click(widget, left_rect.center().x(), left_rect.center().y())
+    widget._margin_edit.setText("600")
+    widget._commit_margin_editor()
+    assert track.lines[0].display_start_override_ms == 400
 
 
 def test_double_click_right_handle_edits_exit_margin(qapp) -> None:

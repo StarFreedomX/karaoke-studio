@@ -17,16 +17,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal as Signal
+from PyQt6.QtCore import (
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QRegularExpression,
+    Qt,
+    pyqtSignal as Signal,
+)
 from PyQt6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
-    QIntValidator,
     QPainter,
     QPen,
     QPixmap,
     QPolygonF,
+    QRegularExpressionValidator,
 )
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -75,6 +83,12 @@ _HANDLE_STRIP_H = 16
 
 _HANDLE_MIN_W = 12
 """虚线把手的最小鼠标命中宽度（像素）；不改变实际绘制宽度。"""
+
+_MARGIN_MS_MAX = 5_999_990
+"""余量输入上限（毫秒），约 100 分钟；与解析器的钳制上限一致。"""
+
+_MARGIN_INPUT_PATTERN = r"^\d{0,7}(:\d{0,2}(\.\d{0,3})?|\.\d{0,3})?$"
+"""余量输入校验：纯整数（余量毫秒）/ 时间写法（期望的上屏或消失时刻）。"""
 
 _LANE_MIN_H = 20
 _LANE_MAX_H = 44
@@ -676,10 +690,19 @@ class TrackTimelineView(QWidget):
             input_row.setSpacing(6)
             label = BodyLabel("ms", frame)
             label.setObjectName("TimelineMarginEditorLabel")
+            label.setToolTip(
+                "输入格式自动识别：整数按余量毫秒（200 = 提前 200ms 上屏）；"
+                "时间写法按期望的绝对时刻（1.5 或 0:01.5 = 00:01.500 上屏 / "
+                "消失，1:30.5 = 01:30.500），自动换算所需余量。"
+            )
             edit = LineEdit(frame)
-            edit.setValidator(QIntValidator(0, 5_999_990, edit))
+            edit.setValidator(
+                QRegularExpressionValidator(
+                    QRegularExpression(_MARGIN_INPUT_PATTERN), edit
+                )
+            )
             edit.setClearButtonEnabled(False)
-            edit.setPlaceholderText("0")
+            edit.setPlaceholderText("1:30.5")
             edit.setFixedWidth(96)
             ok = PrimaryPushButton("确定", frame)
             ok.setDefault(True)
@@ -739,11 +762,19 @@ class TrackTimelineView(QWidget):
             return
         lane_index, block, entry, old_values = self._margin_editor_context
         text = self._margin_edit.text().strip()
+        value_ms = _parse_margin_text_ms(text)
+        if ":" in text or "." in text:
+            # 时间写法 = 期望的绝对上屏/消失时刻，按演唱区间自动反算余量；
+            # 入场不晚于开始走字、退场不早于走字结束（与拖把手同一钳制）。
+            if entry:
+                value_ms = max(block.start_ms - value_ms, 0)
+            else:
+                value_ms = max(value_ms - block.end_ms, 0)
         self._apply_margin_value(
             lane_index,
             block,
             entry=entry,
-            value_ms=int(text) if text else 0,
+            value_ms=value_ms,
         )
         new_values = self._line_override_values(lane_index, block.line_index)
         self._hide_margin_editor()
@@ -1483,6 +1514,34 @@ def _format_precise_ms(ms: int) -> str:
     value = max(int(ms), 0)
     total_seconds, millis = divmod(value, 1000)
     return f"{total_seconds // 60:02d}:{total_seconds % 60:02d}.{millis:03d}"
+
+
+def _parse_margin_text_ms(text: str) -> int:
+    """把输入文本解析为毫秒值并钳制到 ``[0, 上限]``。
+
+    - 纯整数（``200``）→ 毫秒，直接作为余量（与拖把手一致）；
+    - 时间写法：不带冒号的小数（``1.5``）按秒、带冒号（``1:30.5``）按
+      分:秒.毫秒，换算出的毫秒值是**期望的绝对上屏/消失时刻**，由
+      :meth:`_commit_margin_editor` 按演唱区间反算成余量。
+
+    空文本或无法解析一律按 0 处理（与空输入提交 = 清零余量的旧语义一致）。
+    """
+    text = str(text).strip()
+    if not text:
+        return 0
+    try:
+        if ":" in text:
+            minutes_part, seconds_part = text.rsplit(":", 1)
+            total_seconds = float(minutes_part or "0") * 60.0 + float(
+                seconds_part or "0"
+            )
+            return max(0, min(int(round(total_seconds * 1000.0)), _MARGIN_MS_MAX))
+        if "." in text:
+            return max(0, min(int(round(float(text) * 1000.0)), _MARGIN_MS_MAX))
+        return max(0, min(int(text), _MARGIN_MS_MAX))
+    except (ValueError, OverflowError):
+        # round(NaN)/round(inf) 与非法字符都会落到这里：按 0 处理
+        return 0
 
 
 def _line_block_tooltip(block: LineBlock) -> str:
