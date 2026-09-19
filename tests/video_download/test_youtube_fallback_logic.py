@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from krok_helper.video_download.download_task import DownloadOptions
 from krok_helper.video_download.ytdlp_service import (
     YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
     YOUTUBE_RELOAD_EXTRACTOR_ARGS,
@@ -12,6 +13,10 @@ from krok_helper.video_download.ytdlp_service import (
 
 YOUTUBE_URL = "https://www.youtube.com/watch?v=abc"
 BILIBILI_URL = "https://www.bilibili.com/video/BV1abc"
+
+
+def _download_options(cookie_file: str = "") -> DownloadOptions:
+    return DownloadOptions(save_dir=".", cookie_file=cookie_file)
 
 
 def test_returns_true_for_youtube_bot_error() -> None:
@@ -308,6 +313,91 @@ def test_cli_download_reload_failure_advances_to_visionos(monkeypatch, tmp_path)
     )
 
     assert calls == [YOUTUBE_RELOAD_EXTRACTOR_ARGS, YOUTUBE_FALLBACK_EXTRACTOR_ARGS]
+
+
+def test_python_download_403_clears_partial_and_retries_without_cookie(monkeypatch, tmp_path) -> None:
+    service = YtDlpService()
+    task = type("Task", (), {"url": YOUTUBE_URL})()
+    options = _download_options("cookies.txt")
+    part = tmp_path / "video.f315.webm.part"
+    part.write_bytes(b"stale")
+    calls: list[tuple[str, bool]] = []
+
+    def fake_download(_youtube_dl, _task, current_options, _progress, **kwargs):
+        del _youtube_dl, _task, _progress, kwargs
+        calls.append((current_options.cookie_file, part.exists()))
+        if current_options.cookie_file:
+            raise VideoDownloadError("YouTube 视频流访问被拒绝")
+
+    monkeypatch.setattr(service, "_usable_cookie_file", lambda cookie_file: str(cookie_file or ""))
+    monkeypatch.setattr(service, "_download_with_python_api", fake_download)
+
+    service._download_with_python_retry(
+        object,
+        task,
+        options,
+        lambda _progress: None,
+        save_dir=tmp_path,
+        output_stem="video",
+        outtmpl=str(tmp_path / "video.%(ext)s"),
+        selected_format="315+140",
+        extractor_args_hint=YOUTUBE_FALLBACK_EXTRACTOR_ARGS,
+    )
+
+    assert calls == [("cookies.txt", True), ("", False)]
+
+
+def test_cli_download_fallback_403_clears_partial_and_retries_without_cookie(monkeypatch, tmp_path) -> None:
+    service = YtDlpService()
+    task = type("Task", (), {"url": YOUTUBE_URL})()
+    options = _download_options("cookies.txt")
+    part = tmp_path / "video.f315.webm.part"
+    part.write_bytes(b"stale")
+    calls: list[tuple[str, str, bool]] = []
+
+    def fake_download(_task, current_options, _progress, *, extractor_args_hint="", **kwargs):
+        del _task, _progress, kwargs
+        calls.append((current_options.cookie_file, extractor_args_hint, part.exists()))
+        if len(calls) <= 2:
+            raise VideoDownloadError("HTTP Error 403: Forbidden")
+
+    monkeypatch.setattr(service, "_usable_cookie_file", lambda cookie_file: str(cookie_file or ""))
+    monkeypatch.setattr(service, "_download_with_cli", fake_download)
+
+    service._download_with_cli_retry(
+        task,
+        options,
+        lambda _progress: None,
+        save_dir=tmp_path,
+        output_stem="video",
+        outtmpl=str(tmp_path / "video.%(ext)s"),
+        selected_format="315+140",
+        extractor_args_hint=YOUTUBE_RELOAD_EXTRACTOR_ARGS,
+    )
+
+    assert calls == [
+        ("cookies.txt", YOUTUBE_RELOAD_EXTRACTOR_ARGS, True),
+        ("cookies.txt", YOUTUBE_FALLBACK_EXTRACTOR_ARGS, True),
+        ("", YOUTUBE_FALLBACK_EXTRACTOR_ARGS, False),
+    ]
+
+
+def test_youtube_cookie_retry_requires_403_and_usable_cookie(monkeypatch) -> None:
+    service = YtDlpService()
+    monkeypatch.setattr(service, "_usable_cookie_file", lambda cookie_file: str(cookie_file or ""))
+
+    assert service._should_retry_youtube_without_cookies(
+        YOUTUBE_URL, _download_options("cookies.txt"), "HTTP Error 403: Forbidden"
+    )
+    assert not service._should_retry_youtube_without_cookies(
+        YOUTUBE_URL, _download_options(), "HTTP Error 403: Forbidden"
+    )
+    assert not service._should_retry_youtube_without_cookies(
+        YOUTUBE_URL, _download_options("cookies.txt"), "network timeout"
+    )
+    assert not service._should_retry_youtube_without_cookies(
+        BILIBILI_URL, _download_options("cookies.txt"), "HTTP Error 403: Forbidden"
+    )
 
 
 def test_returns_false_when_already_using_fallback_args() -> None:
