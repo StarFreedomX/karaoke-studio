@@ -179,7 +179,11 @@ class TestRuntimePython:
         monkeypatch.setattr(_sys, "frozen", True, raising=False)
         monkeypatch.setattr("sys.executable", str(exe_file))
 
-        from tests.test_audio_processing_real_backend import _installed_runtime
+        # 按顶层模块名导入（pytest 收集本文件时会把 tests/ 加入 sys.path）。
+        # 不能写 `from tests.…`：任何先导入 krok_helper.updater_app 的测试都会
+        # 把 SUG 子模块根目录插到 sys.path[0]，其中的常规包 tests/ 会遮蔽
+        # 仓库的 tests 命名空间包，包限定导入随即失败。
+        from test_audio_processing_real_backend import _installed_runtime
 
         _installed_runtime(base / "ai_runtime")
         settings = {"install_dir": "ai_runtime"}  # 新口径相对路径
@@ -214,7 +218,8 @@ class TestRuntimePython:
         from krok_helper.audio_processing.separation.real_backend import (
             RealSeparationBackend,
         )
-        from tests.test_audio_processing_real_backend import _installed_runtime
+        # 同上：顶层模块名导入，避免被 SUG 根目录的 tests 包遮蔽。
+        from test_audio_processing_real_backend import _installed_runtime
 
         root = tmp_path / "managed"
         _installed_runtime(root)
