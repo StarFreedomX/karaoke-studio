@@ -373,6 +373,11 @@ struct TextStyle {
     float litOffsetX = 0.0f;
     float litOffsetY = -24.0f;
     float litTracking = 0.0f;
+    // 图片模式素材：路径 + (mtime, size) 失效签名（与 PaintStyle.image*
+    // 同口径，签名在 gpuSceneFromConfig 里用 QFileInfo 探测）。
+    std::wstring litImagePath;
+    std::uint64_t litImageModifiedMs = 0;
+    std::uint64_t litImageSize = 0;
     RgbaColor litFill{0, 0, 255, 255};
     RgbaColor litStroke{255, 255, 255, 255};
     float litStrokeWidth = 2.0f;

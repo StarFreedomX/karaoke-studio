@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
-from qfluentwidgets import CheckBox
+from qfluentwidgets import CheckBox, LineEdit as FluentLineEdit, PushButton as FluentPushButton
 
 from krok_helper.subtitle_render.frontend.properties.controls.inputs import (
     CanvasSliderSpinBox,
@@ -165,11 +165,35 @@ class EffectsPropertyPageBuilder:
                 ("圆形", "circle"),
                 ("方形", "square"),
                 ("圆角", "rounded"),
+                ("图片", "image"),
             ),
             "lit_style",
         )
         add = group("布局", min_column_width=220, max_columns=2)
         add("形状", host._lit_style_combo)
+        host._lit_image_path_edit = FluentLineEdit(section)
+        compact_property_control(host._lit_image_path_edit)
+        host._lit_image_path_edit.setPlaceholderText("形状=图片时的素材文件")
+        host._lit_image_path_edit.editingFinished.connect(
+            lambda: host._update_style(
+                lit_image_path=host._lit_image_path_edit.text().strip()
+            )
+        )
+        host._lit_image_browse_btn = FluentPushButton("浏览...", section)
+        host._lit_image_browse_btn.setMinimumHeight(32)
+        host._lit_image_browse_btn.clicked.connect(host._choose_lit_image)
+        host._lit_image_clear_btn = FluentPushButton("清除", section)
+        host._lit_image_clear_btn.setMinimumHeight(32)
+        host._lit_image_clear_btn.clicked.connect(host._clear_lit_image)
+        lit_image_row = QWidget(section)
+        lit_image_layout = QHBoxLayout(lit_image_row)
+        lit_image_layout.setContentsMargins(0, 0, 0, 0)
+        lit_image_layout.setSpacing(4)
+        lit_image_layout.addWidget(host._lit_image_path_edit, 1)
+        lit_image_layout.addWidget(host._lit_image_browse_btn)
+        lit_image_layout.addWidget(host._lit_image_clear_btn)
+        host._lit_image_row = lit_image_row
+        add("图片", lit_image_row)
         self._add_canvas_spin(add, "_lit_number_spin", "数量", 1, 8, "lit_number", "hard")
         self._add_canvas_spin(add, "_lit_size_spin", "大小", 4, 160, "lit_size", "short_quarter", suffix=" px")
         self._add_canvas_spin(add, "_lit_tracking_spin", "间距", 0, 200, "lit_tracking", "short_twelfth", suffix=" px")

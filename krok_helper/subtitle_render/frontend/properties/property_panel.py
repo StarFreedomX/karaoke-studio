@@ -340,15 +340,13 @@ _LIT_FIELDS = {
     "lit_enabled",
     "volume_enabled",
     "lit_style",
+    "lit_image_path",
     "lit_number",
     "lit_size",
     "lit_offset_x",
     "lit_offset_y",
     "lit_tracking",
     "lit_fill_color",
-    "lit1_fill_color",
-    "lit2_fill_color",
-    "lit3_fill_color",
     "lit_stroke_color",
     "lit_stroke_width",
     "lit_stroke_soften",
@@ -3159,6 +3157,23 @@ class PropertyPanel(QWidget):
             self._paint_image_path_edit.setText(path)
             self._update_current_fill(image_path=path)
 
+    def _choose_lit_image(self) -> None:
+        current = self._lit_image_path_edit.text().strip()
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择指示灯图片",
+            current or "",
+            "图像文件 (*.bmp *.gif *.ico *.jpeg *.jpg *.png *.tif *.tiff *.webp);;"
+            "所有文件 (*.*)",
+        )
+        if path:
+            self._lit_image_path_edit.setText(path)
+            self._update_style(lit_image_path=path)
+
+    def _clear_lit_image(self) -> None:
+        self._lit_image_path_edit.clear()
+        self._update_style(lit_image_path="")
+
     def _on_color_subject_tab_changed(self, subject: str) -> None:
         # 不阻塞信号：combo 变化要驱动 _on_color_subject_changed 的完整同步
         # （注音按钮显隐 + 宽度/装饰/填充重灌）
@@ -4097,9 +4112,31 @@ class PropertyPanel(QWidget):
             return
         self._lit_enabled_switch.setChecked(self._style.lit_enabled)
         self._volume_enabled_switch.setChecked(self._style.volume_enabled)
-        self._lit_style_combo.setCurrentIndex(
-            max(0, self._lit_style_combo.findData(self._style.lit_style))
-        )
+        # legacy "volume" 只可能来自 API 直构样式（工程加载时已迁移）；
+        # 下拉没有该项，显式回退到「圆形」显示，开灯/换形状时会写入实际值。
+        lit_style_index = self._lit_style_combo.findData(self._style.lit_style)
+        if lit_style_index < 0:
+            lit_style_index = self._lit_style_combo.findData("circle")
+        self._lit_style_combo.setCurrentIndex(max(0, lit_style_index))
+        # 图片模式：图片行可用，矢量专属装饰（描边/柔化/边缘亮度/阴影）停用；
+        # 填充色保留（缺图回退圆形时仍用它）。
+        image_mode = self._style.lit_style == "image"
+        if self._lit_image_path_edit.text() != self._style.lit_image_path:
+            self._lit_image_path_edit.setText(self._style.lit_image_path)
+        for control in (
+            self._lit_image_path_edit,
+            self._lit_image_browse_btn,
+            self._lit_image_clear_btn,
+        ):
+            control.setEnabled(image_mode)
+        for control in (
+            self._lit_stroke_btn,
+            self._lit_stroke_width_spin,
+            self._lit_stroke_soften_spin,
+            self._lit_edge_brightness_spin,
+            self._lit_shadow_check,
+        ):
+            control.setEnabled(not image_mode)
         self._lit_number_spin.setValue(self._style.lit_number)
         self._lit_size_spin.setValue(self._style.lit_size)
         self._lit_x_spin.setValue(self._style.lit_offset_x)
@@ -4132,7 +4169,9 @@ class PropertyPanel(QWidget):
         self._volume_column_width_spin.setValue(self._style.volume_column_width)
         self._volume_column_count_spin.setValue(self._style.volume_column_count)
         self._volume_column_spacing_spin.setValue(self._style.volume_column_spacing)
-        self._volume_ratio_spin.setValue(int(round(self._style.volume_ratio)))
+        # 浮点比例仅作整数回显（半向上取整，避免 round 的银行家舍入把
+        # 2.5 显示成 2）；不改写样式值，用户编辑时才写入整数。
+        self._volume_ratio_spin.setValue(int(self._style.volume_ratio + 0.5))
         self._volume_align_combo.setCurrentIndex(
             max(0, self._volume_align_combo.findData(self._style.volume_align))
         )

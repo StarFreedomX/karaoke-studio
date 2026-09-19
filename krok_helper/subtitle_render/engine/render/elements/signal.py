@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from threading import Lock
 from typing import Hashable, Protocol
 
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QFontMetrics, QPainter, QPen
+from PyQt6.QtGui import QBrush, QColor, QFontMetrics, QImage, QPainter, QPen
 
 from krok_helper.subtitle_render.engine.layout.line.style import (
     line_end_ms,
@@ -23,6 +25,9 @@ from krok_helper.subtitle_render.engine.render.core.layers import (
     LayerCompositor,
     LayerContext,
     SCOPE_LINE,
+)
+from krok_helper.subtitle_render.engine.render.image_resource import (
+    image_file_signature,
 )
 from krok_helper.subtitle_render.domain.models import Style
 from krok_helper.subtitle_render.engine.timing.timeline import DisplayLine
@@ -41,6 +46,11 @@ class SignalLitGroup:
     dx: float = 0.0
     dy: float = 0.0
     phase: float = 0.0
+    # 段首行入退场动画（与正文同一 line_animation_state）：柱体/灯组
+    # 跟随文字一起位移与淡入淡出，native 侧在行级 OpacityLayer 内绘制。
+    anim_dx: float = 0.0
+    anim_dy: float = 0.0
+    anim_opacity: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -60,7 +70,6 @@ class VolumeSignalGeometry:
     size: int
     column_width: int
     column_spacing: int
-    spacing: int
     stroke_extent: float
     local_left: float
     group_width: float
@@ -117,15 +126,18 @@ def signal_stroke_extent(style: Style, *, is_volume: bool) -> float:
 
 
 def volume_signal_geometry(style: Style) -> VolumeSignalGeometry:
+    # 列距口径：每列单元在自己的柱体两侧各预留一份描边厚度（pitch 含
+    # 2*stroke_extent），相邻柱的描边外缘间隔恰为 column_spacing。C++ 侧
+    # signal_state.cpp 的 volumeSignalGeometry 必须逐项镜像本公式，否则
+    # union 宽度（→文字对齐）与列间距会在两后端分歧。
     count = max(1, min(int(style.volume_column_count), 16))
     size = max(int(style.volume_size), 1)
     column_width = max(int(style.volume_column_width), 1)
     column_spacing = max(int(style.volume_column_spacing), 0)
-    spacing = max(0, int(getattr(style, "volume_spacing", 0)))
     stroke_extent = signal_stroke_extent(style, is_volume=True)
     pitch = float(column_width + column_spacing + 2 * stroke_extent)
     local_left = float(style.volume_offset_x) - stroke_extent
-    group_width = float(count * pitch + spacing - column_spacing)
+    group_width = float(count * pitch - column_spacing)
 
     ratio = max(float(style.volume_ratio), 0.01)
     base_factor = ratio
@@ -154,7 +166,6 @@ def volume_signal_geometry(style: Style) -> VolumeSignalGeometry:
         size=size,
         column_width=column_width,
         column_spacing=column_spacing,
-        spacing=spacing,
         stroke_extent=stroke_extent,
         local_left=local_left,
         group_width=group_width,
@@ -238,7 +249,10 @@ def line_has_active_signal(
         if display_end_ms is not None
         else line_end_ms(line) + max(int(style.line_tail_ms), 0)
     )
-    return signal_end - active_duration <= t_ms <= display_end
+    # 显示窗口统一半开区间 [start, end)，与 resolve_display_lines /
+    # native 侧 tMs >= displayEndMs 同口径；含端点会让 CPU 在窗口终点
+    # 那一帧比 GPU 多画一帧灯。
+    return signal_end - active_duration <= t_ms < display_end
 
 
 def signal_local_x(metrics: SignalLayoutMetrics, style: Style) -> float:
@@ -393,7 +407,21 @@ def lit_extinguish_transition_state(
     style: Style,
 ) -> tuple[float, float, float]:
     opacity, dx, dy = lit_transition_state(1.0 - phase, style)
-    return 1.0 - opacity if style.lit_transition_mode == "fade" else opacity, dx, dy
+    if style.lit_transition_mode == "fade":
+        return 1.0 - opacity, dx, dy
+    if style.lit_transition_mode == "slide":
+        # 退场是入场的时间反演：不透明度 1→0，位移从原位长到入场起点
+        # （−angle 方向）。入场曲线（opacity=progress、位移随 (1-progress)
+        # 收拢）不能在退场时机原样重放，否则当前灯任期内前段不可见、临近
+        # 交接才「滑入」，方向与 fade 相反。C++ shapeSignalState 镜像本式。
+        distance = max(int(style.lit_transition_distance), 0) * opacity
+        radians = math.radians(float(style.lit_transition_angle_deg))
+        return (
+            1.0 - opacity,
+            -math.cos(radians) * distance,
+            -math.sin(radians) * distance,
+        )
+    return opacity, dx, dy
 
 
 def _valid_signal_color(value: str, fallback: str) -> QColor:
@@ -401,6 +429,56 @@ def _valid_signal_color(value: str, fallback: str) -> QColor:
     if color.isValid():
         return color
     return QColor(fallback)
+
+
+_LIT_IMAGE_LOCK = Lock()
+_LIT_IMAGE_CACHE: OrderedDict[tuple[str, int, int], QImage] = OrderedDict()
+_LIT_IMAGE_CACHE_MAX = 8
+
+
+def cached_lit_image(path: str) -> QImage | None:
+    """Load one lamp sprite keyed by (path, mtime_ns, size).
+
+    失效口径与填充图一致（``image_file_signature``）；文件缺失/解码失败
+    返回 None，调用方回退为矢量圆形（与 native 同口径）。
+    """
+    if not path:
+        return None
+    signature = image_file_signature(path)
+    if signature is None:
+        return None
+    with _LIT_IMAGE_LOCK:
+        cached = _LIT_IMAGE_CACHE.get(signature)
+        if cached is not None:
+            _LIT_IMAGE_CACHE.move_to_end(signature)
+            return cached
+    image = QImage(signature[0])
+    if image.isNull():
+        return None
+    with _LIT_IMAGE_LOCK:
+        _LIT_IMAGE_CACHE[signature] = image
+        while len(_LIT_IMAGE_CACHE) > _LIT_IMAGE_CACHE_MAX:
+            _LIT_IMAGE_CACHE.popitem(last=False)
+    return image
+
+
+def _draw_lit_image(painter: QPainter, rect: QRectF, image: QImage) -> None:
+    """等比 contain 进 size 方形槽位并居中（native DrawBitmap 同口径）。"""
+    if image.width() <= 0 or image.height() <= 0:
+        return
+    scale = min(rect.width() / image.width(), rect.height() / image.height())
+    if scale <= 0:
+        return
+    width = image.width() * scale
+    height = image.height() * scale
+    target = QRectF(
+        rect.left() + (rect.width() - width) * 0.5,
+        rect.top() + (rect.height() - height) * 0.5,
+        width,
+        height,
+    )
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawImage(target, image)
 
 
 def build_signal_layers(
@@ -488,10 +566,12 @@ class SignalLitsLayer:
         ctx: LayerContext,
         layout: object,
     ) -> None:
-        if self.group_opacity <= 0.0:
+        if self.group_opacity <= 0.0 or self.group.anim_opacity <= 0.0:
             return
         painter.save()
         try:
+            # 段首行入退场动画的透明度与正文同源（位移已折进 group.x/y）。
+            painter.setOpacity(painter.opacity() * self.group.anim_opacity)
             painter.setOpacity(painter.opacity() * self.group_opacity)
             painter.save()
             try:
@@ -510,7 +590,11 @@ class SignalLitsLayer:
         ctx: LayerContext,
         layout: object,
     ) -> tuple[int, int] | None:
-        if self.group_opacity <= 0.0 or self.group.opacity <= 0.0:
+        if (
+            self.group_opacity <= 0.0
+            or self.group.opacity <= 0.0
+            or self.group.anim_opacity <= 0.0
+        ):
             return None
         if self.is_volume:
             return _volume_signal_vertical_bounds(self.group, self.style)
@@ -655,6 +739,13 @@ def _draw_lit_shape(
     soften: int,
     edge_brightness: float,
 ) -> None:
+    if style.lit_style == "image":
+        # 图片模式：直接把素材 contain 进槽位。描边/柔化/阴影/边缘亮度
+        # 是矢量形状专属装饰，图片下不绘制；缺图回退圆形（走 else 分支）。
+        image = cached_lit_image(style.lit_image_path)
+        if image is not None:
+            _draw_lit_image(painter, rect, image)
+            return
     if style.lit_shadow:
         shadow = QColor("#000000")
         shadow.setAlphaF(0.35)
@@ -743,6 +834,7 @@ def resolve_signal_lit_groups(
     measure_line: SignalLineMeasurer,
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
+    line_animations: Mapping[int, tuple[float, float, float]] | None = None,
     text_anchor: bool = False,
 ) -> list[SignalLitGroup]:
     del item_width
@@ -770,6 +862,14 @@ def resolve_signal_lit_groups(
             continue
         if index_of is not None and index_of.get(id(line)) not in signal_heads:
             continue
+        anim_dx, anim_dy, anim_opacity = (
+            line_animations.get(id(line), (0.0, 0.0, 1.0))
+            if line_animations is not None
+            else (0.0, 0.0, 1.0)
+        )
+        # 与正文同口径：动画透明度归零的帧整行不画，柱体/灯组同样跳过。
+        if anim_opacity <= 0.0:
+            continue
         line_layout = (
             line_layouts.get(id(display_line.line))
             if line_layouts is not None
@@ -789,7 +889,7 @@ def resolve_signal_lit_groups(
         display_end = display_line.display_end_ms
         if display_end is None:
             display_end = line_end_ms(line) + max(int(line_style.line_tail_ms), 0)
-        if not (active_start <= t_ms <= display_end):
+        if not (active_start <= t_ms < display_end):
             continue
 
         elapsed = max(t_ms - active_start, 0)
@@ -859,8 +959,8 @@ def resolve_signal_lit_groups(
         )
         groups.append(
             SignalLitGroup(
-                x=x + offset_x,
-                y=y + offset_y,
+                x=x + offset_x + anim_dx,
+                y=y + offset_y + anim_dy,
                 elapsed_ms=elapsed,
                 duration_ms=active_duration,
                 active_index=active_index,
@@ -869,6 +969,7 @@ def resolve_signal_lit_groups(
                 dx=dx,
                 dy=dy,
                 phase=phase,
+                anim_opacity=anim_opacity,
             )
         )
     return groups
@@ -886,6 +987,7 @@ def resolve_signal_layers(
     measure_line: SignalLineMeasurer,
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
+    line_animations: Mapping[int, tuple[float, float, float]] | None = None,
 ) -> list[SignalLitsLayer]:
     styles: list[Style] = []
     legacy_volume = style.lit_enabled and style.lit_style == "volume"
@@ -918,6 +1020,7 @@ def resolve_signal_layers(
             measure_line=measure_line,
             line_layouts=line_layouts,
             line_offsets=line_offsets,
+            line_animations=line_animations,
             text_anchor=shape_over_volume,
         )
         layers.extend(build_signal_layers(groups, active_style))
@@ -938,6 +1041,7 @@ def paint_signal_lits(
     measure_line: SignalLineMeasurer,
     line_layouts: Mapping[int, SignalLineLayout] | None = None,
     line_offsets: Mapping[int, tuple[float, float]] | None = None,
+    line_animations: Mapping[int, tuple[float, float, float]] | None = None,
 ) -> None:
     layers = resolve_signal_layers(
         track,
@@ -950,6 +1054,7 @@ def paint_signal_lits(
         measure_line=measure_line,
         line_layouts=line_layouts,
         line_offsets=line_offsets,
+        line_animations=line_animations,
     )
     if not layers:
         return
@@ -969,6 +1074,10 @@ def active_lit_indices(
     *,
     measure_line: SignalLineMeasurer,
 ) -> set[int]:
+    # 独立音量柱工程的 lit_style 是形状灯值，必须先投影到 volume 口径，
+    # 否则会按形状灯的尺寸/时序参数计算活跃索引。
+    if style.volume_enabled:
+        style = volume_style(style)
     is_volume = style.lit_style == "volume"
     groups = resolve_signal_lit_groups(
         track,

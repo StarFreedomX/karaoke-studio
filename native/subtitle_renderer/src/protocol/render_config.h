@@ -227,6 +227,7 @@ struct ResolvedStyle {
     int litOffsetX = 0;
     int litOffsetY = -24;
     int litTracking = 0;
+    QString litImagePath;
     QString litFillColor = QStringLiteral("#0000FF");
     QString litStrokeColor = QStringLiteral("#FFFFFF");
     int litStrokeWidth = 2;

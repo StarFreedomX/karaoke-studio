@@ -33,7 +33,9 @@ def test_independent_signal_modules_use_the_longer_lead_window():
         volume_time_offset_ms=200,
     )
 
-    assert signal_lead_in_ms(style) == 2500
+    # 提前量 = duration − waiting − offset（waiting 是倒计时提前结束的保留
+    # 段，要从总时长扣除）：形状灯 1200−100−0=1100，音量柱 2400−300−200=1900。
+    assert signal_lead_in_ms(style) == 1900
 
 
 def _pages(*specs: tuple[int, int, ...]) -> list[ShowTimePage]:

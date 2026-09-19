@@ -3200,9 +3200,9 @@ def test_build_render_ir_expands_display_window_for_volume_signal_lead_in():
         "lines"
     ][0]
 
-    # Painter reserves duration + waiting - offset = 4750 ms for the complete
-    # Sayatoo signal window (the waiting portion is part of the display lead).
-    assert line["display_start_ms"] == 5_250
+    # 灯窗口实际提前量 = duration − waiting − offset = 4000−500+250 = 3750 ms
+    # （waiting 是倒计时提前结束的保留段，要从总时长扣除；与渲染端口径一致）。
+    assert line["display_start_ms"] == 6_250
 
 
 def test_build_render_ir_resolves_global_and_per_line_basic_animations():

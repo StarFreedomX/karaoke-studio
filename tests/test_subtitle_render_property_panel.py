@@ -142,6 +142,37 @@ def qapp():
     app.processEvents()
 
 
+def test_lit_image_mode_round_trips_and_syncs_controls():
+    style = Style(
+        lit_enabled=True,
+        lit_style="image",
+        lit_image_path="C:/sprites/lamp.png",
+        lit_size=48,
+    )
+    restored = style_from_dict(style_to_dict(style))
+    assert restored.lit_style == "image"
+    assert restored.lit_image_path == "C:/sprites/lamp.png"
+
+    panel = PropertyPanel()
+    panel.set_style(style)
+    assert panel._lit_style_combo.currentData() == "image"
+    assert panel._lit_image_path_edit.text() == "C:/sprites/lamp.png"
+    # 图片模式：图片行可用，矢量专属装饰停用，填充色（回退用）保留。
+    assert panel._lit_image_path_edit.isEnabled()
+    assert panel._lit_image_browse_btn.isEnabled()
+    assert not panel._lit_stroke_width_spin.isEnabled()
+    assert not panel._lit_stroke_soften_spin.isEnabled()
+    assert not panel._lit_edge_brightness_spin.isEnabled()
+    assert not panel._lit_shadow_check.isEnabled()
+    assert panel._lit_fill_btn.isEnabled()
+
+    panel.set_style(replace(style, lit_style="circle"))
+    assert not panel._lit_image_path_edit.isEnabled()
+    assert panel._lit_stroke_width_spin.isEnabled()
+    assert panel._lit_shadow_check.isEnabled()
+    panel.deleteLater()
+
+
 def test_role_scheme_controller_owns_registry_and_scheme_defaults():
     controller = RoleSchemeController()
     controller.replace(["A", "", " B "])
@@ -2014,9 +2045,6 @@ def test_property_panel_set_style_populates_controls(qapp):
         lit_offset_y=70,
         lit_tracking=14,
         lit_fill_color="#333333",
-        lit1_fill_color="#112233",
-        lit2_fill_color="#445566",
-        lit3_fill_color="#778899",
         lit_stroke_color="#AABBCC",
         lit_stroke_width=5,
         lit_stroke_soften=3,
@@ -2360,9 +2388,6 @@ def test_style_defaults_match_nicokara_layout_baseline():
     assert style.lit_offset_y == -24
     assert style.lit_tracking == 0
     assert style.lit_fill_color == "#0000FF"
-    assert style.lit1_fill_color == "#FF0000"
-    assert style.lit2_fill_color == "#FFFF00"
-    assert style.lit3_fill_color == "#00FF00"
     assert style.lit_stroke_color == "#FFFFFF"
     assert style.lit_stroke_width == 2
     assert style.lit_stroke_soften == 0
@@ -5046,9 +5071,6 @@ def test_style_serialization_preserves_complex_fills_and_schemes(tmp_path):
         lit_offset_y=70,
         lit_tracking=12,
         lit_fill_color="#222222",
-        lit1_fill_color="#FF0000",
-        lit2_fill_color="#00FF00",
-        lit3_fill_color="#0000FF",
         lit_stroke_color="#FFFFFF",
         lit_stroke_width=4,
         lit_stroke_soften=2,
@@ -5102,9 +5124,6 @@ def test_style_serialization_preserves_complex_fills_and_schemes(tmp_path):
     assert restored.lit_offset_y == 70
     assert restored.lit_tracking == 12
     assert restored.lit_fill_color == "#222222"
-    assert restored.lit1_fill_color == "#FF0000"
-    assert restored.lit2_fill_color == "#00FF00"
-    assert restored.lit3_fill_color == "#0000FF"
     assert restored.lit_stroke_color == "#FFFFFF"
     assert restored.lit_stroke_width == 4
     assert restored.lit_stroke_soften == 2

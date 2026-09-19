@@ -148,7 +148,7 @@ OverlapFallbackMode = Literal["lift", "displace"]
 ``lift`` = 抬升避让（移动后进入的整页字幕，旧行为）；``displace`` = 由将要
 演唱的下一句直接顶掉还在走字的上一句（截短其显示窗，允许吃掉走字时长）。
 """
-LitStyle = Literal["volume", "circle", "square", "rounded"]
+LitStyle = Literal["volume", "circle", "square", "rounded", "image"]
 # 标题字幕（B7）：静态叠加文字的锚点 / 对齐 / 显示时段模式。
 TitleAnchor = Literal[
     "top_left",
@@ -1113,15 +1113,19 @@ class Style:
     # Keep the serialized/default discriminator for source compatibility with
     # direct Style(lit_enabled=True) callers; the new UI always writes a shape.
     lit_style: LitStyle = "volume"
+    lit_image_path: str = ""
+    """形状灯「图片」模式的素材路径（#RRGGBB 之外唯一非数值 lit 参数）。
+
+    仅 ``lit_style == "image"`` 时生效：图片等比 contain 进「大小」的
+    方形槽位（两端同口径）；描边/柔化/阴影/边缘亮度只作用于矢量形状，
+    图片模式下忽略。图片缺失或无法解码时回退为圆形（与 native 一致）。
+    """
     lit_number: int = 4
     lit_size: int = 32
     lit_offset_x: int = 0
     lit_offset_y: int = -24
     lit_tracking: int = 0
     lit_fill_color: str = "#0000FF"
-    lit1_fill_color: str = "#FF0000"
-    lit2_fill_color: str = "#FFFF00"
-    lit3_fill_color: str = "#00FF00"
     lit_stroke_color: str = "#FFFFFF"
     lit_stroke_width: int = 2
     lit_stroke_soften: int = 0
@@ -1742,7 +1746,11 @@ def style_from_dict(payload: object) -> Style:
         }:
             changes[key] = bool(value)
         elif key == "lit_style":
-            changes[key] = value if value in {"volume", "circle", "square", "rounded"} else defaults.lit_style
+            changes[key] = (
+                value
+                if value in {"volume", "circle", "square", "rounded", "image"}
+                else defaults.lit_style
+            )
         elif key == "lit_transition_mode":
             changes[key] = value if value in {"none", "fade", "slide"} else defaults.lit_transition_mode
         elif key == "section_ending_mode":

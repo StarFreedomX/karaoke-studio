@@ -395,6 +395,15 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 false
             );
         }
+        // 形状灯「图片」模式素材共用同一缓存池（按 path+mtime+size 键控）。
+        if (style.litStyle == "image" && !style.litImagePath.empty()) {
+            cacheImage(
+                style.litImagePath,
+                style.litImageModifiedMs,
+                style.litImageSize,
+                false
+            );
+        }
     };
     auto cacheBitmapImage = [&](const std::wstring &path,
                                 std::uint64_t modifiedMs,
@@ -755,6 +764,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         // baseline step for only that line.
         cached.legacyLaneHeight = laneAscent + laneDescent + laneVisualPad * 2.0f;
         cached.legacyLaneDescent = laneDescent + laneVisualPad;
+        cached.laneFontAscent = laneAscent;
+        cached.laneFontDescent = laneDescent;
         if (style.layoutSemantics == "n3_1074") {
             const int fontSize = referenceInt(style.fontSize, 1);
             const int edgeSize = referenceInt(style.strokeWidth, 0);

@@ -1822,7 +1822,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             topPad = std::max(topPad, padding.first);
             bottomPad = std::max(bottomPad, padding.second);
         }
-        const float signalTextMetric = (ascent - descent) * 0.5f;
+        // Signal Y anchors follow the style font metrics without the lane's
+        // visual pad (and never the N3 box), mirroring the Painter's
+        // signal_lit_y which feeds on QFontMetrics of the line style's font.
+        const float signalTextMetric =
+            (line->laneFontAscent - line->laneFontDescent) * 0.5f;
         const float signalGroupY = style.volumeOffsetY
             - signalGeometry.strokeExtent
             - signalGeometry.size * 0.5f
@@ -1846,7 +1850,8 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 );
             }
         }
-        const float shapeGroupY = style.litOffsetY - ascent - shapeGeometry.size;
+        const float shapeGroupY = style.litOffsetY - line->laneFontAscent
+            - shapeGeometry.size;
         if (shapeState.visible && shapeState.activeIndex >= 0) {
             for (int index = 0; index <= shapeState.activeIndex; ++index) {
                 const bool active = index == shapeState.activeIndex;
@@ -5385,7 +5390,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 brush->SetOpacity(
                     std::clamp(
                         (style.volumeEnabled ? style.volumeOpacity : style.litOpacity)
-                            * signalState.opacity,
+                            * signalState.opacity
+                            // 行级 OpacityLayer 正常时该值为 1（透明度由图层
+                            // 统一承载）；图层不可用的逐笔刷兜底路径里它是
+                            // 入退场动画透明度，信号必须与正文同乘。
+                            * lineAnimationOpacity,
                         0.0f,
                         1.0f
                     )
@@ -5502,10 +5511,29 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     }
                 }
             };
+            // 形状灯「图片」模式：共用填充图缓存池（path+mtime+size 键控）。
+            const bool litImageMode = style.litStyle == "image";
+            ID2D1Bitmap1 *litImageBitmap = nullptr;
+            if (litImageMode) {
+                const auto imageFound = std::find_if(
+                    impl_->images.begin(), impl_->images.end(),
+                    [&](const Impl::CachedImage &image) {
+                        return image.path == style.litImagePath
+                            && image.modifiedMs == style.litImageModifiedMs
+                            && image.size == style.litImageSize;
+                    }
+                );
+                if (imageFound != impl_->images.end()) {
+                    litImageBitmap = imageFound->bitmap.Get();
+                }
+            }
             for (int index = 0; index <= shapeState.activeIndex; ++index) {
                 const bool active = index == shapeState.activeIndex;
+                // lineAnimationOpacity 在逐笔刷兜底路径里承载行入退场动画
+                // 透明度（图层可用时为 1），与音量柱 signalBrush 同口径。
                 const float itemOpacity = style.litOpacity
-                    * (active ? shapeState.activeOpacity : 1.0f);
+                    * (active ? shapeState.activeOpacity : 1.0f)
+                    * lineAnimationOpacity;
                 const float itemX = style.litOffsetX
                     + static_cast<float>(index)
                         * (shapeGeometry.size * 1.5f + shapeGeometry.tracking)
@@ -5517,6 +5545,43 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                     itemX + shapeGeometry.size,
                     itemY + shapeGeometry.size
                 );
+                if (litImageMode) {
+                    // 图片 contain 进 size 方形槽位（Painter _draw_lit_image
+                    // 同口径）；描边/柔化/阴影/边缘亮度为矢量形状专属。
+                    // 缺图/解码失败回退圆形（drawRawShape 的 ellipse 分支）。
+                    if (litImageBitmap != nullptr) {
+                        const D2D1_SIZE_F dim = litImageBitmap->GetSize();
+                        if (dim.width > 0.0f && dim.height > 0.0f) {
+                            const float fit = std::min(
+                                (rect.right - rect.left) / dim.width,
+                                (rect.bottom - rect.top) / dim.height
+                            );
+                            const float drawW = dim.width * fit;
+                            const float drawH = dim.height * fit;
+                            const float centerX = (rect.left + rect.right) * 0.5f;
+                            const float centerY = (rect.top + rect.bottom) * 0.5f;
+                            context->DrawBitmap(
+                                litImageBitmap,
+                                D2D1::RectF(
+                                    centerX - drawW * 0.5f,
+                                    centerY - drawH * 0.5f,
+                                    centerX + drawW * 0.5f,
+                                    centerY + drawH * 0.5f
+                                ),
+                                std::clamp(itemOpacity, 0.0f, 1.0f)
+                            );
+                            continue;
+                        }
+                    }
+                    drawRawShape(
+                        rect,
+                        style.litFill,
+                        style.litStroke,
+                        style.litStrokeWidth,
+                        itemOpacity
+                    );
+                    continue;
+                }
                 if (style.litShadow) {
                     const float shadowOffset = std::max(
                         shapeGeometry.size * 0.08f, 1.0f

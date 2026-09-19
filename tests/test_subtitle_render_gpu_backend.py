@@ -5636,10 +5636,258 @@ def test_gpu_g4_per_row_alignment_includes_volume_signal_union(monkeypatch) -> N
     for gpu_frame, painter_frame in zip(gpu, painter):
         gpu_bounds = _payload_alpha_bounds(gpu_frame)
         painter_bounds = _payload_alpha_bounds(painter_frame)
+        # union 锚定两端精确一致（native dx == Painter text_x）；残余 ±14px
+        # 是 DWrite 与 Qt 的首字形轴承差（native 行内墨迹左界 ~+12px），
+        # 与信号几何无关——柱间间隔由
+        # test_gpu_g4_volume_column_ink_gaps_follow_painter 单独钉住。
         assert all(
-            abs(actual - expected) <= 12
+            abs(actual - expected) <= 14
             for actual, expected in zip(gpu_bounds, painter_bounds)
         ), (gpu_bounds, painter_bounds)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g4_volume_column_ink_gaps_follow_painter(monkeypatch) -> None:
+    """相邻柱的墨迹间隔必须与 Painter 同口径（pitch 含 2×stroke 预留）。
+
+    柱间可见间隔 = column_spacing + 2×(stroke_extent − stroke/2)。Painter 与
+    native 的 pitch 公式一旦分歧（native 漏掉每列 2×stroke 预留时间隔会缩
+    到 spacing − stroke），整体 bounds 对比会被文本宽度差异抵消，只有逐柱
+    间隔能钉住几何回归。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("Signal", 4_000)], end_ms=5_000)]
+    )
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=60,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        line_horizontal_layout="per_row",
+        row1_align="left",
+        row1_offset_x=43,
+        line_lead_in_ms=500,
+        line_tail_ms=500,
+        lit_enabled=True,
+        lit_style="volume",
+        signals_duration_ms=4_000,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+        lit_stroke_width=2,
+        volume_size=42,
+        volume_column_width=12,
+        volume_column_count=4,
+        volume_column_spacing=3,
+        volume_offset_y=-120,
+        volume_flash_duration_ratio=0.0,
+    )
+
+    def column_gaps(frame: bytes) -> list[int]:
+        # 把柱整体抬到文字墨迹上方，柱带内的水平扫描线只穿柱。默认
+        # ratio=3 时最短柱只有 size/3，逐行扫柱带、取恰好 4 段墨迹的行。
+        left, top, _, _ = _payload_alpha_bounds(frame)
+        stride = 640 * 4
+        candidates: list[list[int]] = []
+        for y in range(top, top + 46):
+            row = y * stride
+            runs: list[tuple[int, int]] = []
+            run_start: int | None = None
+            for x in range(640):
+                ink = frame[row + x * 4 + 3] > 16
+                if ink and run_start is None:
+                    run_start = x
+                elif not ink and run_start is not None:
+                    runs.append((run_start, x))
+                    run_start = None
+            if run_start is not None:
+                runs.append((run_start, 640))
+            if len(runs) == 4 and runs[3][1] - runs[0][0] < 120:
+                candidates.append(
+                    [runs[i + 1][0] - runs[i][1] for i in range(3)]
+                )
+        assert candidates, "no scanline crosses exactly the 4 volume columns"
+        mid = candidates[len(candidates) // 2]
+        return mid
+
+    timestamps = (3_500,)
+    painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+
+    for gpu_frame, painter_frame in zip(gpu, painter):
+        gpu_gaps = column_gaps(gpu_frame)
+        painter_gaps = column_gaps(painter_frame)
+        assert all(
+            abs(actual - expected) <= 1
+            for actual, expected in zip(gpu_gaps, painter_gaps)
+        ), (gpu_gaps, painter_gaps)
+        # Painter 口径的期望间隔 ≈ spacing + 2×(stroke − stroke/2) = 3+2 = 5。
+        assert all(3 <= gap <= 7 for gap in painter_gaps), painter_gaps
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g4_lit_image_mode_follows_painter(monkeypatch, tmp_path) -> None:
+    """形状灯「图片」模式：native 用共享位图缓存 contain 绘制，与 Painter
+    同口径（含缺图回退圆形）。红素材两端都必须画出来。"""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtGui import QColor, QImage
+
+    sprite = QImage(24, 16, QImage.Format.Format_ARGB32)
+    sprite.fill(QColor("#FF0000"))
+    sprite_path = str(tmp_path / "lamp.png")
+    assert sprite.save(sprite_path)
+
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("Signal", 4_000)], end_ms=5_000)]
+    )
+
+    def image_style(path: str) -> Style:
+        return _g1_style(
+            font_family="Meiryo",
+            font_family_latin="Meiryo",
+            font_size_px=64,
+            stroke_width_px=0,
+            stroke2_enabled=False,
+            decoration_kind="none",
+            dual_line_layout=False,
+            line_horizontal_layout="center",
+            line_lead_in_ms=500,
+            line_tail_ms=500,
+            entry_anim="none",
+            lit_enabled=True,
+            lit_style="image",
+            lit_image_path=path,
+            lit_number=3,
+            lit_size=34,
+            lit_offset_x=-24,
+            lit_offset_y=-16,
+            lit_stroke_color="#00FF00",
+            lit_stroke_width=3,
+            lit_shadow=True,
+            signals_duration_ms=4_000,
+        )
+
+    def red_pixels(frame: bytes) -> int:
+        return sum(
+            frame[index] > 200
+            and frame[index + 1] < 80
+            and frame[index + 2] < 80
+            and frame[index + 3] > 32
+            for index in range(0, len(frame), 4)
+        )
+
+    timestamps = (2_000,)
+    painter = [
+        _render_painter_oracle(image_style(sprite_path), t_ms=t, track=track)
+        for t in timestamps
+    ]
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, image_style(sprite_path), timestamps, force_warp=True, track=track
+        )
+        _, gpu_fallback = _render_g1_frames(
+            renderer, image_style(""), timestamps, force_warp=True, track=track
+        )
+    painter_fallback = [
+        _render_painter_oracle(image_style(""), t_ms=t, track=track)
+        for t in timestamps
+    ]
+
+    assert red_pixels(painter[0]) >= 200
+    assert red_pixels(gpu[0]) >= 200
+    assert all(
+        abs(actual - expected) <= 14
+        for actual, expected in zip(
+            _payload_alpha_bounds(gpu[0]),
+            _payload_alpha_bounds(painter[0]),
+        )
+    )
+    # 缺图回退圆形：无红色像素，两端 bounds 仍一致。
+    assert red_pixels(gpu_fallback[0]) == 0
+    assert red_pixels(painter_fallback[0]) == 0
+    assert all(
+        abs(actual - expected) <= 14
+        for actual, expected in zip(
+            _payload_alpha_bounds(gpu_fallback[0]),
+            _payload_alpha_bounds(painter_fallback[0]),
+        )
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g4_volume_signal_follows_line_entry_fade(monkeypatch) -> None:
+    """音量柱随段首行入场淡入：两端同乘行入退场动画透明度（GPU 行级
+    OpacityLayer / Painter line_animation_state），入场中段帧的总 alpha
+    比例必须一致，否则一端柱体会比另一端早亮。"""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("Signal", 4_000)], end_ms=5_000)]
+    )
+    style = _g1_style(
+        font_family="Meiryo",
+        font_family_latin="Meiryo",
+        font_size_px=60,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        dual_line_layout=False,
+        line_horizontal_layout="center",
+        line_lead_in_ms=500,
+        line_tail_ms=500,
+        entry_anim="fade",
+        entry_lead_ms=1_000,
+        lit_enabled=True,
+        lit_style="volume",
+        signals_duration_ms=4_000,
+        lit_waiting_time_ms=0,
+        lit_time_offset_ms=0,
+        lit_stroke_width=2,
+        volume_size=42,
+        volume_column_width=12,
+        volume_column_count=4,
+        volume_column_spacing=3,
+        volume_flash_duration_ratio=0.0,
+    )
+    timestamps = (200, 400, 2_500)
+    painter = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+
+    gpu_total = [sum(frame[3::4]) for frame in gpu]
+    painter_total = [sum(frame[3::4]) for frame in painter]
+    assert gpu_total[-1] > 0 and painter_total[-1] > 0
+    for index in range(len(timestamps) - 1):
+        gpu_ratio = gpu_total[index] / gpu_total[-1]
+        painter_ratio = painter_total[index] / painter_total[-1]
+        assert abs(gpu_ratio - painter_ratio) <= 0.1, (
+            timestamps[index],
+            gpu_ratio,
+            painter_ratio,
+        )
+        # ease_out 曲线在尾段很接近 1（0.9→0.99），只有前段帧能证明淡入生效。
+        assert painter_ratio < 0.9, painter_ratio
+    for gpu_frame, painter_frame in zip(gpu, painter):
+        assert all(
+            abs(actual - expected) <= 14
+            for actual, expected in zip(
+                _payload_alpha_bounds(gpu_frame),
+                _payload_alpha_bounds(painter_frame),
+            )
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
@@ -11328,3 +11576,4 @@ def test_line_avatar_and_inline_svg_survive_in_every_render_core(
     assert avatar_pixels(painter_frame) > 100
     assert avatar_pixels(gpu_frames[0]) > 100
     assert avatar_pixels(native_frame) > 100
+

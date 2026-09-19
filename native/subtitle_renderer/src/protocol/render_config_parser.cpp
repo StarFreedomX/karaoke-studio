@@ -253,6 +253,9 @@ void applySignalStyleOverrides(ResolvedStyle &cfg, const QJsonObject &style) {
     if (hasNonNull(style, QStringLiteral("lit_style"))) {
         cfg.litStyle = stringValue(style, QStringLiteral("lit_style"), cfg.litStyle);
     }
+    cfg.litImagePath = stringValue(
+        style, QStringLiteral("lit_image_path"), cfg.litImagePath
+    );
     cfg.litNumber = std::clamp(intValue(style, QStringLiteral("lit_number"), cfg.litNumber), 1, 8);
     cfg.litSize = std::max(1, intValue(style, QStringLiteral("lit_size"), cfg.litSize));
     cfg.litOffsetX = intValue(style, QStringLiteral("lit_offset_x"), cfg.litOffsetX);

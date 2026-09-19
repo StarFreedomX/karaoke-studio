@@ -128,6 +128,13 @@ struct Direct2DGpuBackend::Impl {
         float maxVisualPad = 0.0f;
         float legacyLaneHeight = 1.0f;
         float legacyLaneDescent = 0.0f;
+        // Style-font ascent/descent WITHOUT the visual pad, mirroring the
+        // QFontMetrics the Painter feeds its signal anchors
+        // (signal_lit_y).  Lane boxes pad the ascent; using them for the
+        // lamp/bar Y would lift the indicator by the text stroke pad and,
+        // under N3 semantics, swap in the N3 box entirely.
+        float laneFontAscent = 0.0f;
+        float laneFontDescent = 0.0f;
         float n3DrawHeight = 1.0f;
         float n3Descent = 0.0f;
         // N3 char boxes accumulated over the line's own glyphs, independent of

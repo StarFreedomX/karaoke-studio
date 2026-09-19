@@ -292,6 +292,20 @@ void applyGpuResolvedStyle(
     );
     target.litEnabled = source.litEnabled;
     target.litStyle = source.litStyle.toStdString();
+    target.litImagePath = source.litImagePath.toStdWString();
+    if (!source.litImagePath.isEmpty()) {
+        // 与 PaintStyle.image* 同口径：QFileInfo 探测 (mtime, size) 作失效
+        // 签名，configure 按它缓存解码位图。
+        const QFileInfo info(source.litImagePath);
+        if (info.exists() && info.isFile()) {
+            target.litImageModifiedMs = static_cast<std::uint64_t>(
+                std::max<qint64>(info.lastModified().toMSecsSinceEpoch(), 0)
+            );
+            target.litImageSize = static_cast<std::uint64_t>(
+                std::max<qint64>(info.size(), 0)
+            );
+        }
+    }
     target.litNumber = source.litNumber;
     target.litSize = static_cast<float>(source.litSize * scale);
     target.litOffsetX = static_cast<float>(source.litOffsetX * scale);

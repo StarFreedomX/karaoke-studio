@@ -66,11 +66,29 @@ def signal_head_context(
 
 def signal_lead_in_ms(style: Style) -> int:
     """Return how far before singing a configured signal must become visible."""
+    # 灯窗口实际起点 = line_start + offset − (duration − waiting)，即提前量
+    # 为 duration − waiting − offset（与渲染端 resolve_signal_lit_groups /
+    # native signal_state 同口径）。waiting 是「倒计时提前结束」的保留段，
+    # 要从总时长里扣除，不能加回去，否则文字会比灯早出现 2×waiting。
     leads = []
     if style.lit_enabled:
-        leads.append(max(0, int(style.signals_duration_ms) + max(int(style.lit_waiting_time_ms), 0) - int(style.lit_time_offset_ms)))
+        leads.append(
+            max(
+                0,
+                int(style.signals_duration_ms)
+                - max(int(style.lit_waiting_time_ms), 0)
+                - int(style.lit_time_offset_ms),
+            )
+        )
     if style.volume_enabled:
-        leads.append(max(0, int(style.volume_duration_ms) + max(int(style.volume_waiting_time_ms), 0) - int(style.volume_time_offset_ms)))
+        leads.append(
+            max(
+                0,
+                int(style.volume_duration_ms)
+                - max(int(style.volume_waiting_time_ms), 0)
+                - int(style.volume_time_offset_ms),
+            )
+        )
     return max(leads, default=0)
 
 

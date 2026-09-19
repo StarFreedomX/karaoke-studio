@@ -492,7 +492,7 @@ _PAINT_ONLY_STYLE_FIELDS: frozenset[str] = frozenset({
     "base_color", "fill_color", "fill_gradient_enabled", "fill_gradient_start_color",
     "fill_gradient_end_color", "fill_gradient_angle_deg", "stroke_color", "shadow_color",
     "karaoke_colors", "ruby_color", "ruby_colors_follow_main", "ruby_karaoke_colors",
-    "lit_fill_color", "lit1_fill_color", "lit2_fill_color", "lit3_fill_color",
+    "lit_fill_color", "lit_image_path",
     "lit_stroke_color", "volume_fill_color", "volume_stroke_color",
     "volume_overlay_fill_color", "volume_overlay_stroke_color",
 })

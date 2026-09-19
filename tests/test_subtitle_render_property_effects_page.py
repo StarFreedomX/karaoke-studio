@@ -26,6 +26,12 @@ class _Host:
     def _update_style(self, **changes) -> None:
         self.updates.append(changes)
 
+    def _choose_lit_image(self) -> None:
+        self.updates.append({"lit_image_path": "chosen"})
+
+    def _clear_lit_image(self) -> None:
+        self.updates.append({"lit_image_path": ""})
+
     def _on_section_edge_toggled(self, checked: bool) -> None:
         # 真实宿主还读 self._style；builder 契约测试只关心启用联动与字段路由。
         self._section_head_anim_combo.setEnabled(checked)
@@ -205,7 +211,8 @@ def test_effects_lit_builder_preserves_groups_ranges_and_initial_state(qapp) -> 
     assert section.header_switch is host._lit_enabled_switch
     assert not section.is_expanded()
     assert list(host._lit_group_grids) == ["布局", "时序", "外观", "转场"]
-    assert host._lit_style_combo.count() == 3
+    # 圆形/方形/圆角 + 图片（素材模式）。
+    assert host._lit_style_combo.count() == 4
     assert host._lit_transition_angle_spin.minimum() == -360
     assert host._lit_transition_distance_spin.maximum() == 800
     assert host._lit_stroke_btn.objectName() == "lit_stroke_color"

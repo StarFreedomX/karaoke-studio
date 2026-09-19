@@ -1152,6 +1152,12 @@ def _paint_track_to_painter(
                 display_style,
                 line_layouts=line_layouts,
                 line_offsets=line_offsets,
+                line_animations=_signal_line_animations(
+                    display_style,
+                    signal_lines,
+                    track_t_ms,
+                    line_plans,
+                ),
             )
     finally:
         painter.restore()
@@ -1332,10 +1338,13 @@ def _subtitle_lines_vertical_bounds(
                 logical_w,
                 logical_h,
                     track_t_ms,
-                    style,
-                    measure_line=_measure_signal_line,
-                    line_layouts=line_layouts,
+                style,
+                measure_line=_measure_signal_line,
+                line_layouts=line_layouts,
                 line_offsets=line_offsets,
+                line_animations=_signal_line_animations(
+                    style, signal_lines, track_t_ms, {}
+                ),
             ),
         )
         if signal_bounds is not None:
@@ -2305,6 +2314,47 @@ def _measure_signal_line(
     )
 
 
+def _signal_line_animations(
+    style: Style,
+    signal_lines: list[DisplayLine],
+    t_ms: int,
+    line_plans: dict[int, LineLayoutPlan] | None,
+) -> dict[int, tuple[float, float, float]]:
+    """段首行的入退场动画状态，供柱体/灯组与正文同步位移与淡变。
+
+    与 :func:`_paint_line` / :func:`_display_line_vertical_bounds` 同一来源
+    （``line_animation_state`` + 同一口径的行样式/显示窗口）；native 侧在
+    行级 OpacityLayer 内绘制信号并对 dx/dy 加 ``animation``，两端语义一致。
+    """
+    animations: dict[int, tuple[float, float, float]] = {}
+    for display_line in signal_lines:
+        line = display_line.line
+        line_plan = line_plans.get(id(line)) if line_plans is not None else None
+        line_style = (
+            line_plan.animation_style
+            if line_plan is not None
+            else _style_for_line_display_window(
+                style,
+                line,
+                display_line.display_start_ms,
+                display_line.display_end_ms,
+            )
+        )
+        animation = line_animation_state(
+            line_style,
+            t_ms=t_ms,
+            display_start_ms=display_line.display_start_ms
+            if display_line.display_start_ms is not None
+            else _line_start_ms(line),
+            display_end_ms=display_line.display_end_ms
+            if display_line.display_end_ms is not None
+            else _line_end_ms(line),
+            lane=display_line.lane if line_style.dual_line_layout else None,
+        )
+        animations[id(line)] = (animation.dx, animation.dy, animation.opacity)
+    return animations
+
+
 def _paint_signal_lits(
     painter: QPainter,
     img_w: int,
@@ -2317,6 +2367,7 @@ def _paint_signal_lits(
     *,
     line_layouts: dict[int, _SayatooLineLayout] | None = None,
     line_offsets: dict[int, tuple[float, float]] | None = None,
+    line_animations: dict[int, tuple[float, float, float]] | None = None,
 ) -> None:
     _paint_signal_lits_with_ports(
         painter,
@@ -2331,6 +2382,7 @@ def _paint_signal_lits(
         measure_line=_measure_signal_line,
         line_layouts=line_layouts,
         line_offsets=line_offsets,
+        line_animations=line_animations,
     )
 
 

@@ -41,6 +41,11 @@ float volumeFlashAlpha(int elapsed, int duration, const TextStyle &style) {
 }  // namespace
 
 VolumeSignalGeometry volumeSignalGeometry(const TextStyle &style) {
+    // 列距口径镜像 Painter 的 volume_signal_geometry：每列单元在自己的
+    // 柱体两侧各预留一份描边厚度（pitch 含 2*strokeExtent），相邻柱的描
+    // 边外缘间隔恰为 columnSpacing；groupWidth 只在两端收一次
+    // columnSpacing。漏掉每列的 2*stroke 会让柱间墨迹间隔缩到
+    // spacing - stroke，两端画面分歧。
     VolumeSignalGeometry geometry;
     geometry.count = std::clamp(style.volumeColumnCount, 1, 16);
     geometry.size = std::max(style.volumeSize, 1.0f);
@@ -51,9 +56,10 @@ VolumeSignalGeometry volumeSignalGeometry(const TextStyle &style) {
         independentVolume ? style.volumeStrokeWidth : style.litStrokeWidth,
         0.0f
     );
-    geometry.pitch = geometry.columnWidth + geometry.columnSpacing;
+    geometry.pitch = geometry.columnWidth + geometry.columnSpacing
+        + geometry.strokeExtent * 2.0f;
     geometry.groupWidth = geometry.count * geometry.pitch
-        - geometry.columnSpacing + geometry.strokeExtent * 2.0f;
+        - geometry.columnSpacing;
     const float ratio = std::max(style.volumeRatio, 0.01f);
     float baseFactor = ratio;
     float depthFactor = 1.0f;
@@ -144,9 +150,14 @@ ShapeSignalState shapeSignalState(
         if (style.litTransitionMode == "fade") {
             state.activeOpacity = 1.0f - progress;
         } else if (style.litTransitionMode == "slide") {
-            state.activeOpacity = progress;
+            // Exit = time-reversed entrance (mirrors Painter's
+            // lit_extinguish_transition_state): opacity 1→0 while the
+            // displacement grows from the slot toward the entrance origin
+            // (−angle direction). Replaying the entrance curve here left the
+            // active lamp invisible for most of its reign.
+            state.activeOpacity = 1.0f - progress;
             const float distance = std::max(style.litTransitionDistance, 0.0f)
-                * (1.0f - progress);
+                * progress;
             constexpr float pi = 3.14159265358979323846f;
             const float radians = style.litTransitionAngleDeg * pi / 180.0f;
             state.dx = -std::cos(radians) * distance;

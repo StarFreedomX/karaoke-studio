@@ -970,9 +970,11 @@ def test_signal_lits_are_line_countdown_not_singer_lamps(qapp):
         signals_duration_ms=1000,
     )
 
-    paint_frame(img, _singer_track(singer_id=1), 100, style)
+    # t=400：默认入场淡入（[0,300)）结束后仍在倒计时窗口内——
+    # 入场期间灯会随行淡入，不能在半透明帧上断言纯蓝。
+    paint_frame(img, _singer_track(singer_id=1), 400, style)
 
-    layout = _sayatoo_layout_for(_singer_track(singer_id=1), style, 100, w=120, h=80)
+    layout = _sayatoo_layout_for(_singer_track(singer_id=1), style, 400, w=120, h=80)
     _assert_blue_pixels_in(
         img,
         left=int(layout.signal_x),
@@ -1232,13 +1234,15 @@ def test_volume_signal_paints_section_head_before_entry_only(qapp):
         assert _pixel_hash(img) == baseline, probe
 
     # 段首行（行 4）开唱前的信号窗口：闪烁周期里总有一帧亮出蓝色音量柱。
+    # 行 4 显示窗 [26000, ...) 的入场淡入 [26000,26300) 内柱体随行淡入，
+    # 探针从 26400 起找亮帧；pytest.fail 抛的 Failed 也一并接住。
     lit_frame_found = False
-    for probe in range(26_000, 27_600, 100):
+    for probe in range(26_400, 27_600, 100):
         img2 = _blank(160, 90)
         paint_frame(img2, track, probe, style)
         try:
             _assert_blue_pixels_in(img2, left=0, right=159)
-        except AssertionError:
+        except (AssertionError, pytest.fail.Exception):
             continue
         lit_frame_found = True
         break
@@ -1486,6 +1490,7 @@ def test_signal_volume_flash_on_phase_keeps_all_columns_visible(qapp):
         line_y_margin_px=10,
         dual_line_layout=False,
         line_lead_in_ms=0,
+        entry_anim="none",
         lit_enabled=True,
         lit_shadow=False,
         signals_duration_ms=1000,
@@ -1569,6 +1574,204 @@ def test_volume_active_lit_indices_flash_then_count_up_to_the_line_start(qapp):
     assert _active_lit_indices(track, display_lines, 940, style, 3) == {0}
     assert _active_lit_indices(track, display_lines, 975, style, 3) == {2}
     assert _active_lit_indices(track, display_lines, 1001, style, 3) == {2}
+
+
+def test_signal_windows_are_half_open_at_display_end(qapp):
+    # 显示窗口是 [start, end) 半开区间：终点那一帧不再画灯（与 native 侧
+    # tMs >= displayEndMs 同口径，含端点会让 CPU 比 GPU 多画一帧）。
+    track = _singer_track(singer_id=2)
+    display_lines = [DisplayLine(track.lines[0], lane=0, display_start_ms=700, display_end_ms=2000)]
+
+    shape = Style(
+        lit_enabled=True,
+        lit_style="circle",
+        signals_duration_ms=300,
+        lit_time_offset_ms=1000,
+    )
+    assert _active_lit_indices(track, display_lines, 1_999, shape, 3) == {0}
+    assert _active_lit_indices(track, display_lines, 2_000, shape, 3) == set()
+
+    volume = Style(lit_enabled=True, lit_style="volume", signals_duration_ms=300)
+    assert _active_lit_indices(track, display_lines, 1_999, volume, 3) == {2}
+    assert _active_lit_indices(track, display_lines, 2_000, volume, 3) == set()
+
+
+def test_lit_extinguish_slide_transition_exits_instead_of_entering():
+    from krok_helper.subtitle_render.engine.render.elements.signal import (
+        lit_extinguish_transition_state,
+    )
+
+    style = Style(
+        lit_transition_mode="slide",
+        lit_transition_ratio_pct=50,
+        lit_transition_distance=20,
+        lit_transition_angle_deg=0,
+    )
+    # 任期前段（phase > ratio）：完全可见、位于原位。
+    opacity, dx, dy = lit_extinguish_transition_state(1.0, style)
+    assert opacity == pytest.approx(1.0)
+    assert dx == pytest.approx(0.0)
+    assert dy == pytest.approx(0.0)
+    # 任期尾段：不透明度下降、位移沿 −angle 方向增长——滑出而不是滑入。
+    opacity, dx, dy = lit_extinguish_transition_state(0.25, style)
+    assert opacity == pytest.approx(0.5)
+    assert dx == pytest.approx(-10.0)
+    assert dy == pytest.approx(0.0)
+    opacity, dx, dy = lit_extinguish_transition_state(0.0, style)
+    assert opacity == pytest.approx(0.0)
+    assert dx == pytest.approx(-20.0)
+    assert dy == pytest.approx(0.0)
+
+
+def test_active_lit_indices_projects_independent_volume_module(qapp):
+    # 独立音量柱（volume_enabled + 形状灯 lit_style）必须投影到 volume
+    # 口径再算活跃索引；直接读形状灯的 signals_duration_ms 会让窗口失真。
+    track = _singer_track(singer_id=2)
+    style = Style(
+        volume_enabled=True,
+        lit_style="circle",
+        volume_duration_ms=300,
+        signals_duration_ms=60_000,
+    )
+    display_lines = [DisplayLine(track.lines[0], lane=0, display_start_ms=700, display_end_ms=2000)]
+
+    assert _active_lit_indices(track, display_lines, 975, style, 3) == {2}
+    # 倒计时结束后保持满格直到显示终点；若误读形状灯的 60s 时序，
+    # 975 会得到 {0}（形状灯口径的 raw 计算）而 1500 会提前熄灭。
+    assert _active_lit_indices(track, display_lines, 1_001, style, 3) == {2}
+    assert _active_lit_indices(track, display_lines, 1_500, style, 3) == {2}
+    assert _active_lit_indices(track, display_lines, 2_000, style, 3) == set()
+
+
+def test_lit_image_mode_draws_sprite_contained_in_slot(qapp, tmp_path):
+    # 图片模式：素材等比 contain 进「大小」的方形槽位并居中；描边/阴影/
+    # 边缘亮度等矢量装饰不绘制。用纯红素材 + 纯绿描边色区分：画面里
+    # 必须有红色灯、且不能出现描边绿色。
+    from PyQt6.QtGui import QImage
+
+    sprite = QImage(24, 16, QImage.Format.Format_ARGB32)
+    sprite.fill(QColor("#FF0000"))
+    sprite_path = str(tmp_path / "lamp.png")
+    assert sprite.save(sprite_path)
+
+    style = Style(
+        font_size_px=20,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        lit_enabled=True,
+        lit_style="image",
+        lit_image_path=sprite_path,
+        lit_number=3,
+        lit_size=24,
+        lit_offset_x=-30,
+        lit_stroke_color="#00FF00",
+        lit_stroke_width=4,
+        lit_shadow=True,
+        signals_duration_ms=1000,
+        entry_anim="none",
+    )
+    img = _blank(160, 90)
+    paint_frame(img, _singer_track(singer_id=0), 400, style)
+
+    red = green = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            color = QColor(img.pixel(x, y))
+            if color.red() > 200 and color.green() < 80 and color.blue() < 80:
+                red += 1
+            elif color.green() > 200 and color.red() < 80 and color.blue() < 80:
+                green += 1
+    # 每颗灯 contain 后约 24×16=384 像素，取宽松下限。
+    assert red >= 200, red
+    assert green == 0, green
+
+
+def test_lit_image_mode_falls_back_to_circle_without_sprite(qapp):
+    # 缺图/解码失败回退圆形（填充色仍生效），两端同口径。
+    style = Style(
+        font_size_px=20,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        lit_enabled=True,
+        lit_style="image",
+        lit_image_path="",
+        lit_size=16,
+        lit_offset_x=-20,
+        lit_stroke_width=0,
+        lit_shadow=False,
+        signals_duration_ms=1000,
+        entry_anim="none",
+    )
+    img = _blank(140, 90)
+    paint_frame(img, _singer_track(singer_id=0), 400, style)
+
+    layout = _sayatoo_layout_for(_singer_track(singer_id=0), style, 400, w=140, h=90)
+    _assert_blue_pixels_in(
+        img,
+        left=int(layout.signal_x),
+        right=int(layout.text_x) - 1,
+    )
+
+
+def test_signal_volume_follows_section_head_entry_and_exit_animation(qapp):
+    # 指示灯/音量柱绑定在段首第一行：其入退场动画必须同时作用于柱体
+    # （与 native 行级 OpacityLayer 的口径一致）——入场淡入首帧柱体
+    # 不可见、中途半透明（ease_out(0.5)=0.75 → alpha≈191）、入场结束后
+    # 全亮；退场淡出中途 alpha≈143（ease_in(0.75)）、临终点趋近 0。
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QColor, QImage
+
+    style = Style(
+        font_size_px=20,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        line_tail_ms=800,
+        entry_anim="fade",
+        entry_lead_ms=800,
+        exit_anim="fade",
+        exit_fade_ms=800,
+        stroke_width_px=0,
+        stroke2_enabled=False,
+        decoration_kind="none",
+        lit_enabled=True,
+        lit_shadow=False,
+        lit_stroke_width=0,
+        signals_duration_ms=1000,
+        volume_column_spacing=0,
+        volume_flash_duration_ratio=0.0,
+    )
+    track = _singer_track(singer_id=0)
+
+    def bar_center_alpha(t_ms: int) -> int:
+        # 透明画布：柱体 alpha 即行动画透明度（_blank 是不透明底，不能用来测）。
+        img = QImage(160, 90, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.transparent)
+        paint_frame(img, track, t_ms, style)
+        layout = _sayatoo_layout_for(track, style, t_ms, w=160, h=90)
+        metrics = QFontMetrics(_build_font(style))
+        base_y = _signal_lit_y(
+            layout.baseline_y, metrics, style.volume_size, style,
+            _signal_stroke_extent(style, is_volume=True),
+        )
+        rects = _volume_signal_column_rects(
+            layout.signal_x, base_y, _volume_signal_geometry(style)
+        )
+        center = rects[0].center()
+        # pixelColor 才携带 alpha：PyQt6 的 QColor(int) 构造不按 QRgb 解析，
+        # QColor(0).alpha() 会得到 255（不透明黑）而不是 0。
+        return img.pixelColor(int(center.x()), int(center.y())).alpha()
+
+    # 显示窗 [0, 2800)：入场淡入 [0, 800]，退场淡出 [2000, 2800)。
+    # （退场时长按显示余量夹取：tail=0 时 exit_available=0，退场本来就不播。）
+    assert bar_center_alpha(0) < 20
+    assert 150 <= bar_center_alpha(400) <= 225
+    assert bar_center_alpha(900) >= 235
+    assert bar_center_alpha(2100) >= 150
+    assert bar_center_alpha(2100) > bar_center_alpha(2799)
+    assert bar_center_alpha(2799) < 40
 
 
 def test_paint_frame_applies_style_timing_offset(qapp):
