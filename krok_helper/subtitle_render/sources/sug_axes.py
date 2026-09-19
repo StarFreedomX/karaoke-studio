@@ -66,6 +66,9 @@ class AxisExtraUpdate:
     ``None`` = 整份（普通）副源的单轴更新，分组身份不适用。
     """
 
+    name: str | None = None
+    """匹配到的分组在新文件里的名字；应用时同步为该源的显示名（改名收敛）。"""
+
 
 @dataclass(frozen=True)
 class AxisReloadPlan:
@@ -170,6 +173,7 @@ def plan_split_axis_reload(
                     merge=merge,
                     candidate=candidates[position].track,
                     singer_ids=candidates[position].singer_ids,
+                    name=candidates[position].name,
                 )
             )
 

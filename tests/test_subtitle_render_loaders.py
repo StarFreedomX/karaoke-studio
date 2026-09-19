@@ -342,13 +342,16 @@ def test_workflow_handoff_splits_grouped_sug_into_sources(qapp, monkeypatch, tmp
     ] == ["酱"]
     assert win._extra_sources[0].sug_axis_singer_ids == frozenset({"b"})
     assert win._project_document.subtitle_axis_singer_ids == frozenset({"a"})
-    # 分组装完后下拉必须立刻出现分组名（分组副源装进 _extra_sources 发生在
-    # _apply_timing_track 的下拉刷新之后）；否则下拉只剩「主字幕 + 标题 1」，
-    # 用户会把默认标题条目误认成分组。
+    # 主分组名跟随主字幕槽位展示（下拉附注、底部轨道直接用组名），其余分组
+    # 各用自己的组名列为副字幕源。
+    assert win._project_document.subtitle_axis_name == "主轴"
     combo = win._lyrics_panel._source_combo
     assert [combo.itemText(i) for i in range(combo.count())] == [
-        "主字幕", "副轴", "标题 1"
+        "主字幕（主轴）", "副轴", "标题 1"
     ]
+    # 底部轨道 T1 恒标注「主字幕」，副轴车道用各自分组名。
+    win._sync_tracks_view()
+    assert [lane.name for lane in win._tracks_view._lanes] == ["主字幕", "副轴"]
 
 
 def test_workflow_handoff_same_groups_reload_updates_all_axes(
@@ -894,6 +897,7 @@ def test_project_reopen_restores_axis_filters_from_snapshot(qapp, monkeypatch, t
         {
             "subtitle_path": str(sug),
             "subtitle_sug_axis_singer_ids": ["a"],
+            "subtitle_sug_axis_name": "主轴",
             "extra_subtitle_sources": [
                 {"name": "副轴", "path": str(sug), "sug_axis_singer_ids": ["b"]}
             ],
@@ -910,6 +914,12 @@ def test_project_reopen_restores_axis_filters_from_snapshot(qapp, monkeypatch, t
     ] == ["酱"]
     assert win._extra_sources[0].sug_axis_singer_ids == frozenset({"b"})
     assert win._project_document.subtitle_axis_singer_ids == frozenset({"a"})
+    # 主分组名随快照恢复：重开后下拉仍显示「主字幕（主轴）」。
+    assert win._project_document.subtitle_axis_name == "主轴"
+    combo = win._lyrics_panel._source_combo
+    assert [combo.itemText(i) for i in range(combo.count())] == [
+        "主字幕（主轴）", "副轴", "标题 1"
+    ]
 
 
 def test_workflow_handoff_same_path_merges_preserving_overlays(

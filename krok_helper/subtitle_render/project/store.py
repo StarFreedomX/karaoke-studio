@@ -312,6 +312,7 @@ def project_payload(
     output: dict,
     background: Optional[dict] = None,
     subtitle_sug_axis_singer_ids: Optional[list[str]] = None,
+    subtitle_sug_axis_name: Optional[str] = None,
     line_layout_indices: Optional[list[int]] = None,
     line_breaks_before: Optional[list[str]] = None,
     char_role_labels: Optional[list] = None,
@@ -387,6 +388,8 @@ def project_payload(
             for value in subtitle_sug_axis_singer_ids
             if str(value).strip()
         ]
+    if subtitle_sug_axis_name and subtitle_sug_axis_name.strip():
+        payload["subtitle_sug_axis_name"] = subtitle_sug_axis_name.strip()
     if line_layout_indices is not None:
         payload["line_layout_indices"] = [int(v) for v in line_layout_indices]
     if line_breaks_before is not None:

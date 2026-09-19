@@ -544,6 +544,7 @@ def test_single_axis_reload_updates_primary_and_plain_extra() -> None:
 def test_project_document_persists_axis_filters() -> None:
     document = SubtitleProjectDocument(
         subtitle_axis_singer_ids=frozenset({"a"}),
+        subtitle_axis_name="主轴",
         extra_sources=[
             ExtraSubtitleSource(
                 name="副轴",
@@ -561,10 +562,29 @@ def test_project_document_persists_axis_filters() -> None:
     )
 
     assert payload["subtitle_sug_axis_singer_ids"] == ["a"]
+    assert payload["subtitle_sug_axis_name"] == "主轴"
     assert payload["extra_subtitle_sources"][0]["sug_axis_singer_ids"] == ["b"]
 
     plan = ProjectLoadPlan.from_data(payload)
     assert plan.subtitle_sug_axis_singer_ids == frozenset({"a"})
+    assert plan.subtitle_sug_axis_name == "主轴"
+
+    # 未分轴（或未命名）时不写 key，重开不会带回旧分组名。
+    unsplit = SubtitleProjectDocument(
+        subtitle_axis_singer_ids=None,
+        subtitle_axis_name=None,
+        preserved_project_data={
+            "subtitle_sug_axis_singer_ids": ["a"],
+            "subtitle_sug_axis_name": "主轴",
+        },
+    )
+    unsplit_payload = unsplit.to_project_data(
+        screen={"width": 1920, "height": 1080, "fps": 60},
+        selected_scheme_key="",
+        output={},
+    )
+    assert "subtitle_sug_axis_singer_ids" not in unsplit_payload
+    assert "subtitle_sug_axis_name" not in unsplit_payload
 
 
 def test_project_load_plan_distinguishes_missing_and_empty_axis_filter() -> None:

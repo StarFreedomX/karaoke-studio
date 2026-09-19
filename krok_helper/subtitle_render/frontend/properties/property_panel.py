@@ -643,9 +643,10 @@ class PropertyPanel(QWidget):
         super().__init__(parent)
         self._style = Style()
         self._syncing = False
-        # 时间卡片按轴上下文：names[0] 恒为「主字幕」；follows/override_views
-        # 与副字幕源一一对应。宿主经 set_timing_context 推送；源增删/重排后
-        # scope 重置为 0，杜绝把 A 轴的编辑写进 B 轴。
+        # 时间卡片按轴上下文：names[0] 恒为主字幕槽位（分轴时显示「主字幕
+        # （分组名）」）；follows/override_views 与副字幕源一一对应。宿主经
+        # set_timing_context 推送；源增删/重排后 scope 重置为 0，杜绝把 A 轴
+        # 的编辑写进 B 轴。
         self._timing_scope_names: list[str] = ["主字幕"]
         self._timing_follows: list[bool] = [True]
         self._timing_override_views: list[Optional[dict]] = [None]
@@ -2850,8 +2851,9 @@ class PropertyPanel(QWidget):
     ) -> None:
         """宿主推送时间卡片的轴上下文（源列表 / 跟随开关 / 各轴覆盖值）。
 
-        ``names[0]`` 恒为「主字幕」；``follows`` / ``override_views`` 与之名目
-        对齐（主轴恒 True / None）。源增删或重排后 scope 越界自动重置为 0。
+        ``names[0]`` 恒为主字幕槽位（分轴时形如「主字幕（分组名）」）；
+        ``follows`` / ``override_views`` 与之名目对齐（主轴恒 True / None）。
+        源增删或重排后 scope 越界自动重置为 0。
         """
 
         safe_names = [str(name) for name in names] or ["主字幕"]

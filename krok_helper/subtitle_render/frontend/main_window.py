@@ -1794,6 +1794,7 @@ class SubtitleRenderWindow(QWidget):
             self.load_subtitle_source(
                 plan.subtitle_path,
                 sug_axis_singer_ids=plan.subtitle_sug_axis_singer_ids,
+                sug_axis_name=plan.subtitle_sug_axis_name,
             )
             if self._timing_track is not None:
                 applied_track_state = apply_track_project_data(
@@ -3035,15 +3036,19 @@ class SubtitleRenderWindow(QWidget):
         path: Path,
         *,
         sug_axis_singer_ids: Optional[Collection[str]] = None,
+        sug_axis_name: Optional[str] = None,
     ) -> Optional[TimingTrack]:
         """加载字幕源文件。支持 SUG 项目（.sug）与 Nicokara 逐字 LRC（.lrc）。
 
-        ``sug_axis_singer_ids`` 仅供工程打开使用：按工程快照里持久化的主轴
-        过滤解析 ``.sug``（快照语义），而不是按文件当前的分组计划分轴。
+        ``sug_axis_singer_ids`` / ``sug_axis_name`` 仅供工程打开使用：按工程快照
+        里持久化的主轴过滤解析 ``.sug``（快照语义），而不是按文件当前的分组计
+        划分轴；``sug_axis_name`` 是主分组的展示名快照。
         """
         suffix = path.suffix.lower()
         if suffix == ".sug":
-            return self.load_from_sug(path, axis_singer_ids=sug_axis_singer_ids)
+            return self.load_from_sug(
+                path, axis_singer_ids=sug_axis_singer_ids, axis_name=sug_axis_name
+            )
         return self.load_from_lrc(path)
 
     def load_from_lrc(self, path: Path) -> Optional[TimingTrack]:
@@ -3068,6 +3073,7 @@ class SubtitleRenderWindow(QWidget):
         path: Path,
         *,
         axis_singer_ids: Optional[Collection[str]] = None,
+        axis_name: Optional[str] = None,
     ) -> Optional[TimingTrack]:
         """加载 SUG 项目文件，直接读取打轴数据而不导出中间 LRC。
 
@@ -3077,7 +3083,7 @@ class SubtitleRenderWindow(QWidget):
         工程打开（``_loading_project``）走快照语义：只按传入的
         ``axis_singer_ids`` 过滤主字幕（缺省 = 未分轴），副轴交给
         ``_apply_extra_subtitle_sources`` 按各自持久化的过滤重建，不在
-        这里按文件现状自动分轴。
+        这里按文件现状自动分轴；``axis_name`` 是主分组名的展示快照。
         """
         axes: Optional[list[SugAxisTrack]] = None
         persisted_filter: Optional[frozenset[str]] = None
@@ -3107,10 +3113,12 @@ class SubtitleRenderWindow(QWidget):
         if axes is not None:
             self._install_sug_axis_tracks(path, axes)
             if len(axes) > 1:
+                primary_name = axes[0].name
                 InfoBar.success(
                     title="已按 SUG 分组分轴",
                     content=(
-                        f"「{path.name}」共 {len(axes)} 个分组：主分组进入主字幕，"
+                        f"「{path.name}」共 {len(axes)} 个分组：主分组"
+                        f"「{primary_name}」进入主字幕，"
                         "其余分组已添加为副字幕源。"
                     ),
                     parent=self,
@@ -3119,6 +3127,9 @@ class SubtitleRenderWindow(QWidget):
                 )
         else:
             self._project_document.subtitle_axis_singer_ids = persisted_filter
+            self._project_document.subtitle_axis_name = (
+                (str(axis_name).strip() or None) if persisted_filter is not None else None
+            )
             self._primary_source_baseline = deepcopy(track)
         return track
 
@@ -3135,6 +3146,9 @@ class SubtitleRenderWindow(QWidget):
         primary_axis = axes[0]
         self._project_document.subtitle_axis_singer_ids = (
             primary_axis.singer_ids if primary_axis.is_split else None
+        )
+        self._project_document.subtitle_axis_name = (
+            primary_axis.name if primary_axis.is_split else None
         )
         self._primary_source_baseline = deepcopy(primary_axis.track)
         key = self._subtitle_source_key(path)
@@ -3304,6 +3318,7 @@ class SubtitleRenderWindow(QWidget):
         # 主字幕换了内容来源：旧的 .sug 轴身份与基线作废（SUG 路径随后会重新
         # 写入各自的值）。
         self._project_document.subtitle_axis_singer_ids = None
+        self._project_document.subtitle_axis_name = None
         # 旧主轴的分组副轴随主轴绑定，一并移除（.sug 分轴路径随后会按新分组
         # 计划重建）；普通（整份）副源是用户独立添加的，保留。
         if any(source.sug_axis_singer_ids is not None for source in self._extra_sources):
@@ -3816,16 +3831,19 @@ class SubtitleRenderWindow(QWidget):
         # 必须在移除失效副源之前做，删除会移动列表下标。
         if primary_slot is not None:
             self._primary_source_baseline = deepcopy(axes[0].track)
-        # 用户在 .sug 里调整过分组（主分组换人、副组成员变化）时，持久化
-        # 的轴过滤同步成文件里的最新分组，工程保存/重开不会退回旧分组。
+        # 用户在 .sug 里调整过分组（主分组换人、副组成员变化或改名）时，持久化
+        # 的轴过滤与分组名同步成文件里的最新分组，工程保存/重开不会退回旧分组。
         # （未分轴时保持 None 语义，不能用空集合污染快照。）
         if primary_owned and file_split:
             self._project_document.subtitle_axis_singer_ids = axes[0].singer_ids
+            self._project_document.subtitle_axis_name = axes[0].name
         for update in plan.extra_updates:
             source = self._extra_sources[update.index]
             source.source_baseline = deepcopy(update.candidate)
             if update.singer_ids is not None:
                 source.sug_axis_singer_ids = update.singer_ids
+            if update.name:
+                source.name = update.name
         for index in sorted(plan.removed_extra_indices, reverse=True):
             del self._extra_sources[index]
         if plan.extra_additions:
@@ -4734,6 +4752,16 @@ class SubtitleRenderWindow(QWidget):
             return None
         return len(self._extra_sources) + 1
 
+    def _primary_axis_group_name(self) -> Optional[str]:
+        """主字幕槽位对应的 SUG 主分组名；未分轴 / 未知返回 ``None``。"""
+        name = str(self._project_document.subtitle_axis_name or "").strip()
+        return name or None
+
+    def _primary_source_label(self) -> str:
+        """主字幕在字幕源下拉 / 时间卡片里的显示名：分轴时附上主分组名。"""
+        name = self._primary_axis_group_name()
+        return f"主字幕（{name}）" if name else "主字幕"
+
     def _refresh_source_ui(self) -> None:
         """刷新歌词面板的字幕源下拉；无主字幕时隐藏。"""
         self._push_timing_context()
@@ -4742,7 +4770,9 @@ class SubtitleRenderWindow(QWidget):
             self._active_title_index = None
             self._lyrics_panel.set_sources([], 0)
             return
-        names = ["主字幕"] + [source.name for source in self._extra_sources]
+        names = [self._primary_source_label()] + [
+            source.name for source in self._extra_sources
+        ]
         names.extend(self._title_source_names(self._style))
         self._active_source_index = max(
             0, min(self._active_source_index, len(self._extra_sources))
@@ -4782,7 +4812,8 @@ class SubtitleRenderWindow(QWidget):
                 dict(timing.overrides) if timing.overrides else None
             )
         self._property_panel.set_timing_context(
-            ["主字幕"] + [source.name for source in self._extra_sources],
+            [self._primary_source_label()]
+            + [source.name for source in self._extra_sources],
             follows,
             override_views,
         )
@@ -4852,6 +4883,7 @@ class SubtitleRenderWindow(QWidget):
         if self._timing_track is None:
             self._tracks_view.set_tracks([])
             return
+        # T1 恒标注「主字幕」（轨道名列宽有限，分组名在下拉/时间卡片里展示）。
         named = [("主字幕", self._timing_track)]
         named.extend((source.name, source.track) for source in self._extra_sources)
         self._tracks_view.set_tracks(named)

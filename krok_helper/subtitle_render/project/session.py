@@ -39,6 +39,7 @@ _PROJECT_OWNED_KEYS = frozenset(
         "schema_version",
         "subtitle_path",
         "subtitle_sug_axis_singer_ids",
+        "subtitle_sug_axis_name",
         "video_path",
         "audio_path",
         "style",
@@ -131,6 +132,8 @@ class SubtitleProjectDocument:
     subtitle_path: Optional[Path] = None
     subtitle_axis_singer_ids: Optional[frozenset[str]] = None
     """主字幕槽位的 SUG 轴过滤（主分组的歌手集合）；``None`` = 未分轴。"""
+    subtitle_axis_name: Optional[str] = None
+    """主字幕槽位对应的 SUG 主分组名（仅展示用）；``None`` = 未分轴或未知。"""
     video_path: Optional[Path] = None
     video_info: Optional[MediaInfo] = None
     background_source: Optional[BackgroundSource] = None
@@ -210,6 +213,7 @@ class SubtitleProjectDocument:
         self.extra_sources = []
         self.subtitle_path = None
         self.subtitle_axis_singer_ids = None
+        self.subtitle_axis_name = None
         self.video_path = None
         self.video_info = None
         self.background_source = None
@@ -260,6 +264,7 @@ class SubtitleProjectDocument:
                 if self.subtitle_axis_singer_ids is not None
                 else None
             ),
+            subtitle_sug_axis_name=self.subtitle_axis_name,
             video_path=self.video_path,
             audio_path=independent_audio,
             background=(

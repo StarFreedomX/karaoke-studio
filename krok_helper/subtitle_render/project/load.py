@@ -462,6 +462,12 @@ def _sug_axis_singer_ids(value: object) -> Optional[frozenset[str]]:
     return frozenset(str(item).strip() for item in value if str(item).strip())
 
 
+def _sug_axis_name(value: object) -> Optional[str]:
+    """主字幕槽位对应的 SUG 主分组名（快照字段，仅展示用）。"""
+    text = str(value).strip() if isinstance(value, str) else ""
+    return text or None
+
+
 def _apply_animation_overrides(track: TimingTrack, payload: object) -> None:
     if not isinstance(payload, list):
         return
@@ -483,6 +489,7 @@ class ProjectLoadPlan:
     audio_path: Optional[Path]
     background: Optional[dict] = None
     subtitle_sug_axis_singer_ids: Optional[frozenset[str]] = None
+    subtitle_sug_axis_name: Optional[str] = None
     schema_version: int = 0
     line_breaks_before: Any = None
     line_layout_indices: Any = None
@@ -531,6 +538,9 @@ class ProjectLoadPlan:
             background=background if isinstance(background, dict) else None,
             subtitle_sug_axis_singer_ids=_sug_axis_singer_ids(
                 source.get("subtitle_sug_axis_singer_ids")
+            ),
+            subtitle_sug_axis_name=_sug_axis_name(
+                source.get("subtitle_sug_axis_name")
             ),
             schema_version=_schema_version(source.get("schema_version")),
             line_breaks_before=source.get("line_breaks_before"),
