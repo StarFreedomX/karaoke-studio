@@ -1715,6 +1715,61 @@ def test_lit_image_mode_falls_back_to_circle_without_sprite(qapp):
     )
 
 
+def test_shape_lamps_render_when_time_offset_covers_the_duration(qapp):
+    # 回归：时间偏移 ≥ 有效持续时间时提前量为 0，信号只是从歌词起点开始，
+    # 不是禁用。resolve_signal_display_lines 此前按提前量 ≤ 0 短路，会把
+    # 灯组宿主行整体过滤掉（渲染层拿不到行，灯完全消失）。
+    style = Style(
+        font_size_px=20,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        lit_enabled=True,
+        lit_style="circle",
+        lit_size=16,
+        lit_offset_x=-20,
+        lit_stroke_width=0,
+        lit_shadow=False,
+        signals_duration_ms=1000,
+        lit_time_offset_ms=1000,
+        entry_anim="none",
+    )
+    img = _blank(140, 90)
+    paint_frame(img, _singer_track(singer_id=0), 1_200, style)
+
+    layout = _sayatoo_layout_for(_singer_track(singer_id=0), style, 1_200, w=140, h=90)
+    _assert_blue_pixels_in(
+        img,
+        left=int(layout.signal_x),
+        right=int(layout.text_x) - 1,
+    )
+
+
+def test_volume_bars_render_when_time_offset_covers_the_duration(qapp):
+    # 音量柱同口径：offset=duration 时柱体从歌词起点开始填充，正常显示。
+    style = Style(
+        font_size_px=20,
+        line_y_margin_px=10,
+        dual_line_layout=False,
+        line_lead_in_ms=0,
+        volume_enabled=True,
+        volume_duration_ms=1000,
+        volume_time_offset_ms=1000,
+        volume_flash_duration_ratio=0.0,
+        entry_anim="none",
+    )
+    img = _blank(160, 90)
+    paint_frame(img, _singer_track(singer_id=0), 1_200, style)
+
+    layout = _sayatoo_layout_for(_singer_track(singer_id=0), style, 1_200, w=160, h=90)
+    assert layout.signal_x is not None
+    _assert_blue_pixels_in(
+        img,
+        left=int(layout.signal_x),
+        right=int(layout.text_x) - 1,
+    )
+
+
 def test_signal_volume_follows_section_head_entry_and_exit_animation(qapp):
     # 指示灯/音量柱绑定在段首第一行：其入退场动画必须同时作用于柱体
     # （与 native 行级 OpacityLayer 的口径一致）——入场淡入首帧柱体

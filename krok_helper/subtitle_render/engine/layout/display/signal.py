@@ -101,9 +101,17 @@ def resolve_signal_display_lines(
     logical_w: int | None = None,
     logical_h: int | None = None,
 ) -> list[DisplayLine]:
-    """Filter visible candidates to section heads that own a guide signal."""
+    """Filter visible candidates to section heads that own a guide signal.
 
-    if not lit_signal_active(style) or signal_lead_in_ms(style) <= 0:
+    本函数是渲染层（Painter 的 signal_lines / native 的段首行窗口）获取
+    灯组宿主行的唯一入口，只能按「模块是否启用」过滤。时间偏移 ≥ 有效
+    持续时间时信号只是从歌词起点开始（提前量 0，窗口不早于行起点），
+    并非禁用；提前量只归显示窗口调度管（schedule 的
+    ``max(lead, signal_lead)`` 天然兼容 0），在这里按提前量短路会把灯组
+    整体过滤掉。
+    """
+
+    if not lit_signal_active(style):
         return []
     signal_heads = signal_head_context(track, style)
     if signal_heads is None:
