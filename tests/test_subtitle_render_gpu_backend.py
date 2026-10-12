@@ -13716,3 +13716,43 @@ def test_gpu_vector_strokes_preserve_mirrored_solids_and_holes(animation, with_h
             assert actual[centre_y, right_body_x, 3] > 240
             expected_alpha = 0 if with_hole else 255
             assert int(actual[centre_y, left_body_x, 3]) == pytest.approx(expected_alpha, abs=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_vector_round_stroke_preserves_circular_corners():
+    """Cached round joins must follow a disk, rather than coarse polygon chords."""
+    symbol = GuideSymbol(
+        path_commands=(("M", 0, -1000), ("L", 1000, -1000),
+                       ("L", 1000, 0), ("L", 0, 0), ("Z",)),
+        units_per_em=1000, advance_width=1000,
+    )
+    track = TimingTrack(lines=[TimingLine(
+        chars=[TimingChar("\uFFFC", 1000, vector_glyph=symbol)], end_ms=2000,
+    )])
+    style = _g1_style(
+        font_size_px=120, dual_line_layout=False, stroke_width_px=32,
+        stroke2_enabled=False, decoration_kind="none",
+        entry_anim="none", exit_anim="none", karaoke_anim="none",
+    )
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30) as renderer:
+        _, frames = _render_g1_frames(
+            renderer, style, (1000,), force_warp=True, track=track,
+            realization_enabled=False,
+        )
+    alpha = np.frombuffer(frames[0], dtype=np.uint8).reshape(360, 640, 4)[:, :, 3]
+    ink = alpha > 127
+    ys, xs = np.where(ink)
+    radius = 16.0
+    # The exact silhouette is the source rectangle expanded by a radius-16
+    # disk. Evaluate pixel centres, independently of either renderer's paths.
+    left, right = xs.min() + radius, xs.max() + 1 - radius
+    top, bottom = ys.min() + radius, ys.max() + 1 - radius
+    yy, xx = np.indices(alpha.shape, dtype=float)
+    xx += 0.5
+    yy += 0.5
+    dx = np.maximum(np.maximum(left - xx, xx - right), 0)
+    dy = np.maximum(np.maximum(top - yy, yy - bottom), 0)
+    ideal = dx * dx + dy * dy <= radius * radius
+    intersection = np.count_nonzero(ideal & ink)
+    union = np.count_nonzero(ideal | ink)
+    assert intersection / union >= 0.998

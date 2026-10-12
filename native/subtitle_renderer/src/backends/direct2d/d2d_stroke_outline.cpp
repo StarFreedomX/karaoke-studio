@@ -174,7 +174,8 @@ Microsoft::WRL::ComPtr<ID2D1PathGeometry> strokeOutlineGeometry(
     );
     const Clipper2Lib::PathsD inflated = Clipper2Lib::InflatePaths(
         filled, strokeWidth * 0.5, Clipper2Lib::JoinType::Round,
-        Clipper2Lib::EndType::Polygon, 2.0, 0.02, 4
+        // PathsD takes coordinate precision before arc tolerance.
+        Clipper2Lib::EndType::Polygon, 2.0, 4, 0.02
     );
     if (inflated.empty()) {
         return {};
