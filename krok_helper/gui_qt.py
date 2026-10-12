@@ -377,7 +377,7 @@ class KrokHelperQtApp(QMainWindow):
         # 代理缓存），不等用户用到对应功能才清；删不掉的文件下次启动再试。
         # 同时回收历史上散落在 %TEMP% 顶层的旧缓存目录（krok_merge_preview /
         # KaraokeStudioPreviewCache），全部收敛到 LinKLyrics 统一根下。
-        self._report_startup(35, "正在清理预览临时文件")
+        self._report_startup(33, "正在清理预览临时文件")
         from krok_helper.app_paths import purge_legacy_temp_dirs
         from krok_helper.audio_processing.merge.page import purge_stale_preview_files
         from krok_helper.subtitle_render.frontend.preview.preview_media import (
