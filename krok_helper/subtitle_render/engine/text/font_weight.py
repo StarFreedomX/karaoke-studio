@@ -160,16 +160,8 @@ def build_weight_font(
 
 
 def clear_font_weight_cache() -> None:
-    """字体装卸后清空进程级缓存（能力层 + 缺字回退层）。"""
+    """字体装卸后清空能力缓存；回退层按字体库代际自动失效。"""
     clear_capabilities_cache()
-    try:  # 延迟导入：font_fallback 正向依赖本模块，模块级反向导入会成环。
-        from krok_helper.subtitle_render.engine.text.font_fallback import (
-            clear_font_fallback_cache,
-        )
-
-        clear_font_fallback_cache()
-    except Exception:  # noqa: BLE001 — 缓存清理失败不影响字体装卸主流程
-        pass
 
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ _FALLBACK_TABLE: dict[tuple, str | None] = {}
 _FALLBACK_MAX = 65536
 _TABLE_LOCK = threading.RLock()
 
-# 簇覆盖/回退解析缓存（GUI 线程预热用），键同回退表去掉代际。
+# 簇覆盖/回退解析缓存（GUI 线程预热用），槽位键包含字体库代际。
 _RESOLUTION_CACHE: dict[tuple, tuple[str, ...]] = {}
 _RAW_FONT_CACHE: dict[tuple, QRawFont] = {}
 _RAW_FONT_CACHE_MAX = 256
@@ -101,7 +101,12 @@ def grapheme_clusters(text: str) -> tuple[str, ...]:
 
 
 def _slot_key(family: str, weight: int, italic: bool) -> tuple:
-    return (canonical_family(str(family)), int(weight), bool(italic))
+    return (
+        capabilities_generation(),
+        canonical_family(str(family)),
+        int(weight),
+        bool(italic),
+    )
 
 
 def slot_font(family: str, weight: int, italic: bool) -> QFont:

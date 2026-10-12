@@ -109,6 +109,34 @@ def test_capabilities_cache_invalidates_on_generation_bump():
     assert second == first
 
 
+def test_font_library_change_invalidates_fallback_and_coverage_caches(monkeypatch):
+    from krok_helper.subtitle_render.engine.text import font_fallback as fallback
+    from krok_helper.subtitle_render.engine.text.font_weight import clear_font_weight_cache
+
+    monkeypatch.setattr(fallback, "canonical_family", lambda family: family)
+    monkeypatch.setattr(fallback, "missing_clusters", lambda *args: ("漢",))
+    monkeypatch.setattr(
+        fallback, "resolve_fallback_families", lambda *args: {"漢": "First"}
+    )
+    fallback.clear_font_fallback_cache()
+    try:
+        fallback.prewarm_fallback("Test", 400, False, ["漢"])
+        assert fallback.lookup_fallback("Test", 400, False, "漢") == "First"
+        assert fallback.missing_clusters_lookup("Test", 400, False, "漢") == ("漢",)
+
+        clear_font_weight_cache()
+        assert fallback.lookup_fallback("Test", 400, False, "漢") is None
+        assert fallback.missing_clusters_lookup("Test", 400, False, "漢") is None
+
+        monkeypatch.setattr(
+            fallback, "resolve_fallback_families", lambda *args: {"漢": "Second"}
+        )
+        fallback.prewarm_fallback("Test", 400, False, ["漢"])
+        assert fallback.lookup_fallback("Test", 400, False, "漢") == "Second"
+    finally:
+        fallback.clear_font_fallback_cache()
+
+
 # =========================================================================
 # 决策层：weight + italic 联合匹配
 # =========================================================================
