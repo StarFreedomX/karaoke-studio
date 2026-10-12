@@ -13656,3 +13656,63 @@ def test_gpu_applies_non_weight_axis_from_decision(monkeypatch) -> None:
     assert width_condensed < width_default * 0.92, (
         f"wdth=75 未生效：默认宽 {width_default}、收窄后 {width_condensed}"
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("animation", ["none", "utopia", "utopia_scanline"])
+@pytest.mark.parametrize("with_hole", [False, True])
+def test_gpu_vector_strokes_preserve_mirrored_solids_and_holes(animation, with_hole):
+    """Independent mirrored contours are solids; nested opposite contours are holes."""
+    def rectangle(left, top, right, bottom, reverse=False):
+        points = [(left, top), (right, top), (right, bottom), (left, bottom)]
+        if reverse:
+            points.reverse()
+        return (("M", *points[0]), *(('L', *point) for point in points[1:]), ("Z",))
+
+    left = rectangle(0.0, -800.0, 350.0, 0.0)
+    hole = rectangle(25.0, -650.0, 325.0, -150.0, reverse=True) if with_hole else ()
+    state = KaraokeColorState(
+        text=PaintFill(mode="solid", color="#FFFFFF"),
+        stroke=PaintFill(mode="solid", color="#FF0000"),
+        stroke2=PaintFill(mode="solid", color="#0000FF"),
+    )
+    style = _g1_style(
+        font_size_px=120, dual_line_layout=False,
+        stroke_width_px=16, stroke2_enabled=True, stroke2_width_px=9,
+        decoration_kind="none", entry_anim="none", exit_anim="none",
+        karaoke_anim=animation,
+        karaoke_colors=KaraokeColors(before=state, after=state),
+    )
+    timestamps = (1000, 1001, 1005, 1010, 1100, 1500, 1995, 2001)
+    frames = []
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30) as renderer:
+        for mirrored in (False, True):
+            symbol = GuideSymbol(
+                path_commands=left + hole + rectangle(650.0, -800.0, 1000.0, 0.0, mirrored),
+                units_per_em=1000, advance_width=1000.0,
+            )
+            track = TimingTrack(lines=[TimingLine(
+                chars=[TimingChar("\uFFFC", 1000, vector_glyph=symbol)], end_ms=2000,
+            )])
+            _, rendered = _render_g1_frames(
+                renderer, style, timestamps, force_warp=True, track=track,
+                realization_enabled=False,
+            )
+            frames.append(rendered)
+
+    for t_ms, reference, mirrored in zip(timestamps, *frames):
+        expected = np.frombuffer(reference, dtype=np.uint8).reshape(360, 640, 4)
+        actual = np.frombuffer(mirrored, dtype=np.uint8).reshape(360, 640, 4)
+        assert np.abs(actual.astype(int) - expected.astype(int)).max() <= 2, t_ms
+        # A hole's centre must remain transparent, while both solid contours
+        # retain their body pixels. Use the static first frame's actual bounds.
+        if t_ms == timestamps[0]:
+            ys, xs = np.where(actual[:, :, 3] > 0)
+            assert xs.size > 0
+            centre_y = (ys.min() + ys.max()) // 2
+            centre_x = (xs.min() + xs.max()) // 2
+            left_body_x = centre_x - 39
+            right_body_x = centre_x + 39
+            assert actual[centre_y, right_body_x, 3] > 240
+            expected_alpha = 0 if with_hole else 255
+            assert int(actual[centre_y, left_body_x, 3]) == pytest.approx(expected_alpha, abs=5)
