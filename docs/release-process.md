@@ -168,6 +168,7 @@ Release X.Y.Z.N                                       # APP_VERSION + README + C
 - **一句性质概述**（例：「仅 submodule 同步，主程序代码无改动」「修复 Firefox cookie 导入失败」）。
 - 分类条目，**逐条**列出用户能感知的差异。
 - 不要写内部重构、CI、文档之类纯开发者改动——这些放 commit message 里。
+- **逐笔核对提交作者并署名**：用 `git log <上一个tag>..HEAD --format='%an <%ae> %s'` 核对作者，必要时通过 GitHub 提交记录确认账号，不得凭猜测署名。GitHub 用户 `Myosotis11037` 的所有提交统一标注 **`@凛夜`**；`Xuan-cc` 的提交标注 `@Xuan-cc`。CHANGELOG 与 release body 使用同一署名映射。
 
 参考样板：v3.0.2 / v3.0.2.1。
 

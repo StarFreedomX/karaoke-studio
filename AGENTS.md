@@ -133,7 +133,7 @@ git submodule status
 - Tag 格式 `vX.Y.Z[.N]`，push tag 触发 [`.github/workflows/release.yml`](.github/workflows/release.yml) 自动打包+发 release。
 - CI 会从 `CHANGELOG.md` 自动提取当前 tag 对应的中文 release body；打 tag 前必须运行 notes 命令校验，避免更新弹窗展示错误内容。
 - **写 CHANGELOG 时必须在版本段顶部添加反馈群提示**：`<span style="color:#d64545"><b>Lin-K/SUG 反馈交流群 QQ 1108437280</b></span>`（HTML span 写法原样保留，更新弹窗按富文本渲染）。
-- **写 CHANGELOG 时必须核对实际提交作者**：用 `git log <上一个tag>..HEAD --format='%an %s'` 查看本版本各提交的作者，在对应条目后加上 `@作者名`（GitHub 用户名，如 `@Myosotis11037` / `@Xuan-cc`），不要凭猜测署名。
+- **写 CHANGELOG 时必须核对实际提交作者**：用 `git log <上一个tag>..HEAD --format='%an %s'` 查看本版本各提交的作者，在对应条目后加上 `@作者名`，不要凭猜测署名。**署名映射：GitHub 用户 `Myosotis11037` 的所有提交统一标注 `@凛夜`；`Xuan-cc` 的提交标注 `@Xuan-cc`。** CHANGELOG 与 release body 均遵守此规则。
 - 改 `APP_VERSION` 时同时改 [`README.md`](README.md) 顶部「当前版本」（容易漏）。
 - 发版准备统一运行 `python scripts/release.py prepare X.Y.Z[.N]`；补全 CHANGELOG 后运行 `python scripts/release.py notes X.Y.Z[.N]` 生成中文 release body。详见 [`docs/release-process.md`](docs/release-process.md)。
 
