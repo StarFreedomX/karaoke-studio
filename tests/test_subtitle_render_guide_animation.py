@@ -268,8 +268,10 @@ def _avatar_only_style(**overrides) -> Style:
     )
     kwargs = dict(
         font_size_px=48,
-        line_lead_in_ms=0,
-        line_tail_ms=0,
+        line_y_position="center",
+        dual_line_layout=False,
+        line_lead_in_ms=300,
+        line_tail_ms=300,
         karaoke_colors=KaraokeColors(before=state, after=state),
     )
     kwargs.update(overrides)

@@ -129,11 +129,18 @@ def _section_sizes(widget) -> list[int]:
 
 def test_boundary_drag_resizes_layout_column(window) -> None:
     widget, _track = window
-    widget.resize(1080, 640)
+    widget._lyrics_panel.setMinimumWidth(650)
+    widget.resize(1600, 640)
     widget.show()
     QApplication.instance().processEvents()
     header = widget._lyrics_panel.table_widget.horizontalHeader()
     viewport = header.viewport()
+    # Give this drag fixture room to shrink even when restored/default widths
+    # start the layout column at its minimum.
+    header.resizeSection(
+        COL_LAYOUT, widget._lyrics_panel._column_minimum_width(COL_LAYOUT) + 60
+    )
+    QApplication.instance().processEvents()
     boundary = _boundary_x(widget)
     before = _section_sizes(widget)
     minimum = widget._lyrics_panel._column_minimum_width(COL_LAYOUT)

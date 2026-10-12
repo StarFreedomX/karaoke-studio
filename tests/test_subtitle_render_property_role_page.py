@@ -99,7 +99,7 @@ def test_role_font_builder_preserves_page_order_and_flags(qapp) -> None:
     assert host._font_stroke_controls == {}
     assert host._font_controls == {}
     assert host._font_size_follow_checks == {}
-    assert host._ruby_anchor_check.toolTip().startswith("关闭后")
+    assert host._ruby_anchor_check.toolTip() == "该角色的注音参与高度计算"
 
 
 def test_role_font_builder_routes_role_flags(qapp) -> None:
