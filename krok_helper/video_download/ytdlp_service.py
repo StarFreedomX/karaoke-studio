@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
@@ -80,7 +81,7 @@ ARIA2C_DOWNLOAD_ARGS = (
     "--console-log-level=error",
 )
 # yt-dlp 走外部下载器时只在结束时回调一次 progress_hook，进度条会整段卡住不动。
-# 轮询 ``.part`` 文件大小把进度补回来。
+# 轮询 aria2 控制文件的分片记录把进度补回来。
 ARIA2C_PROGRESS_POLL_SECONDS = 0.5
 PART_SUFFIX = ".part"
 ARIA2C_CONTROL_SUFFIX = ".aria2"
@@ -413,35 +414,67 @@ class YtDlpService:
 
         youtube_dl = self._import_ytdlp()
         use_python_backend = youtube_dl is not None and not self._should_prefer_cli_backend(task.url)
-        try:
-            if use_python_backend:
-                self._download_with_python_retry(
-                    youtube_dl,
-                    task,
-                    options,
-                    progress_callback,
-                    save_dir=save_dir,
-                    output_stem=output_stem,
-                    outtmpl=outtmpl,
-                    selected_format=selected_format,
-                    extractor_args_hint=extractor_args_hint,
+        if not self._use_aria2c_for(task.url, options):
+            self._prepare_native_resume(save_dir, output_stem)
+        attempt = 0
+        retry_limit = max(0, int(options.retry_count))
+        while True:
+            try:
+                if task.cancel_requested:
+                    raise DownloadCancelledError("下载已取消。")
+                self._run_download_attempt(
+                    youtube_dl, use_python_backend, task, options, progress_callback,
+                    save_dir=save_dir, output_stem=output_stem, outtmpl=outtmpl,
+                    selected_format=selected_format, extractor_args_hint=extractor_args_hint,
                 )
-            else:
-                self._download_with_cli_retry(
-                    task,
-                    options,
-                    progress_callback,
-                    save_dir=save_dir,
-                    output_stem=output_stem,
-                    outtmpl=outtmpl,
-                    selected_format=selected_format,
-                    extractor_args_hint=extractor_args_hint,
-                )
-        except DownloadCancelledError:
-            self._cleanup_cancelled_outputs(save_dir, output_stem, preexisting_outputs)
-            raise
+                break
+            except DownloadCancelledError:
+                self._cleanup_cancelled_outputs(save_dir, output_stem, preexisting_outputs)
+                raise
+            except VideoDownloadError as exc:
+                aria2_failed = self._should_retry_without_aria2c(task.url, options, str(exc))
+                if not aria2_failed and not self._is_transient_download_error(str(exc)):
+                    raise
+                if attempt >= retry_limit:
+                    if not aria2_failed:
+                        raise
+                    self._prepare_native_resume(save_dir, output_stem)
+                    options = replace(options, use_aria2c=False)
+                    attempt = 0
+                else:
+                    attempt += 1
+                progress_callback({"status": "retrying", "retry_attempt": attempt,
+                                   "retry_limit": retry_limit})
+                deadline = time.monotonic() + min(2 ** max(0, attempt - 1), 5)
+                while time.monotonic() < deadline:
+                    if task.cancel_requested:
+                        self._cleanup_cancelled_outputs(save_dir, output_stem, preexisting_outputs)
+                        raise DownloadCancelledError("下载已取消。")
+                    time.sleep(0.1)
 
         self._verify_downloaded_media(task)
+
+    @staticmethod
+    def _is_transient_download_error(message: str) -> bool:
+        lower = message.lower()
+        return any(token in lower for token in (
+            "timed out", "timeout", "connection", "incomplete", "remote end closed",
+            "temporarily unavailable", "http error 403", "http error 408",
+            "http error 429", "http error 5", "unable to download video data",
+            "网络超时", "访问被拒绝",
+        ))
+
+    def _run_download_attempt(
+        self, youtube_dl, use_python_backend: bool, task: DownloadTask,
+        options: DownloadOptions, progress_callback: Callable[[dict[str, Any]], None],
+        **kwargs,
+    ) -> None:
+        if use_python_backend:
+            self._download_with_python_retry(
+                youtube_dl, task, options, progress_callback, **kwargs,
+            )
+        else:
+            self._download_with_cli_retry(task, options, progress_callback, **kwargs)
 
     def _extract_info_with_best_backend(
         self,
@@ -709,20 +742,6 @@ class YtDlpService:
                     extractor_args_hint=extractor_args_hint,
                 )
                 return
-            if self._should_retry_without_aria2c(task.url, options, str(exc)):
-                self._clear_partial_downloads(save_dir, output_stem)
-                self._download_with_python_api(
-                    youtube_dl,
-                    task,
-                    replace(options, use_aria2c=False),
-                    progress_callback,
-                    save_dir=save_dir,
-                    output_stem=output_stem,
-                    outtmpl=outtmpl,
-                    selected_format=selected_format,
-                    extractor_args_hint=extractor_args_hint,
-                )
-                return
             raise
 
     def _download_with_python_api(
@@ -744,7 +763,8 @@ class YtDlpService:
             "noplaylist": True,
             "outtmpl": outtmpl,
             "format": selected_format,
-            "overwrites": True,
+            "overwrites": False,
+            "continuedl": True,
             "progress_hooks": [self._build_hook(task, progress_callback)],
             "writethumbnail": bool(options.download_thumbnail),
             "writesubtitles": bool(options.download_subtitle),
@@ -768,7 +788,7 @@ class YtDlpService:
         before_pids = self._snapshot_child_pids()
         done_event = threading.Event()
         watcher = self._start_cancel_watcher(task, done_event, before_pids)
-        # 外部下载器不回调逐字节进度，靠轮询 .part 把进度条喂活
+        # 外部下载器不回调逐字节进度，靠轮询 aria2 控制文件补出进度。
         progress_watcher = (
             self._start_part_progress_watcher(save_dir, output_stem, done_event, progress_callback)
             if "external_downloader" in ydl_opts
@@ -876,7 +896,8 @@ class YtDlpService:
             "--no-warnings",
             "--no-update",
             "--no-playlist",
-            "--force-overwrites",
+            "--no-overwrites",
+            "--continue",
             "--output",
             outtmpl,
             "--format",
@@ -920,6 +941,10 @@ class YtDlpService:
         )
         done_event = threading.Event()
         watcher = self._start_cancel_watcher(task, done_event, before_pids, process=process)
+        progress_watcher = (
+            self._start_part_progress_watcher(save_dir, output_stem, done_event, progress_callback)
+            if self._use_aria2c_for(task.url, options) else None
+        )
         output_lines: list[str] = []
 
         try:
@@ -952,6 +977,9 @@ class YtDlpService:
         finally:
             done_event.set()
             watcher.join(timeout=1)
+
+            if progress_watcher is not None:
+                progress_watcher.join(timeout=1)
 
         if return_code != 0:
             if task.cancel_requested:
@@ -1461,10 +1489,10 @@ class YtDlpService:
         done_event: threading.Event,
         progress_callback: Callable[[dict[str, Any]], None],
     ) -> threading.Thread:
-        """轮询 ``.part`` 文件大小，替外部下载器补出进度回调。
+        """轮询 aria2 控制文件，替外部下载器补出进度回调。
 
         aria2c 这类外部下载器只在整段结束时回调一次 progress_hook，进度条会从 0
-        直接跳到 100。这里按固定间隔上报当前 ``.part`` 的字节数，上层
+        直接跳到 100。这里按固定间隔上报已完成分片的字节数，上层
         ``_update_task_download_phase`` 用 ``filename`` 区分视频/音频两个阶段。
         """
 
@@ -1513,6 +1541,25 @@ class YtDlpService:
                 path.unlink()
             except OSError:
                 pass
+
+    def _prepare_native_resume(self, save_dir: Path, output_stem: str) -> None:
+        """Keep only the verified contiguous prefix when switching from aria2 to HTTP."""
+        for control in self._iter_output_candidates(save_dir, output_stem):
+            if not control.name.endswith(PART_SUFFIX + ARIA2C_CONTROL_SUFFIX):
+                continue
+            part = control.with_name(control.name[:-len(ARIA2C_CONTROL_SUFFIX)])
+            state = self._read_aria2_piece_state(part)
+            prefix = 0
+            if state is not None:
+                piece_length, total, bits = state
+                for index in range((total + piece_length - 1) // piece_length):
+                    if not bits[index // 8] & (0x80 >> (index % 8)):
+                        break
+                    prefix = min((index + 1) * piece_length, total)
+            if part.exists():
+                with part.open("r+b") as stream:
+                    stream.truncate(min(prefix, part.stat().st_size))
+            control.unlink()
 
     # ── 完整性校验 ─────────────────────────────────────────────────────────
     def _verify_downloaded_media(self, task: DownloadTask) -> None:
@@ -1611,6 +1658,18 @@ class YtDlpService:
         bitfield 里每个置位的 bit 代表一个已完成的分片。正在下载中的分片不计入，
         所以这个读数偏保守——但它是单调的，也不会骗人。
         """
+        state = self._read_aria2_piece_state(part_path)
+        if state is None:
+            return None
+        piece_length, total_length, bitfield = state
+        downloaded = sum(
+            min(piece_length, total_length - index * piece_length)
+            for index in range((total_length + piece_length - 1) // piece_length)
+            if bitfield[index // 8] & (0x80 >> (index % 8))
+        )
+        return downloaded, total_length
+
+    def _read_aria2_piece_state(self, part_path: Path) -> tuple[int, int, bytes] | None:
         try:
             data = (part_path.parent / f"{part_path.name}{ARIA2C_CONTROL_SUFFIX}").read_bytes()
         except OSError:
@@ -1624,6 +1683,8 @@ class YtDlpService:
             offset += 2 + 4  # version + extension
             infohash_len = int.from_bytes(data[offset:offset + 4], "big")
             offset += 4 + infohash_len
+            if offset + 24 > len(data):
+                return None
             piece_length = int.from_bytes(data[offset:offset + 4], "big")
             offset += 4
             total_length = int.from_bytes(data[offset:offset + 8], "big")
@@ -1636,8 +1697,10 @@ class YtDlpService:
 
         if len(bitfield) != bitfield_length or piece_length <= 0 or total_length <= 0:
             return None
-        completed_pieces = sum(bin(byte).count("1") for byte in bitfield)
-        return min(completed_pieces * piece_length, total_length), total_length
+        piece_count = (total_length + piece_length - 1) // piece_length
+        if len(bitfield) != (piece_count + 7) // 8:
+            return None
+        return piece_length, total_length, bitfield
 
     def _newest_part_file(self, save_dir: Path, output_stem: str) -> tuple[Path, int] | None:
         newest: tuple[Path, int] | None = None
@@ -1851,7 +1914,7 @@ class YtDlpService:
         lower = message.lower()
         if "aria2c" in lower and "exited with code" in lower:
             return (
-                "多线程下载器 aria2c 启动失败。已自动改用内置分块下载重试；"
+                "多线程下载器 aria2c 下载失败，将先保留断点重试，仍失败时改用内置分块下载；"
                 "如果仍然失败，可以在下载设置里关掉「B 站使用多线程下载（aria2c）」。"
             )
         if "ffmpeg" in lower and ("not found" in lower or "not installed" in lower):

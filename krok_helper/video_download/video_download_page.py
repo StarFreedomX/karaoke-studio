@@ -3075,8 +3075,14 @@ class VideoDownloadPage(QWidget):
             return
         now = time.monotonic()
         cumulative_bytes = self._cumulative_downloaded_bytes(task)
+        reported_speed = payload.get("speed")
+        if reported_speed is not None and reported_speed > 0:
+            task.speed_text = format_speed(reported_speed)
+            task.speed_samples.clear()
+            task.speed_samples.append((now, cumulative_bytes))
+            return
         task.speed_samples.append((now, cumulative_bytes))
-        while task.speed_samples and now - task.speed_samples[0][0] > 8:
+        while len(task.speed_samples) > 2 and now - task.speed_samples[1][0] >= 2:
             task.speed_samples.popleft()
         if len(task.speed_samples) >= 2:
             first_time, first_bytes = task.speed_samples[0]
@@ -3168,6 +3174,11 @@ class VideoDownloadPage(QWidget):
     def _handle_download_progress(self, task_id: str, payload: dict) -> None:
         task = self._task_index.get(task_id)
         if task is None:
+            return
+        if payload.get("status") == "retrying":
+            self._reset_task_progress_tracking(task)
+            task.speed_text = "正在自动重试并续传…"
+            self._schedule_progress_refresh()
             return
         self._update_task_download_phase(task, payload)
         task.downloaded_bytes = self._cumulative_downloaded_bytes(task)

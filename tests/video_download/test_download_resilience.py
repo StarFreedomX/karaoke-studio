@@ -459,3 +459,164 @@ def test_settings_roundtrip_keeps_aria2c_flag(tmp_path, monkeypatch) -> None:
 
     assert loaded.video_download_use_aria2c is False
     assert loaded.video_download_timeout == 30
+
+
+@pytest.mark.parametrize("cli", [False, True])
+def test_task_retries_keep_partial_data(tmp_path, monkeypatch, make_download_task, cli) -> None:
+    service = _service()
+    task = make_download_task(url=BILIBILI_URL)
+    calls = []
+    payloads = []
+    monkeypatch.setattr(service, "_import_ytdlp", lambda: object)
+    monkeypatch.setattr(service, "_should_prefer_cli_backend", lambda _url: cli)
+    monkeypatch.setattr(ytdlp_service.time, "sleep", lambda _seconds: None)
+    clock = iter(range(100))
+    monkeypatch.setattr(ytdlp_service.time, "monotonic", lambda: next(clock))
+
+    def attempt(*args, **kwargs):
+        part = tmp_path / (kwargs["output_stem"] + ".mp4.part")
+        calls.append(part.read_bytes() if part.exists() else b"")
+        if len(calls) == 1:
+            part.write_bytes(b"downloaded prefix")
+            raise ytdlp_service.VideoDownloadError("Connection reset by peer")
+
+    monkeypatch.setattr(service, "_download_with_cli_retry" if cli else "_download_with_python_retry", attempt)
+    service.download(task, _options(save_dir=str(tmp_path)), payloads.append)
+
+    assert calls == [b"", b"downloaded prefix"]
+    assert payloads[0]["status"] == "retrying"
+
+
+def test_aria2_retries_resume_before_switching_to_http(tmp_path, monkeypatch, make_download_task) -> None:
+    service = _service(aria2c="aria2c")
+    task = make_download_task(url=BILIBILI_URL)
+    attempts = []
+    monkeypatch.setattr(service, "_import_ytdlp", lambda: object)
+    monkeypatch.setattr(service, "_should_prefer_cli_backend", lambda _url: False)
+    monkeypatch.setattr(ytdlp_service.time, "sleep", lambda _seconds: None)
+    clock = iter(range(100))
+    monkeypatch.setattr(ytdlp_service.time, "monotonic", lambda: next(clock))
+
+    def attempt(_ydl, _task, options, _callback, **kwargs):
+        part = tmp_path / (kwargs["output_stem"] + ".mp4.part")
+        if not attempts:
+            part.write_bytes(b"a" * 16)
+            _write_aria2_control(part, piece_length=4, total_length=16, completed_pieces=3)
+        attempts.append((options.use_aria2c, part.stat().st_size))
+        if options.use_aria2c:
+            assert part.with_name(part.name + ".aria2").exists()
+            raise ytdlp_service.VideoDownloadError("aria2c exited with code 1")
+        assert not part.with_name(part.name + ".aria2").exists()
+
+    monkeypatch.setattr(service, "_download_with_python_retry", attempt)
+    service.download(task, _options(save_dir=str(tmp_path), retry_count=2), lambda _: None)
+
+    assert attempts == [(True, 16), (True, 16), (True, 16), (False, 12)]
+
+
+def test_native_resume_stops_at_first_missing_piece(tmp_path) -> None:
+    part = tmp_path / "song.mp4.part"
+    part.write_bytes(b"abcdefghijklmnop")
+    _write_aria2_control(part, piece_length=4, total_length=16, completed_pieces=4)
+    control = part.with_name(part.name + ".aria2")
+    data = bytearray(control.read_bytes())
+    data[34] = 0b10110000  # First, third and fourth pieces; second is missing.
+    control.write_bytes(data)
+
+    _service()._prepare_native_resume(tmp_path, "song")
+
+    assert part.read_bytes() == b"abcd"
+    assert not control.exists()
+
+
+def test_retry_budget_is_bounded(tmp_path, monkeypatch, make_download_task) -> None:
+    service = _service()
+    attempts = []
+    monkeypatch.setattr(service, "_import_ytdlp", lambda: object)
+    monkeypatch.setattr(service, "_should_prefer_cli_backend", lambda _: False)
+    clock = iter(range(100))
+    monkeypatch.setattr(ytdlp_service.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(ytdlp_service.time, "sleep", lambda _: None)
+
+    def attempt(*args, **kwargs):
+        attempts.append(1)
+        raise ytdlp_service.VideoDownloadError("HTTP Error 503")
+
+    monkeypatch.setattr(service, "_download_with_python_retry", attempt)
+    with pytest.raises(ytdlp_service.VideoDownloadError):
+        service.download(make_download_task(), _options(save_dir=str(tmp_path), retry_count=2), lambda _: None)
+    assert len(attempts) == 3
+
+
+def test_cancel_during_retry_does_not_start_another_attempt(tmp_path, monkeypatch, make_download_task) -> None:
+    service = _service()
+    task = make_download_task()
+    attempts = []
+    monkeypatch.setattr(service, "_import_ytdlp", lambda: object)
+    monkeypatch.setattr(service, "_should_prefer_cli_backend", lambda _: False)
+
+    def attempt(*args, **kwargs):
+        attempts.append(1)
+        raise ytdlp_service.VideoDownloadError("Connection reset by peer")
+
+    def progress(_payload):
+        task.cancel_requested = True
+
+    monkeypatch.setattr(service, "_download_with_python_retry", attempt)
+    with pytest.raises(ytdlp_service.DownloadCancelledError):
+        service.download(task, _options(save_dir=str(tmp_path)), progress)
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("message", ["The read operation timed out", "HTTP Error 403: Forbidden"])
+def test_transient_detection_survives_friendly_error_translation(message) -> None:
+    service = _service()
+    assert service._is_transient_download_error(service._normalize_error_message(RuntimeError(message)))
+
+
+def test_real_ytdlp_resumes_near_completed_http_download(tmp_path, make_download_task) -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    pytest.importorskip("yt_dlp")
+    content = bytes(range(256)) * 1024
+    prefix = len(content) - 4096
+    ranges = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+
+        def do_GET(self):
+            range_header = self.headers.get("Range", "")
+            ranges.append(range_header)
+            start = int(range_header.split("=")[1].split("-")[0]) if range_header else 0
+            self.send_response(206 if range_header else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(content) - start))
+            if range_header:
+                self.send_header("Content-Range", f"bytes {start}-{len(content) - 1}/{len(content)}")
+            self.end_headers()
+            self.wfile.write(content[start:])
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    task = make_download_task(url=f"http://127.0.0.1:{server.server_port}/video.mp4")
+    task.info.duration = None
+    (tmp_path / "Title.mp4.part").write_bytes(content[:prefix])
+    try:
+        _service().download(task, _options(save_dir=str(tmp_path), use_aria2c=False), lambda _: None)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert f"bytes={prefix}-" in ranges
+    assert task.local_file.read_bytes() == content

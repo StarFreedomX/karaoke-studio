@@ -94,6 +94,37 @@ def test_progress_ticks_are_coalesced(page: VideoDownloadPage) -> None:
     assert page.download_table.item(0, PROGRESS_COLUMN).text() == "50%"
 
 
+def test_speed_uses_current_downloader_reading(page, monkeypatch) -> None:
+    clock = iter((0.0, 15.0, 30.0))
+    monkeypatch.setattr("krok_helper.video_download.video_download_page.time.monotonic", lambda: next(clock))
+    task = page._tasks[0]
+    for downloaded, speed in ((100, 1024), (200, 8192), (300, 512)):
+        payload = _progress_payload(downloaded)
+        payload["speed"] = speed
+        page._update_task_speed_text(task, payload)
+        from krok_helper.video_download.video_download_page import format_speed
+        assert task.speed_text == format_speed(speed)
+
+
+def test_polled_speed_drops_within_two_seconds(page, monkeypatch) -> None:
+    task = page._tasks[0]
+    clock = iter(index * 0.5 for index in range(65))
+    monkeypatch.setattr("krok_helper.video_download.video_download_page.time.monotonic", lambda: next(clock))
+    for index in range(65):
+        task.downloaded_bytes = min(index, 60) * 1024
+        page._update_task_speed_text(task, {"speed": 0.0})
+    assert task.speed_text == ""
+
+
+def test_retry_clears_speed_and_phase_history(page) -> None:
+    page._handle_download_progress("task-1", _progress_payload(900))
+    page._handle_download_progress("task-1", {"status": "retrying"})
+    task = page._tasks[0]
+    assert task.downloaded_bytes == 0
+    assert not task.speed_samples
+    assert "续传" in task.speed_text
+
+
 def test_progress_refresh_defers_while_page_hidden(page: VideoDownloadPage) -> None:
     """页面隐藏期间进度 tick 只攒 pending，恢复可见时补一次重绘。"""
     app = QApplication.instance()
