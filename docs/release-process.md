@@ -169,6 +169,12 @@ Release X.Y.Z.N                                       # APP_VERSION + README + C
 - 分类条目，**逐条**列出用户能感知的差异。
 - 不要写内部重构、CI、文档之类纯开发者改动——这些放 commit message 里。
 - **逐笔核对提交作者并署名**：用 `git log <上一个tag>..HEAD --format='%an <%ae> %s'` 核对作者，必要时通过 GitHub 提交记录确认账号，不得凭猜测署名。GitHub 用户 `Myosotis11037` 的所有提交统一标注 **`@凛夜`**；`Xuan-cc` 的提交标注 `@Xuan-cc`。CHANGELOG 与 release body 使用同一署名映射。
+- **保留 GitHub Contributors 账号关联**：条目仍使用上述显示署名，但每个版本节末尾（分隔线前）必须添加「本版贡献者」一行，按本版本实际提交作者去重列出真实 GitHub 账号。例如两位均有贡献时写：`本版贡献者：凛夜（@Myosotis11037）、@Xuan-cc`。只有其中一位有贡献时只列该位，不得固定添加无贡献的账号。此行同时进入 CHANGELOG 与生成的 release body。
+
+GitHub Release 的 Contributors 头像列表依据发布正文中的真实账号 `@mention`
+生成，`@凛夜` 仅是显示署名，无法关联 `Myosotis11037`。发布后必须核对头像列表；
+若遗漏真实账号提及，同步补全 CHANGELOG 与已发布 Release 正文即可，无需重新打包或
+移动已发布标签。参见 [GitHub 官方说明](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)。
 
 参考样板：v3.0.2 / v3.0.2.1。
 
