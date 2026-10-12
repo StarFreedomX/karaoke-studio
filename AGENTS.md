@@ -134,7 +134,8 @@ git submodule status
 - CI 会从 `CHANGELOG.md` 自动提取当前 tag 对应的中文 release body；打 tag 前必须运行 notes 命令校验，避免更新弹窗展示错误内容。
 - **写 CHANGELOG 时必须在版本段顶部添加反馈群提示**：`<span style="color:#d64545"><b>Lin-K/SUG 反馈交流群 QQ 1108437280</b></span>`（HTML span 写法原样保留，更新弹窗按富文本渲染）。
 - **写 CHANGELOG 时必须核对实际提交作者**：用 `git log <上一个tag>..HEAD --format='%an %s'` 查看本版本各提交的作者，在对应条目后加上 `@作者名`，不要凭猜测署名。**署名映射：GitHub 用户 `Myosotis11037` 的所有提交统一标注 `@凛夜`；`Xuan-cc` 的提交标注 `@Xuan-cc`。** CHANGELOG 与 release body 均遵守此规则。
-- **保留 Release Contributors 账号关联**：版本段末尾（分隔线前）添加「本版贡献者」一行，按实际提交作者去重列出真实 GitHub 账号；两位均有贡献时写 `本版贡献者：凛夜（@Myosotis11037）、@Xuan-cc`，仅一位有贡献时只列该位。条目中的 `@凛夜` 保持不变，真实账号提及用于让 GitHub 生成 Contributors 头像列表。CHANGELOG 与 release body 均须包含此行，发布后核对头像列表。详见 `docs/release-process.md` §6。
+- **发版补改不得转移贡献归属**：agent 在发版检查中补改已有贡献时，不得仅凭自动继承的本机 Git 身份重新署名；须结合原始提交、`git blame`、实际改动范围和用户确认核实归属，用户明确纠正优先。2026-10-12 用户确认：「启动进度不再倒退」「字体装卸后回退缓存正确失效」均属于 `@Xuan-cc`；发版补改提交关联 `Myosotis11037` 不能作为改署 `@凛夜` 的依据。独立的新修复也不能一律归给原代码作者。完整误署名记录见 `docs/release-process.md` §6。
+- **保留 Release Contributors 账号关联**：版本段末尾（分隔线前）添加「本版贡献者」一行，按核实后的实际贡献归属去重列出真实 GitHub 账号；两位均有贡献时写 `本版贡献者：凛夜（@Myosotis11037）、@Xuan-cc`，仅一位有贡献时只列该位。条目中的 `@凛夜` 保持不变，真实账号提及用于让 GitHub 生成 Contributors 头像列表。CHANGELOG 与 release body 均须包含此行，发布后核对头像列表。详见 `docs/release-process.md` §6。
 - 改 `APP_VERSION` 时同时改 [`README.md`](README.md) 顶部「当前版本」（容易漏）。
 - 发版准备统一运行 `python scripts/release.py prepare X.Y.Z[.N]`；补全 CHANGELOG 后运行 `python scripts/release.py notes X.Y.Z[.N]` 生成中文 release body。详见 [`docs/release-process.md`](docs/release-process.md)。
 
