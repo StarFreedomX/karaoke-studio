@@ -428,6 +428,19 @@ QJsonObject handlePresentGpuFrame(
     try {
         const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
         const int generation = intValue(request, QStringLiteral("generation"), 0);
+        if (generationCancelled(runtime, generation)) {
+            // 代际已被取消：本帧的像素不得上屏。Python 侧的有效性检查发生
+            // 在 present 之后，拒绝信号救不回已经写进 DComp 的像素——
+            // seek/改样式/隐藏视图与提交交错时旧画面短暂显示的路径在此
+            // 封死（2026-10 探针：cancelled 代际的帧仍返回 gpu_frame_presented）。
+            QJsonObject out = response(true, QStringLiteral("gpu_frame_dropped"));
+            out.insert(QStringLiteral("dropped"), true);
+            out.insert(QStringLiteral("generation"), generation);
+            out.insert(QStringLiteral("t_ms"), tMs);
+            out.insert(QStringLiteral("reason"), QStringLiteral("generation_cancelled"));
+            nativeTrace("present frame drop-cancelled generation=%d t=%d", generation, tMs);
+            return out;
+        }
         const auto result = backend->presentFrame(tMs, target, generation);
         QJsonObject out = response(true, result.dropped
             ? QStringLiteral("gpu_frame_dropped") : QStringLiteral("gpu_frame_presented"));
@@ -477,6 +490,17 @@ QJsonObject handleRenderGpuFrameDirect(
     try {
         const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
         const int generation = intValue(request, QStringLiteral("generation"), 0);
+        if (generationCancelled(runtime, generation)) {
+            // 取消代际不再渲染进帧仓：present 侧已封死上屏，这里省掉一次
+            // 无意义的整帧渲染，并给宿主调度器一个明确的停止信号。
+            QJsonObject out = response(true, QStringLiteral("gpu_frame_dropped"));
+            out.insert(QStringLiteral("generation"), generation);
+            out.insert(QStringLiteral("t_ms"), tMs);
+            out.insert(QStringLiteral("dropped"), true);
+            out.insert(QStringLiteral("reason"), QStringLiteral("generation_cancelled"));
+            nativeTrace("render direct drop-cancelled generation=%d t=%d", generation, tMs);
+            return out;
+        }
         const auto result = backend->renderFrameOnly(tMs, generation);
         QJsonObject out = response(true, QStringLiteral("gpu_frame_rendered_direct"));
         out.insert(QStringLiteral("generation"), generation);
@@ -541,6 +565,16 @@ QJsonObject handlePresentRenderedGpuFrame(
     try {
         const int tMs = intValue(request, QStringLiteral("t_ms"), 0);
         const int generation = intValue(request, QStringLiteral("generation"), 0);
+        if (generationCancelled(runtime, generation)) {
+            // 同 handlePresentGpuFrame：取消代际的帧仓登记不得上屏。
+            QJsonObject out = response(true, QStringLiteral("gpu_frame_dropped"));
+            out.insert(QStringLiteral("generation"), generation);
+            out.insert(QStringLiteral("t_ms"), tMs);
+            out.insert(QStringLiteral("dropped"), true);
+            out.insert(QStringLiteral("reason"), QStringLiteral("generation_cancelled"));
+            nativeTrace("present rendered drop-cancelled generation=%d t=%d", generation, tMs);
+            return out;
+        }
         const auto result = backend->presentRendered(target, generation, tMs);
         if (result.dropped) {
             // 帧仓未命中：丢帧而非上错帧（事件名与渲染路径的丢弃语义对齐，

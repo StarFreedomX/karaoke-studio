@@ -5712,6 +5712,191 @@ def test_enqueue_stdout_records_heartbeat_without_queueing():
     assert snapshot["done"] == 0 and snapshot["total"] == 0
 
 
+def test_read_command_response_backlogs_cancel_ack_and_matches_event():
+    """取消确认插在响应流里时不得被下一条命令当成本身响应。
+
+    2026-10 探针：``send_cancel_generation`` 只写不读，sidecar 的
+    ``generation_cancelled`` 确认留在队列里，下一条 ``gpu_render_frame_direct``
+    直接取「下一条响应」就把它当作渲染成功，后续响应整体错位。
+    """
+    proc = _fake_heartbeat_renderer()
+    request = {
+        "cmd": "gpu_render_frame_direct",
+        "generation": 7,
+        "t_ms": 1000,
+    }
+    proc._stdout_queue.put('{"ok":true,"event":"generation_cancelled","generation":7}')
+    proc._stdout_queue.put(
+        '{"ok":true,"event":"gpu_frame_rendered_direct","generation":7,'
+        '"t_ms":1000,"render_ms":4.5}'
+    )
+
+    response = proc._read_command_response(
+        {"gpu_frame_rendered_direct", "gpu_frame_dropped"},
+        request=request,
+        waiting_for="gpu_render_frame_direct",
+    )
+
+    assert response["event"] == "gpu_frame_rendered_direct"
+    assert response["t_ms"] == 1000
+    assert [event["event"] for event in proc._event_backlog] == [
+        "generation_cancelled"
+    ]
+
+
+def test_read_command_response_rejects_mismatched_identity():
+    """事件名相同但身份不同的响应（上一次请求的残留）不得被接受。"""
+    proc = _fake_heartbeat_renderer()
+    request = {
+        "cmd": "gpu_present_rendered",
+        "generation": 7,
+        "t_ms": 1000,
+    }
+    stale = '{"ok":true,"event":"gpu_frame_presented","generation":7,"t_ms":500}'
+    fresh = '{"ok":true,"event":"gpu_frame_presented","generation":7,"t_ms":1000}'
+    proc._stdout_queue.put(stale)
+    proc._stdout_queue.put(fresh)
+
+    response = proc._read_command_response(
+        {"gpu_frame_presented", "gpu_frame_dropped"},
+        request=request,
+        waiting_for="gpu_present_rendered",
+    )
+
+    assert response["t_ms"] == 1000
+    assert [event["t_ms"] for event in proc._event_backlog] == [500]
+
+
+def test_read_command_response_rejects_pool_event_with_foreign_serial():
+    """池化渲染事件带 wire 序号：本命令没发过序号，不得当成本次响应。"""
+    proc = _fake_heartbeat_renderer()
+    request = {
+        "cmd": "gpu_present_rendered",
+        "generation": 7,
+        "t_ms": 1000,
+    }
+    # 池事件带 request_serial 与 t_ms，事件名与本命令的 dropped 响应相同。
+    proc._stdout_queue.put(
+        '{"ok":true,"event":"gpu_frame_dropped","generation":7,"t_ms":1000,'
+        '"request_serial":42,"reason":"generation_cancelled"}'
+    )
+    proc._stdout_queue.put(
+        '{"ok":true,"event":"gpu_frame_presented","generation":7,"t_ms":1000}'
+    )
+
+    response = proc._read_command_response(
+        {"gpu_frame_presented", "gpu_frame_dropped"},
+        request=request,
+        waiting_for="gpu_present_rendered",
+    )
+
+    assert response["event"] == "gpu_frame_presented"
+    assert [event["request_serial"] for event in proc._event_backlog] == [42]
+
+
+def test_read_command_response_surfaces_own_error_response():
+    """身份匹配的错误响应照常抛出（协议级故障不得被吞掉）。"""
+    from krok_helper.subtitle_render.native.backend import NativeRendererError
+
+    proc = _fake_heartbeat_renderer()
+    request = {
+        "cmd": "gpu_present_rendered",
+        "generation": 7,
+        "t_ms": 1000,
+    }
+    proc._stdout_queue.put(
+        '{"ok":false,"event":"gpu_present_rendered","error":"present failed"}'
+    )
+
+    with pytest.raises(NativeRendererError, match="present failed"):
+        proc._read_command_response(
+            {"gpu_frame_presented", "gpu_frame_dropped"},
+            request=request,
+            waiting_for="gpu_present_rendered",
+        )
+
+
+def test_cpu_fallback_scheduler_stops_spinning_on_full_window(monkeypatch):
+    """CPU 填缝窗口填满后必须等时钟推进，不得空转重扫同一批缓存键。
+
+    2026-10 探针：窗口全热时原实现立刻 ``continue``，媒体时钟不变时以
+    每秒二十万次的频率重扫缓存键（0.25s ≈ 52416 次循环、新绘制帧 0），
+    在异常恢复窗口内烧 CPU/GIL、拖慢 GUI 与低配机。
+    """
+    import collections
+    import time as time_mod
+
+    from krok_helper.subtitle_render.domain.models import Style
+    from krok_helper.subtitle_render.domain.timing import (
+        TimingChar,
+        TimingLine,
+        TimingTrack,
+    )
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    clock_calls = collections.Counter()
+
+    def frozen_clock() -> float:
+        clock_calls["calls"] += 1
+        return 1000.0
+
+    monkeypatch.setattr(renderer, "_media_now_ms", frozen_clock)
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("歌", 0)], end_ms=5_000)]
+    )
+    # 把容忍窗内的帧键全部填满：窗口全热 → 无帧可画。
+    window = range(
+        renderer._frame_cache.key_for(1000),
+        renderer._frame_cache.key_for(1000 + renderer._STALE_TOLERANCE_MS) + 1,
+    )
+    for key in window:
+        renderer._frame_cache.store(
+            renderer._frame_cache.timestamp_for_key(key),
+            QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied),
+        )
+    with renderer._condition:
+        renderer._playing = True
+        renderer._generation = 0
+    renderer._retry_after = time_mod.monotonic() + 0.3
+
+    renderer._run_cpu_due_scheduler(
+        0,
+        track,
+        Style(),
+        [],
+        5_000,
+        320,
+        180,
+        1.0,
+    )
+
+    # 修复前：0.3s 内六万次以上循环（每次至少一次时钟读取）；修复后每次
+    # 等待到下一个帧键边界，0.3s 只有十几次。阈值留足余量。
+    assert clock_calls["calls"] < 200, clock_calls["calls"]
+
+
+def test_cached_cpu_fallback_frame_reports_cpu_backend(qapp, monkeypatch):
+    """缓存命中的回退帧必须报 cpu：回退帧入缓存后标签不能被报成 gpu。"""
+    from krok_helper.subtitle_render.domain.models import Style
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    modes: list[str] = []
+    renderer.backendModeChanged.connect(modes.append)
+    image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    image.setText("preview_backend", "cpu")
+    try:
+        renderer.set_state(None, Style())  # set_state 会清缓存，先 set 再 store
+        renderer._frame_cache.store(1_000, image)
+        renderer.request(1_000)
+        assert renderer.current_backend_mode == "cpu"
+        assert modes == ["cpu"]
+    finally:
+        renderer.stop()
+
+
 def test_busy_badge_prefers_fresh_sidecar_stage(qapp, monkeypatch):
     """徽标阶段文本优先用 sidecar 心跳阶段（D2D 大任务的地面真相）。"""
     from krok_helper.subtitle_render.frontend.preview import preview_graphics as pg

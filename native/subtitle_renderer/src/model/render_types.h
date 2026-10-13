@@ -692,6 +692,17 @@ struct BackendDiagnostics {
     double realizationPrewarmCreateP95Ms = 0.0;
     double realizationPrewarmCreateMaxMs = 0.0;
     bool glowDirtyRectEnabled = true;
+    // ---- 资源分类计数（2026-10 低显存观测）----
+    // D2D/DWrite 不暴露真实分配字节，以下为保守估算，供总量观测与低配机
+    // 诊断；全部计入 estimatedCacheBytes（池侧跨 worker 求和后即为总占用）。
+    // 各类「计数上限」彼此独立（字体 face 缓存无上限、帧仓按槽数、发光
+    // 缓存按张数），字节分类是唯一能回答「总共占了多少」的口径。
+    std::uint64_t fontFaceCount = 0;
+    std::uint64_t fontFaceBytesEstimate = 0;
+    std::uint64_t frameStoreSlots = 0;
+    std::uint64_t frameStoreBytesEstimate = 0;
+    std::uint64_t glowCacheBytesEstimate = 0;
+    std::uint64_t realizationResourceBytesEstimate = 0;
 };
 
 class BackendError : public std::runtime_error {

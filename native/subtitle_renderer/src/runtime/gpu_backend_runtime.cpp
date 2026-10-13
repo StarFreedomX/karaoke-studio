@@ -195,17 +195,29 @@ GpuPreviewPoolConfiguration configureGpuPreviewPool(
     } else if (targetResize && pool != nullptr && !poolKey.isEmpty()) {
         nativeTrace("configureGpuPreviewPool: pausing old pool");
         pool->pause();
-        nativeTrace("configureGpuPreviewPool: old pool paused healthy=%d", pool->healthy() ? 1 : 0);
-        poolCache.erase(
-            std::remove_if(
-                poolCache.begin(), poolCache.end(),
-                [&](const GpuPreviewPoolCacheEntry &entry) {
-                    return entry.key == poolKey;
-                }
-            ),
-            poolCache.end()
-        );
-        poolCache.push_front({poolKey, std::move(pool)});
+        const bool oldPoolHealthy = pool->healthy();
+        nativeTrace("configureGpuPreviewPool: old pool paused healthy=%d", oldPoolHealthy ? 1 : 0);
+        if (!oldPoolHealthy) {
+            // pause 排空超时（内有被并发设备使用卡死的 worker）：不可复用、
+            // 不可析构（join 会拖死主线程），同样不可入尺寸缓存——入缓存后
+            // 的下一次复用（resume）或逐出（析构 join）都会再次等待卡死的
+            // 线程。abandon（detach + 泄漏实现对象）后走下面的重建分支。
+            nativeTrace("configureGpuPreviewPool: paused pool unhealthy -> abandon, not cached");
+            pool->abandon();
+            pool.release();
+            poolKey.clear();
+        } else {
+            poolCache.erase(
+                std::remove_if(
+                    poolCache.begin(), poolCache.end(),
+                    [&](const GpuPreviewPoolCacheEntry &entry) {
+                        return entry.key == poolKey;
+                    }
+                ),
+                poolCache.end()
+            );
+            poolCache.push_front({poolKey, std::move(pool)});
+        }
         const auto cached = std::find_if(
             poolCache.begin(), poolCache.end(),
             [&](const GpuPreviewPoolCacheEntry &entry) {
@@ -213,10 +225,19 @@ GpuPreviewPoolConfiguration configureGpuPreviewPool(
             }
         );
         if (cached != poolCache.end()) {
-            pool = std::move(cached->pool);
-            poolCache.erase(cached);
-            pool->resume(scene, deferFollowers);
-            targetCacheHit = true;
+            if (cached->pool != nullptr && !cached->pool->healthy()) {
+                // 防御：健康检查漏过的缓存条目（历史入池 / 复用中变坏）
+                // 一律废弃，绝不 resume 一个带卡死 worker 的池。
+                nativeTrace("configureGpuPreviewPool: cached pool unhealthy -> abandon");
+                cached->pool->abandon();
+                cached->pool.release();
+                poolCache.erase(cached);
+            } else {
+                pool = std::move(cached->pool);
+                poolCache.erase(cached);
+                pool->resume(scene, deferFollowers);
+                targetCacheHit = true;
+            }
         }
         while (poolCache.size() > 2) {
             poolCache.pop_back();

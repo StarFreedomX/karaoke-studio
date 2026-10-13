@@ -56,6 +56,25 @@ std::size_t environmentSize(
     ));
 }
 
+double environmentDouble(
+    const char *name,
+    double defaultValue,
+    double minimum,
+    double maximum
+) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return defaultValue;
+    }
+    errno = 0;
+    char *end = nullptr;
+    const double parsed = std::strtod(value, &end);
+    if (errno != 0 || end == value || *end != '\0' || !std::isfinite(parsed)) {
+        return defaultValue;
+    }
+    return std::clamp(parsed, minimum, maximum);
+}
+
 std::uint64_t rectAreaPx(const D2D1_RECT_F &rect) {
     const double width = std::max(
         static_cast<double>(rect.right - rect.left), 0.0

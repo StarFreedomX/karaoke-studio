@@ -291,6 +291,32 @@ void appendGpuDiagnostics(
         QStringLiteral("glow_dirty_rect_enabled"),
         diagnostics.glowDirtyRectEnabled
     );
+    // 资源分类（2026-10 低显存观测）：类别字节估算，均包含在
+    // estimated_cache_bytes 里；多 worker/缓存池由宿主侧聚合。
+    out->insert(
+        QStringLiteral("font_face_count"),
+        static_cast<qint64>(diagnostics.fontFaceCount)
+    );
+    out->insert(
+        QStringLiteral("font_face_bytes_estimate"),
+        static_cast<qint64>(diagnostics.fontFaceBytesEstimate)
+    );
+    out->insert(
+        QStringLiteral("frame_store_slots"),
+        static_cast<qint64>(diagnostics.frameStoreSlots)
+    );
+    out->insert(
+        QStringLiteral("frame_store_bytes_estimate"),
+        static_cast<qint64>(diagnostics.frameStoreBytesEstimate)
+    );
+    out->insert(
+        QStringLiteral("glow_cache_bytes_estimate"),
+        static_cast<qint64>(diagnostics.glowCacheBytesEstimate)
+    );
+    out->insert(
+        QStringLiteral("realization_resource_bytes_estimate"),
+        static_cast<qint64>(diagnostics.realizationResourceBytesEstimate)
+    );
 }
 
 void appendGpuFrameDiagnostics(

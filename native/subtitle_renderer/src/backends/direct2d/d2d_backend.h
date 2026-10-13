@@ -38,6 +38,9 @@ public:
 
     std::shared_ptr<D2DDeviceResources> sharedDeviceResources() const noexcept;
     void cancelRealizationPrewarm();
+    // pause() 取消预热后恢复：预热未完成且无人续烘时，按当前 lines 重算
+    // 任务并续烘剩余部分（已发布资源复用，不重烘）。已完成的预热不动。
+    void resumeRealizationPrewarm();
     void waitForRealizationPrewarm();
     void adoptSharedGlyphResources(const Direct2DGpuBackend &source);
 
@@ -51,6 +54,9 @@ public:
     void setRealizationPoolReady(bool ready) noexcept;
 
 private:
+    // 从当前 lines 重算 realization 任务并启动预热线程（configure 与
+    // resumeRealizationPrewarm 共用；后者靠 realizationResources 复用已完成任务）。
+    void startRealizationPrewarm(bool deferUntilFirstFrame);
     // frameStoreIndex >= 0 时渲染进帧仓槽（G6 直画），否则进共享 scratch
     // 目标（G5 回读路径）。见 Impl::frameStore 的注释。
     ProbeResult renderFrameInternal(

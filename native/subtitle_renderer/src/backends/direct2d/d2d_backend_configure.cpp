@@ -2939,679 +2939,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     impl_->diagnostics.realizationPrewarmCreateMaxMs = 0.0;
     impl_->lastRenderCompletedMs.store(steadyNowMs(), std::memory_order_release);
     if (impl_->realizationActive) {
-        std::vector<std::size_t> lineOrder(impl_->lines.size());
-        for (std::size_t index = 0; index < lineOrder.size(); ++index) {
-            lineOrder[index] = index;
-        }
-        const int prewarmTimeMs = impl_->scene.prewarmTimeMs;
-        const auto distanceFromPrewarm = [&](const Impl::CachedLine &line) {
-            int distance = std::min(
-                std::abs(prewarmTimeMs - line.startMs),
-                std::abs(prewarmTimeMs - line.endMs)
-            );
-            if (prewarmTimeMs >= line.startMs && prewarmTimeMs <= line.endMs) {
-                distance = 0;
-            }
-            for (const DisplayWindow &window : line.displayWindows) {
-                if (prewarmTimeMs >= window.startMs
-                    && prewarmTimeMs <= window.endMs) {
-                    return 0;
-                }
-                distance = std::min(
-                    distance,
-                    std::min(
-                        std::abs(prewarmTimeMs - window.startMs),
-                        std::abs(prewarmTimeMs - window.endMs)
-                    )
-                );
-            }
-            return distance;
-        };
-        std::stable_sort(
-            lineOrder.begin(), lineOrder.end(),
-            [&](std::size_t left, std::size_t right) {
-                return distanceFromPrewarm(impl_->lines[left])
-                    < distanceFromPrewarm(impl_->lines[right]);
-            }
+        startRealizationPrewarm(
+            impl_->scene.deferRealizationPrewarmUntilFirstFrame
         );
-        struct RealizationCandidate {
-            Impl::RealizationTarget target;
-            Microsoft::WRL::ComPtr<ID2D1Geometry> sharedGeometry;
-            Microsoft::WRL::ComPtr<ID2D1Geometry> positionedGeometry;
-            D2D1_MATRIX_3X2_F instanceTransform =
-                D2D1::Matrix3x2F::Identity();
-            float strokeWidth = 0.0f;
-            bool stroked = false;
-            // 矢量字形描边任务按填充语义烘焙预展开轮廓（创建毫秒级）。
-            bool fillOutline = false;
-            // 预估创建成本（ms）：自适应预热调度的排序键（粗估即可，
-            // 只需保序：段数越多、描边越宽越贵；预展开任务恒廉价）。
-            float estCostMs = 1.0f;
-        };
-        std::vector<RealizationCandidate> candidates;
-        const std::size_t realizationCapacity = static_cast<std::size_t>(
-            std::max<std::uint64_t>(
-                impl_->scene.realizationCapacity,
-                Impl::defaultRealizationCapacity
-            )
-        );
-        impl_->diagnostics.realizationCapacity = realizationCapacity;
-        const auto appendCandidate = [&] (
-            std::size_t lineIndex,
-            int rubyIndex,
-            std::size_t charIndex,
-            Impl::RealizationKind kind,
-            ID2D1Geometry *sharedGeometry,
-            ID2D1Geometry *positionedGeometry,
-            const D2D1_MATRIX_3X2_F &instanceTransform,
-            float strokeWidth,
-            bool fillOutline = false,
-            float estCostMs = 1.0f
-        ) {
-            const bool isStroke = kind == Impl::RealizationKind::Stroke
-                || kind == Impl::RealizationKind::Stroke2;
-            if (sharedGeometry == nullptr || positionedGeometry == nullptr
-                || (isStroke && strokeWidth <= 0.0f)) {
-                return;
-            }
-            candidates.push_back({
-                {lineIndex, rubyIndex, charIndex, kind},
-                sharedGeometry,
-                positionedGeometry,
-                instanceTransform,
-                strokeWidth,
-                isStroke,
-            });
-            if (fillOutline) {
-                candidates.back().fillOutline = true;
-            }
-            candidates.back().estCostMs = estCostMs;
-        };
-        const auto appendCharTasks = [&] (
-            std::size_t lineIndex,
-            int rubyIndex,
-            std::size_t charIndex,
-            const Impl::CachedChar &ch,
-            float strokeWidth,
-            float stroke2Width
-        ) {
-            const float mainWidth = std::max(strokeWidth, 0.0f);
-            // 8px 门已拆（2026-10 用户拍板，二次确认）：细描边同样参与预
-            // 热——自适应调度需要它在重载下有余量可押。字节一致性不靠阈
-            // 值保证（任何阈值下「预热窗口内」都存在 realization/直绘的
-            // ±4 alpha 边缘差），靠金标准比较点两侧同烘焙状态（测试等
-            // prewarm 完成或用容差）。描边任务保留 0.5px 发丝卫生阀防
-            // 洪泛；何时/何序烘焙由预热线程按实测帧耗自适应。
-            const float strokeTaskWidth = mainWidth >= 0.5f ? mainWidth : 0.0f;
-            // 矢量字形（有预展开轮廓）的描边任务：几何换成轮廓、按填充
-            // 语义烘焙（毫秒级）；文本字形保持原生描边 realization。
-            const bool vectorChar = ch.strokeOutline != nullptr;
-            // 成本粗估（保序即可）：文本描边 ≈ 段数 × (1+宽/8)；矢量/
-            // 填充恒按 1ms。
-            const auto textStrokeCost = [](float width) -> float {
-                return 1.0f + (1.0f + width / 8.0f) * 2.0f;
-            };
-            appendCandidate(
-                lineIndex, rubyIndex, charIndex,
-                Impl::RealizationKind::Fill,
-                ch.realizationGeometry.Get(), ch.geometry.Get(),
-                ch.realizationTransform, 0.0f
-            );
-            appendCandidate(
-                lineIndex, rubyIndex, charIndex,
-                Impl::RealizationKind::ProtectedStroke,
-                ch.protectedRealizationGeometry.Get(),
-                ch.protectedStrokeGeometry.Get(),
-                ch.realizationTransform, 0.0f
-            );
-            if (strokeTaskWidth > 0.0f) {
-                appendCandidate(
-                    lineIndex, rubyIndex, charIndex,
-                    Impl::RealizationKind::Stroke,
-                    vectorChar ? ch.strokeOutline.Get()
-                               : ch.realizationGeometry.Get(),
-                    vectorChar ? ch.strokeGeometry.Get()
-                               : ch.geometry.Get(),
-                    ch.realizationTransform, strokeTaskWidth,
-                    vectorChar,
-                    vectorChar ? 1.0f : textStrokeCost(strokeTaskWidth)
-                );
-            }
-            const float combinedStroke2 =
-                stroke2Width > 0.0f && strokeTaskWidth > 0.0f
-                    ? strokeTaskWidth + std::max(stroke2Width, 0.0f)
-                    : 0.0f;
-            if (combinedStroke2 > 0.0f) {
-                const bool vectorStroke2 = ch.stroke2Outline != nullptr;
-                appendCandidate(
-                    lineIndex, rubyIndex, charIndex,
-                    Impl::RealizationKind::Stroke2,
-                    vectorStroke2 ? ch.stroke2Outline.Get()
-                                  : ch.realizationGeometry.Get(),
-                    vectorStroke2 ? ch.stroke2Geometry.Get()
-                                  : ch.geometry.Get(),
-                    ch.realizationTransform, combinedStroke2,
-                    vectorStroke2,
-                    vectorStroke2 ? 1.0f : textStrokeCost(combinedStroke2)
-                );
-            }
-        };
-        for (std::size_t lineIndex : lineOrder) {
-            const Impl::CachedLine &line = impl_->lines[lineIndex];
-            for (std::size_t charIndex = 0;
-                 charIndex < line.chars.size(); ++charIndex) {
-                const Impl::CachedChar &ch = line.chars[charIndex];
-                const TextStyle &charStyle = ch.styleIndex >= 0
-                    && ch.styleIndex < static_cast<int>(impl_->scene.charStyles.size())
-                    ? impl_->scene.charStyles[static_cast<std::size_t>(ch.styleIndex)]
-                    : line.style;
-                appendCharTasks(
-                    lineIndex, -1, charIndex, ch,
-                    charStyle.strokeWidth, charStyle.stroke2Width
-                );
-            }
-            for (std::size_t rubyIndex = 0;
-                 rubyIndex < line.rubies.size(); ++rubyIndex) {
-                const Impl::CachedRuby &ruby = line.rubies[rubyIndex];
-                const TextStyle &rubyStyle = ruby.styleIndex >= 0
-                    && ruby.styleIndex < static_cast<int>(impl_->scene.charStyles.size())
-                    ? impl_->scene.charStyles[static_cast<std::size_t>(ruby.styleIndex)]
-                    : line.style;
-                for (std::size_t charIndex = 0;
-                     charIndex < ruby.chars.size(); ++charIndex) {
-                    appendCharTasks(
-                        lineIndex, static_cast<int>(rubyIndex), charIndex,
-                        ruby.chars[charIndex],
-                        ruby.latin ? rubyStyle.rubyLatinStrokeWidth
-                                   : rubyStyle.rubyStrokeWidth,
-                        ruby.latin ? rubyStyle.rubyLatinStroke2Width
-                                   : rubyStyle.rubyStroke2Width
-                    );
-                }
-            }
-        }
-        std::vector<Impl::RealizationTask> tasks;
-        tasks.reserve(std::min(candidates.size(), realizationCapacity));
-        std::uint64_t capacitySkipped = 0;
-        const auto realizationKey = [] (
-            ID2D1Geometry *keyGeometry,
-            bool stroked,
-            float strokeWidth,
-            bool sharedResource,
-            const D2D1_MATRIX_3X2_F &transform
-        ) {
-            return Impl::RealizationCacheKey{
-                reinterpret_cast<std::uintptr_t>(keyGeometry),
-                stroked,
-                std::bit_cast<std::uint32_t>(stroked ? strokeWidth : 0.0f),
-                sharedResource,
-                std::bit_cast<std::uint32_t>(transform._11),
-                std::bit_cast<std::uint32_t>(transform._12),
-                std::bit_cast<std::uint32_t>(transform._21),
-                std::bit_cast<std::uint32_t>(transform._22),
-                std::bit_cast<std::uint32_t>(transform._31),
-                std::bit_cast<std::uint32_t>(transform._32),
-            };
-        };
-        if (candidates.size() <= realizationCapacity) {
-            // The original positioned realization is faster at draw time: no
-            // per-instance world transform is needed. Keep that path whenever
-            // every requested resource fits in the configured budget.
-            for (const RealizationCandidate &candidate : candidates) {
-                Impl::RealizationTask task;
-                task.targets.push_back(candidate.target);
-                task.geometry = candidate.positionedGeometry;
-                task.keyGeometry = candidate.sharedGeometry;
-                task.cacheKey = realizationKey(
-                    candidate.sharedGeometry.Get(), candidate.stroked,
-                    candidate.strokeWidth, false, candidate.instanceTransform
-                );
-                task.strokeWidth = candidate.strokeWidth;
-                task.fillOutline = candidate.fillOutline;
-                task.estCostMs = candidate.estCostMs;
-                tasks.push_back(std::move(task));
-            }
-        } else {
-            // Only capacity-bound scenes pay the instance-transform cost. A
-            // shared glyph realization replaces many positioned resources and
-            // prevents the tail of a long song from falling back to geometry.
-            using RealizationKey =
-                std::tuple<std::uintptr_t, bool, std::uint32_t>;
-            std::map<RealizationKey, std::size_t> taskByResource;
-            for (const RealizationCandidate &candidate : candidates) {
-                const RealizationKey key{
-                    reinterpret_cast<std::uintptr_t>(
-                        candidate.sharedGeometry.Get()
-                    ),
-                    candidate.stroked,
-                    std::bit_cast<std::uint32_t>(
-                        candidate.stroked ? candidate.strokeWidth : 0.0f
-                    ),
-                };
-                const auto existing = taskByResource.find(key);
-                Impl::RealizationTarget target = candidate.target;
-                target.transform = candidate.instanceTransform;
-                if (existing != taskByResource.end()) {
-                    tasks[existing->second].targets.push_back(target);
-                    continue;
-                }
-                if (tasks.size() >= realizationCapacity) {
-                    ++capacitySkipped;
-                    continue;
-                }
-                Impl::RealizationTask task;
-                task.targets.push_back(target);
-                task.geometry = candidate.sharedGeometry;
-                task.keyGeometry = candidate.sharedGeometry;
-                task.cacheKey = realizationKey(
-                    candidate.sharedGeometry.Get(), candidate.stroked,
-                    candidate.strokeWidth, true,
-                    D2D1::Matrix3x2F::Identity()
-                );
-                task.strokeWidth = candidate.strokeWidth;
-                task.fillOutline = candidate.fillOutline;
-                task.estCostMs = candidate.estCostMs;
-                tasks.push_back(std::move(task));
-                taskByResource.emplace(key, tasks.size() - 1);
-            }
-        }
-        const auto assignRealization = [this] (
-            const Impl::RealizationTask &task,
-            ID2D1GeometryRealization *realization
-        ) {
-            bool published = false;
-            for (const Impl::RealizationTarget &target : task.targets) {
-                if (target.lineIndex >= impl_->lines.size()) {
-                    continue;
-                }
-                Impl::CachedLine &line = impl_->lines[target.lineIndex];
-                Impl::CachedChar *targetChar = nullptr;
-                if (target.rubyIndex < 0) {
-                    if (target.charIndex < line.chars.size()) {
-                        targetChar = &line.chars[target.charIndex];
-                    }
-                } else if (static_cast<std::size_t>(target.rubyIndex)
-                           < line.rubies.size()) {
-                    Impl::CachedRuby &ruby = line.rubies[
-                        static_cast<std::size_t>(target.rubyIndex)
-                    ];
-                    if (target.charIndex < ruby.chars.size()) {
-                        targetChar = &ruby.chars[target.charIndex];
-                    }
-                }
-                if (targetChar == nullptr) {
-                    continue;
-                }
-                switch (target.kind) {
-                case Impl::RealizationKind::Fill:
-                    targetChar->fillRealization = realization;
-                    targetChar->fillRealizationTransform = target.transform;
-                    break;
-                case Impl::RealizationKind::ProtectedStroke:
-                    targetChar->protectedStrokeRealization = realization;
-                    targetChar->protectedStrokeRealizationTransform = target.transform;
-                    break;
-                case Impl::RealizationKind::Stroke:
-                    targetChar->strokeRealization = realization;
-                    targetChar->strokeRealizationTransform = target.transform;
-                    break;
-                case Impl::RealizationKind::Stroke2:
-                    targetChar->stroke2Realization = realization;
-                    targetChar->stroke2RealizationTransform = target.transform;
-                    break;
-                }
-                published = true;
-            }
-            return published;
-        };
-        std::vector<Impl::RealizationTask> pendingTasks;
-        pendingTasks.reserve(tasks.size());
-        std::set<Impl::RealizationCacheKey> reusedResources;
-        if (impl_->resourceCacheEnabled) {
-            std::lock_guard<std::mutex> lock(impl_->realizationMutex);
-            for (Impl::RealizationTask &task : tasks) {
-                const auto found = impl_->realizationResources.find(task.cacheKey);
-                if (found == impl_->realizationResources.end()) {
-                    pendingTasks.push_back(std::move(task));
-                    continue;
-                }
-                found->second.lastUse = ++impl_->realizationResourceUseSerial;
-                if (assignRealization(task, found->second.realization.Get())) {
-                    reusedResources.insert(task.cacheKey);
-                }
-            }
-            impl_->realizationCount = reusedResources.size();
-        } else {
-            pendingTasks = std::move(tasks);
-        }
-        tasks = std::move(pendingTasks);
-        impl_->diagnostics.realizationPrewarmSkipped = capacitySkipped;
-        impl_->diagnostics.realizationPrewarmTasks = tasks.size();
-        if (tasks.empty()) {
-            // Every geometry resource survived from the previous generation.
-            // The current CachedChar slots are already rebound above.
-            impl_->realizationPrewarmComplete.store(
-                true, std::memory_order_release
-            );
-        } else {
-            auto control = std::make_shared<Impl::RealizationControl>();
-            control->generation = impl_->realizationGeneration;
-            impl_->realizationControl = control;
-            impl_->realizationPrewarmComplete.store(
-                false, std::memory_order_release
-            );
-            const bool deferUntilFirstFrame =
-                impl_->scene.deferRealizationPrewarmUntilFirstFrame;
-            impl_->realizationThread = std::thread([
-            this,
-            control,
-            deferUntilFirstFrame,
-            realizationCapacity,
-            assignRealization,
-            tasks = std::move(tasks)
-            ]() mutable {
-            // Keep individual background realization chunks short enough for
-            // seek/style churn while staying inside the wide-stroke A/B gate.
-            // Match N3's export precision. Export uses these cached realizations
-            // directly, so a coarse tolerance becomes visible as faceted curves.
-            constexpr float flatteningTolerance = 0.25f;
-            const auto prewarmStart = Clock::now();
-            auto sliceStart = prewarmStart;
-            std::uint64_t failed = 0;
-            std::uint64_t fillTasks = 0;
-            std::uint64_t strokeTasks = 0;
-            double contextMs = 0.0;
-            double waitMs = 0.0;
-            double fillCreateMs = 0.0;
-            double strokeCreateMs = 0.0;
-            double publishMs = 0.0;
-            std::vector<double> createDurations;
-            createDurations.reserve(tasks.size());
-            const auto isCurrent = [&]() {
-                return control->generation == impl_->realizationGeneration;
-            };
-            const auto finish = [&]() {
-                std::lock_guard<std::mutex> lock(impl_->realizationMutex);
-                if (isCurrent()) {
-                    impl_->diagnostics.realizationPrewarmSkipped += failed;
-                    impl_->diagnostics.realizationPrewarmMs = elapsedMs(prewarmStart);
-                    impl_->diagnostics.realizationPrewarmFillTasks = fillTasks;
-                    impl_->diagnostics.realizationPrewarmStrokeTasks = strokeTasks;
-                    impl_->diagnostics.realizationPrewarmContextMs = contextMs;
-                    impl_->diagnostics.realizationPrewarmWaitMs = waitMs;
-                    impl_->diagnostics.realizationPrewarmFillCreateMs = fillCreateMs;
-                    impl_->diagnostics.realizationPrewarmStrokeCreateMs = strokeCreateMs;
-                    impl_->diagnostics.realizationPrewarmPublishMs = publishMs;
-                    if (!createDurations.empty()) {
-                        std::sort(createDurations.begin(), createDurations.end());
-                        const auto percentile = [&](double value) {
-                            const std::size_t index = static_cast<std::size_t>(
-                                std::ceil(value * static_cast<double>(
-                                    createDurations.size() - 1
-                                ))
-                            );
-                            return createDurations[index];
-                        };
-                        impl_->diagnostics.realizationPrewarmCreateP50Ms =
-                            percentile(0.50);
-                        impl_->diagnostics.realizationPrewarmCreateP95Ms =
-                            percentile(0.95);
-                        impl_->diagnostics.realizationPrewarmCreateMaxMs =
-                            createDurations.back();
-                    }
-                    if (impl_->resourceCacheEnabled) {
-                        while (impl_->realizationResources.size()
-                               > realizationCapacity) {
-                            const auto victim = std::min_element(
-                                impl_->realizationResources.begin(),
-                                impl_->realizationResources.end(),
-                                [](const auto &left, const auto &right) {
-                                    return left.second.lastUse
-                                        < right.second.lastUse;
-                                }
-                            );
-                            if (victim == impl_->realizationResources.end()) {
-                                break;
-                            }
-                            impl_->realizationResources.erase(victim);
-                        }
-                    }
-                    // 被取消（pause/析构）的预热不得标记完成：渲染侧的整
-                    // 体门控（realizationReady）按 prewarmComplete 放行
-                    // realization 网格路径，半热状态若被置 true 会把「部分
-                    // 字符网格 + 部分字符原路径」锁死成常态（2026-10 多
-                    // worker 抖动的放大器之一）。取消即保持未完成，渲染继
-                    // 续原路径直到下一次 configure 重建预热。
-                    impl_->realizationPrewarmComplete.store(
-                        !control->stop.load(std::memory_order_acquire),
-                        std::memory_order_release
-                    );
-                }
-                control->done.store(true, std::memory_order_release);
-            };
-            Microsoft::WRL::ComPtr<ID2D1DeviceContext> workerBaseContext;
-            Microsoft::WRL::ComPtr<ID2D1DeviceContext1> workerContext;
-            const auto contextStart = Clock::now();
-            HRESULT contextResult = device_.d2dDevice()->CreateDeviceContext(
-                D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS,
-                workerBaseContext.ReleaseAndGetAddressOf()
-            );
-            if (SUCCEEDED(contextResult)) {
-                contextResult = workerBaseContext.As(&workerContext);
-            }
-            contextMs = elapsedMs(contextStart);
-            if (FAILED(contextResult) || !workerContext) {
-                ++failed;
-                finish();
-                return;
-            }
-            const auto shouldStop = [&]() {
-                return control->stop.load(std::memory_order_acquire);
-            };
-            const auto waitForFrameGap = [&]() {
-                while (!shouldStop()) {
-                    if (deferUntilFirstFrame
-                        && !impl_->firstFrameCompleted.load(
-                            std::memory_order_acquire
-                        )) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        continue;
-                    }
-                    const bool active = impl_->renderActive.load(
-                        std::memory_order_acquire
-                    );
-                    const std::int64_t idleMs = steadyNowMs()
-                        - impl_->lastRenderCompletedMs.load(
-                            std::memory_order_acquire
-                        );
-                    // Continuous 60fps playback never has a 100ms idle
-                    // window.  Waiting for that long left the real project
-                    // permanently on DrawGeometry.  Start at most one task
-                    // in each inter-frame gap after a short foreground grace
-                    // period; publishing still waits on realizationMutex, so
-                    // a completed resource cannot race the active frame.
-                    if (!active && idleMs >= 2) {
-                        return true;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-                return false;
-            };
-            const auto publish = [&] (
-                const Impl::RealizationTask &task,
-                Microsoft::WRL::ComPtr<ID2D1GeometryRealization> created
-            ) {
-                std::lock_guard<std::mutex> lock(impl_->realizationMutex);
-                if (shouldStop() || !isCurrent()) {
-                    return false;
-                }
-                if (impl_->resourceCacheEnabled) {
-                    impl_->realizationResources[task.cacheKey] = {
-                        task.keyGeometry,
-                        created,
-                        ++impl_->realizationResourceUseSerial,
-                    };
-                }
-                const bool published = assignRealization(task, created.Get());
-                if (published) {
-                    ++impl_->realizationCount;
-                }
-                return published;
-            };
-            const auto yieldSlice = [&]() {
-                if (elapsedMs(sliceStart) >= 50.0) {
-                    std::this_thread::yield();
-                    sliceStart = Clock::now();
-                }
-            };
-            // 自适应预热调度（2026-10 用户拍板）：8px 硬门限已废除——任务
-            // 全量入表，何时/何序创建按实测帧成本动态决定：
-            // - 富余（EMA 远低于帧预算）：全速烘烤，贵任务优先（最坏情形
-            //   最早暴露并完成）；稳定尺寸下最终全表完成，帧全部命中缓存。
-            // - 压力（EMA ≥ 帧预算，掉出 60fps）：可见行的任务豁免（命中
-            //   缓存直接消减 EMA），不可见的贵任务让路等待——空闲或压力
-            //   解除后自动继续；已完成任务即时入账，播放/暂停不重做。
-            // - 廉价任务（填充 / 预展开轮廓，≈1ms）任何状态都可跑。
-            constexpr float frameBudgetMs = 1000.0f / 60.0f;
-            const auto lineVisible = [&](std::size_t lineIndex) {
-                if (lineIndex >= impl_->lines.size()) {
-                    return false;
-                }
-                const Impl::CachedLine &line = impl_->lines[lineIndex];
-                const std::int64_t now = impl_->lastRenderedTimeMs.load(
-                    std::memory_order_acquire
-                );
-                if (now >= line.startMs && now <= line.endMs) {
-                    return true;
-                }
-                for (const DisplayWindow &window : line.displayWindows) {
-                    if (now >= window.startMs && now <= window.endMs) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            const auto taskVisible = [&](const Impl::RealizationTask &task) {
-                for (const Impl::RealizationTarget &target : task.targets) {
-                    if (lineVisible(target.lineIndex)) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            std::vector<std::size_t> pending(tasks.size());
-            for (std::size_t index = 0; index < pending.size(); ++index) {
-                pending[index] = index;
-            }
-            std::size_t completed = 0;
-            while (!pending.empty()) {
-                if (!waitForFrameGap()) {
-                    pending.clear();
-                    break;
-                }
-                const float ema = impl_->frameRenderMsEma.load(
-                    std::memory_order_acquire
-                );
-                const bool stress = ema > frameBudgetMs;
-                // 选下一个合格任务：可见（压力态加权）+ 成本降序。
-                std::size_t pickSlot = pending.size();
-                float bestScore = -1.0f;
-                for (std::size_t slot = 0; slot < pending.size(); ++slot) {
-                    const Impl::RealizationTask &task = tasks[pending[slot]];
-                    const bool visible = stress && taskVisible(task);
-                    const bool cheap = task.fillOutline
-                        || task.strokeWidth <= 0.0f
-                        || task.estCostMs <= 2.0f;
-                    if (!cheap && stress && !visible) {
-                        continue;
-                    }
-                    const float score =
-                        (visible ? 1.0e6f : 0.0f) + task.estCostMs;
-                    if (score > bestScore) {
-                        bestScore = score;
-                        pickSlot = slot;
-                    }
-                }
-                if (pickSlot == pending.size()) {
-                    // 压力态下暂无合格任务：小睡后再评估（EMA 与可见性
-                    // 随播放变化），停止请求由 waitForFrameGap 处理。
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(50)
-                    );
-                    continue;
-                }
-                const Impl::RealizationTask &task = tasks[pending[pickSlot]];
-                // 看门狗心跳：逐任务上报。单个任务可能合法耗时数十秒
-                // （密集矢量路径 × 宽描边的 CPU 细分），任务间的心跳保
-                // 证「忙碌但在推进」期间 GUI 的等待租期持续续期。
-                krok::subtitle::native::protocol::emitProgress(
-                    QStringLiteral("realize"),
-                    completed,
-                    tasks.size()
-                );
-                const auto waitStart = Clock::now();
-                if (!waitForFrameGap()) {
-                    pending.clear();
-                    break;
-                }
-                waitMs += elapsedMs(waitStart);
-                Microsoft::WRL::ComPtr<ID2D1GeometryRealization> created;
-                HRESULT result = E_FAIL;
-                const bool stroked = task.strokeWidth > 0.0f;
-                const auto createStart = Clock::now();
-                // 描边 realization 创建是单体不可中断调用（密集路径 ×
-                // 宽描边实测最坏 49s）：预热线程被它阻塞期间逐任务心跳
-                // 发不出。主线程此时通常空闲（空闲层心跳在喂），但用户
-                // 若恰好再触发 configure，等待期就只剩这里——按预算登记
-                // 代喂兜底（双保险）。矢量字形的描边任务走 fillOutline
-                //（预展开轮廓 + 填充语义，毫秒级），不经过昂贵分支。
-                if (task.fillOutline) {
-                    result = workerContext->CreateFilledGeometryRealization(
-                        task.geometry.Get(),
-                        flatteningTolerance,
-                        created.ReleaseAndGetAddressOf()
-                    );
-                } else if (stroked) {
-                    krok::subtitle::native::diagnostics::LongCallScope
-                        realizeCall("d2d-realize", 240.0);
-                    result = workerContext->CreateStrokedGeometryRealization(
-                        task.geometry.Get(),
-                        flatteningTolerance,
-                        task.strokeWidth,
-                        nullptr,
-                        created.ReleaseAndGetAddressOf()
-                    );
-                } else {
-                    result = workerContext->CreateFilledGeometryRealization(
-                        task.geometry.Get(),
-                        flatteningTolerance,
-                        created.ReleaseAndGetAddressOf()
-                    );
-                }
-                const double createMs = elapsedMs(createStart);
-                createDurations.push_back(createMs);
-                if (stroked) {
-                    ++strokeTasks;
-                    strokeCreateMs += createMs;
-                } else {
-                    ++fillTasks;
-                    fillCreateMs += createMs;
-                }
-                if (SUCCEEDED(result)) {
-                    const auto publishStart = Clock::now();
-                    publish(task, std::move(created));
-                    publishMs += elapsedMs(publishStart);
-                } else {
-                    ++failed;
-                }
-                yieldSlice();
-                pending[pickSlot] = pending.back();
-                pending.pop_back();
-                ++completed;
-            }
-            finish();
-            });
-        }
     }
     if (impl_->resourceCacheEnabled) {
         while (textGlyphRealizations.size() > impl_->glyphGeometryCapacity) {
@@ -3741,6 +3071,706 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         impl_->diagnostics.geometryCreatedStable += impl_->diagnostics.geometryCount;
     }
     impl_->configured = true;
+}
+
+// 从当前配置好的 lines 重算 realization 任务并启动预热线程。
+// configure() 初次建立与 resumeRealizationPrewarm()（pause 取消后恢复）
+// 共用本函数：已发布进 realizationResources 的任务会被复用，恢复时只补
+// 剩余部分，不重烘已经完成的网格（2026-10 尺寸缓存复用后永不烘焙修复）。
+void Direct2DGpuBackend::startRealizationPrewarm(bool deferUntilFirstFrame) {
+    std::vector<std::size_t> lineOrder(impl_->lines.size());
+    for (std::size_t index = 0; index < lineOrder.size(); ++index) {
+        lineOrder[index] = index;
+    }
+    const int prewarmTimeMs = impl_->scene.prewarmTimeMs;
+    const auto distanceFromPrewarm = [&](const Impl::CachedLine &line) {
+        int distance = std::min(
+            std::abs(prewarmTimeMs - line.startMs),
+            std::abs(prewarmTimeMs - line.endMs)
+        );
+        if (prewarmTimeMs >= line.startMs && prewarmTimeMs <= line.endMs) {
+            distance = 0;
+        }
+        for (const DisplayWindow &window : line.displayWindows) {
+            if (prewarmTimeMs >= window.startMs
+                && prewarmTimeMs <= window.endMs) {
+                return 0;
+            }
+            distance = std::min(
+                distance,
+                std::min(
+                    std::abs(prewarmTimeMs - window.startMs),
+                    std::abs(prewarmTimeMs - window.endMs)
+                )
+            );
+        }
+        return distance;
+    };
+    std::stable_sort(
+        lineOrder.begin(), lineOrder.end(),
+        [&](std::size_t left, std::size_t right) {
+            return distanceFromPrewarm(impl_->lines[left])
+                < distanceFromPrewarm(impl_->lines[right]);
+        }
+    );
+    struct RealizationCandidate {
+        Impl::RealizationTarget target;
+        Microsoft::WRL::ComPtr<ID2D1Geometry> sharedGeometry;
+        Microsoft::WRL::ComPtr<ID2D1Geometry> positionedGeometry;
+        D2D1_MATRIX_3X2_F instanceTransform =
+            D2D1::Matrix3x2F::Identity();
+        float strokeWidth = 0.0f;
+        bool stroked = false;
+        // 矢量字形描边任务按填充语义烘焙预展开轮廓（创建毫秒级）。
+        bool fillOutline = false;
+        // 预估创建成本（ms）：自适应预热调度的排序键（粗估即可，
+        // 只需保序：段数越多、描边越宽越贵；预展开任务恒廉价）。
+        float estCostMs = 1.0f;
+    };
+    std::vector<RealizationCandidate> candidates;
+    const std::size_t realizationCapacity = static_cast<std::size_t>(
+        std::max<std::uint64_t>(
+            impl_->scene.realizationCapacity,
+            Impl::defaultRealizationCapacity
+        )
+    );
+    impl_->diagnostics.realizationCapacity = realizationCapacity;
+    const auto appendCandidate = [&] (
+        std::size_t lineIndex,
+        int rubyIndex,
+        std::size_t charIndex,
+        Impl::RealizationKind kind,
+        ID2D1Geometry *sharedGeometry,
+        ID2D1Geometry *positionedGeometry,
+        const D2D1_MATRIX_3X2_F &instanceTransform,
+        float strokeWidth,
+        bool fillOutline = false,
+        float estCostMs = 1.0f
+    ) {
+        const bool isStroke = kind == Impl::RealizationKind::Stroke
+            || kind == Impl::RealizationKind::Stroke2;
+        if (sharedGeometry == nullptr || positionedGeometry == nullptr
+            || (isStroke && strokeWidth <= 0.0f)) {
+            return;
+        }
+        candidates.push_back({
+            {lineIndex, rubyIndex, charIndex, kind},
+            sharedGeometry,
+            positionedGeometry,
+            instanceTransform,
+            strokeWidth,
+            isStroke,
+        });
+        if (fillOutline) {
+            candidates.back().fillOutline = true;
+        }
+        candidates.back().estCostMs = estCostMs;
+    };
+    const auto appendCharTasks = [&] (
+        std::size_t lineIndex,
+        int rubyIndex,
+        std::size_t charIndex,
+        const Impl::CachedChar &ch,
+        float strokeWidth,
+        float stroke2Width
+    ) {
+        const float mainWidth = std::max(strokeWidth, 0.0f);
+        // 8px 门已拆（2026-10 用户拍板，二次确认）：细描边同样参与预
+        // 热——自适应调度需要它在重载下有余量可押。字节一致性不靠阈
+        // 值保证（任何阈值下「预热窗口内」都存在 realization/直绘的
+        // ±4 alpha 边缘差），靠金标准比较点两侧同烘焙状态（测试等
+        // prewarm 完成或用容差）。描边任务保留 0.5px 发丝卫生阀防
+        // 洪泛；何时/何序烘焙由预热线程按实测帧耗自适应。
+        const float strokeTaskWidth = mainWidth >= 0.5f ? mainWidth : 0.0f;
+        // 矢量字形（有预展开轮廓）的描边任务：几何换成轮廓、按填充
+        // 语义烘焙（毫秒级）；文本字形保持原生描边 realization。
+        const bool vectorChar = ch.strokeOutline != nullptr;
+        // 成本粗估（保序即可）：文本描边 ≈ 段数 × (1+宽/8)；矢量/
+        // 填充恒按 1ms。
+        const auto textStrokeCost = [](float width) -> float {
+            return 1.0f + (1.0f + width / 8.0f) * 2.0f;
+        };
+        appendCandidate(
+            lineIndex, rubyIndex, charIndex,
+            Impl::RealizationKind::Fill,
+            ch.realizationGeometry.Get(), ch.geometry.Get(),
+            ch.realizationTransform, 0.0f
+        );
+        appendCandidate(
+            lineIndex, rubyIndex, charIndex,
+            Impl::RealizationKind::ProtectedStroke,
+            ch.protectedRealizationGeometry.Get(),
+            ch.protectedStrokeGeometry.Get(),
+            ch.realizationTransform, 0.0f
+        );
+        if (strokeTaskWidth > 0.0f) {
+            appendCandidate(
+                lineIndex, rubyIndex, charIndex,
+                Impl::RealizationKind::Stroke,
+                vectorChar ? ch.strokeOutline.Get()
+                           : ch.realizationGeometry.Get(),
+                vectorChar ? ch.strokeGeometry.Get()
+                           : ch.geometry.Get(),
+                ch.realizationTransform, strokeTaskWidth,
+                vectorChar,
+                vectorChar ? 1.0f : textStrokeCost(strokeTaskWidth)
+            );
+        }
+        const float combinedStroke2 =
+            stroke2Width > 0.0f && strokeTaskWidth > 0.0f
+                ? strokeTaskWidth + std::max(stroke2Width, 0.0f)
+                : 0.0f;
+        if (combinedStroke2 > 0.0f) {
+            const bool vectorStroke2 = ch.stroke2Outline != nullptr;
+            appendCandidate(
+                lineIndex, rubyIndex, charIndex,
+                Impl::RealizationKind::Stroke2,
+                vectorStroke2 ? ch.stroke2Outline.Get()
+                              : ch.realizationGeometry.Get(),
+                vectorStroke2 ? ch.stroke2Geometry.Get()
+                              : ch.geometry.Get(),
+                ch.realizationTransform, combinedStroke2,
+                vectorStroke2,
+                vectorStroke2 ? 1.0f : textStrokeCost(combinedStroke2)
+            );
+        }
+    };
+    for (std::size_t lineIndex : lineOrder) {
+        const Impl::CachedLine &line = impl_->lines[lineIndex];
+        for (std::size_t charIndex = 0;
+             charIndex < line.chars.size(); ++charIndex) {
+            const Impl::CachedChar &ch = line.chars[charIndex];
+            const TextStyle &charStyle = ch.styleIndex >= 0
+                && ch.styleIndex < static_cast<int>(impl_->scene.charStyles.size())
+                ? impl_->scene.charStyles[static_cast<std::size_t>(ch.styleIndex)]
+                : line.style;
+            appendCharTasks(
+                lineIndex, -1, charIndex, ch,
+                charStyle.strokeWidth, charStyle.stroke2Width
+            );
+        }
+        for (std::size_t rubyIndex = 0;
+             rubyIndex < line.rubies.size(); ++rubyIndex) {
+            const Impl::CachedRuby &ruby = line.rubies[rubyIndex];
+            const TextStyle &rubyStyle = ruby.styleIndex >= 0
+                && ruby.styleIndex < static_cast<int>(impl_->scene.charStyles.size())
+                ? impl_->scene.charStyles[static_cast<std::size_t>(ruby.styleIndex)]
+                : line.style;
+            for (std::size_t charIndex = 0;
+                 charIndex < ruby.chars.size(); ++charIndex) {
+                appendCharTasks(
+                    lineIndex, static_cast<int>(rubyIndex), charIndex,
+                    ruby.chars[charIndex],
+                    ruby.latin ? rubyStyle.rubyLatinStrokeWidth
+                               : rubyStyle.rubyStrokeWidth,
+                    ruby.latin ? rubyStyle.rubyLatinStroke2Width
+                               : rubyStyle.rubyStroke2Width
+                );
+            }
+        }
+    }
+    std::vector<Impl::RealizationTask> tasks;
+    tasks.reserve(std::min(candidates.size(), realizationCapacity));
+    std::uint64_t capacitySkipped = 0;
+    const auto realizationKey = [] (
+        ID2D1Geometry *keyGeometry,
+        bool stroked,
+        float strokeWidth,
+        bool sharedResource,
+        const D2D1_MATRIX_3X2_F &transform
+    ) {
+        return Impl::RealizationCacheKey{
+            reinterpret_cast<std::uintptr_t>(keyGeometry),
+            stroked,
+            std::bit_cast<std::uint32_t>(stroked ? strokeWidth : 0.0f),
+            sharedResource,
+            std::bit_cast<std::uint32_t>(transform._11),
+            std::bit_cast<std::uint32_t>(transform._12),
+            std::bit_cast<std::uint32_t>(transform._21),
+            std::bit_cast<std::uint32_t>(transform._22),
+            std::bit_cast<std::uint32_t>(transform._31),
+            std::bit_cast<std::uint32_t>(transform._32),
+        };
+    };
+    if (candidates.size() <= realizationCapacity) {
+        // The original positioned realization is faster at draw time: no
+        // per-instance world transform is needed. Keep that path whenever
+        // every requested resource fits in the configured budget.
+        for (const RealizationCandidate &candidate : candidates) {
+            Impl::RealizationTask task;
+            task.targets.push_back(candidate.target);
+            task.geometry = candidate.positionedGeometry;
+            task.keyGeometry = candidate.sharedGeometry;
+            task.cacheKey = realizationKey(
+                candidate.sharedGeometry.Get(), candidate.stroked,
+                candidate.strokeWidth, false, candidate.instanceTransform
+            );
+            task.strokeWidth = candidate.strokeWidth;
+            task.fillOutline = candidate.fillOutline;
+            task.estCostMs = candidate.estCostMs;
+            tasks.push_back(std::move(task));
+        }
+    } else {
+        // Only capacity-bound scenes pay the instance-transform cost. A
+        // shared glyph realization replaces many positioned resources and
+        // prevents the tail of a long song from falling back to geometry.
+        using RealizationKey =
+            std::tuple<std::uintptr_t, bool, std::uint32_t>;
+        std::map<RealizationKey, std::size_t> taskByResource;
+        for (const RealizationCandidate &candidate : candidates) {
+            const RealizationKey key{
+                reinterpret_cast<std::uintptr_t>(
+                    candidate.sharedGeometry.Get()
+                ),
+                candidate.stroked,
+                std::bit_cast<std::uint32_t>(
+                    candidate.stroked ? candidate.strokeWidth : 0.0f
+                ),
+            };
+            const auto existing = taskByResource.find(key);
+            Impl::RealizationTarget target = candidate.target;
+            target.transform = candidate.instanceTransform;
+            if (existing != taskByResource.end()) {
+                tasks[existing->second].targets.push_back(target);
+                continue;
+            }
+            if (tasks.size() >= realizationCapacity) {
+                ++capacitySkipped;
+                continue;
+            }
+            Impl::RealizationTask task;
+            task.targets.push_back(target);
+            task.geometry = candidate.sharedGeometry;
+            task.keyGeometry = candidate.sharedGeometry;
+            task.cacheKey = realizationKey(
+                candidate.sharedGeometry.Get(), candidate.stroked,
+                candidate.strokeWidth, true,
+                D2D1::Matrix3x2F::Identity()
+            );
+            task.strokeWidth = candidate.strokeWidth;
+            task.fillOutline = candidate.fillOutline;
+            task.estCostMs = candidate.estCostMs;
+            tasks.push_back(std::move(task));
+            taskByResource.emplace(key, tasks.size() - 1);
+        }
+    }
+    const auto assignRealization = [this] (
+        const Impl::RealizationTask &task,
+        ID2D1GeometryRealization *realization
+    ) {
+        bool published = false;
+        for (const Impl::RealizationTarget &target : task.targets) {
+            if (target.lineIndex >= impl_->lines.size()) {
+                continue;
+            }
+            Impl::CachedLine &line = impl_->lines[target.lineIndex];
+            Impl::CachedChar *targetChar = nullptr;
+            if (target.rubyIndex < 0) {
+                if (target.charIndex < line.chars.size()) {
+                    targetChar = &line.chars[target.charIndex];
+                }
+            } else if (static_cast<std::size_t>(target.rubyIndex)
+                       < line.rubies.size()) {
+                Impl::CachedRuby &ruby = line.rubies[
+                    static_cast<std::size_t>(target.rubyIndex)
+                ];
+                if (target.charIndex < ruby.chars.size()) {
+                    targetChar = &ruby.chars[target.charIndex];
+                }
+            }
+            if (targetChar == nullptr) {
+                continue;
+            }
+            switch (target.kind) {
+            case Impl::RealizationKind::Fill:
+                targetChar->fillRealization = realization;
+                targetChar->fillRealizationTransform = target.transform;
+                break;
+            case Impl::RealizationKind::ProtectedStroke:
+                targetChar->protectedStrokeRealization = realization;
+                targetChar->protectedStrokeRealizationTransform = target.transform;
+                break;
+            case Impl::RealizationKind::Stroke:
+                targetChar->strokeRealization = realization;
+                targetChar->strokeRealizationTransform = target.transform;
+                break;
+            case Impl::RealizationKind::Stroke2:
+                targetChar->stroke2Realization = realization;
+                targetChar->stroke2RealizationTransform = target.transform;
+                break;
+            }
+            published = true;
+        }
+        return published;
+    };
+    std::vector<Impl::RealizationTask> pendingTasks;
+    pendingTasks.reserve(tasks.size());
+    std::set<Impl::RealizationCacheKey> reusedResources;
+    if (impl_->resourceCacheEnabled) {
+        std::lock_guard<std::mutex> lock(impl_->realizationMutex);
+        for (Impl::RealizationTask &task : tasks) {
+            const auto found = impl_->realizationResources.find(task.cacheKey);
+            if (found == impl_->realizationResources.end()) {
+                pendingTasks.push_back(std::move(task));
+                continue;
+            }
+            found->second.lastUse = ++impl_->realizationResourceUseSerial;
+            if (assignRealization(task, found->second.realization.Get())) {
+                reusedResources.insert(task.cacheKey);
+            }
+        }
+        impl_->realizationCount = reusedResources.size();
+    } else {
+        pendingTasks = std::move(tasks);
+    }
+    tasks = std::move(pendingTasks);
+    impl_->diagnostics.realizationPrewarmSkipped = capacitySkipped;
+    impl_->diagnostics.realizationPrewarmTasks = tasks.size();
+    if (tasks.empty()) {
+        // Every geometry resource survived from the previous generation.
+        // The current CachedChar slots are already rebound above.
+        impl_->realizationPrewarmComplete.store(
+            true, std::memory_order_release
+        );
+    } else {
+        auto control = std::make_shared<Impl::RealizationControl>();
+        control->generation = impl_->realizationGeneration;
+        impl_->realizationControl = control;
+        impl_->realizationPrewarmComplete.store(
+            false, std::memory_order_release
+        );
+        impl_->realizationThread = std::thread([
+        this,
+        control,
+        deferUntilFirstFrame,
+        realizationCapacity,
+        assignRealization,
+        tasks = std::move(tasks)
+        ]() mutable {
+        // Keep individual background realization chunks short enough for
+        // seek/style churn while staying inside the wide-stroke A/B gate.
+        // Match N3's export precision. Export uses these cached realizations
+        // directly, so a coarse tolerance becomes visible as faceted curves.
+        constexpr float flatteningTolerance = 0.25f;
+        const auto prewarmStart = Clock::now();
+        auto sliceStart = prewarmStart;
+        std::uint64_t failed = 0;
+        std::uint64_t fillTasks = 0;
+        std::uint64_t strokeTasks = 0;
+        double contextMs = 0.0;
+        double waitMs = 0.0;
+        double fillCreateMs = 0.0;
+        double strokeCreateMs = 0.0;
+        double publishMs = 0.0;
+        std::vector<double> createDurations;
+        createDurations.reserve(tasks.size());
+        const auto isCurrent = [&]() {
+            return control->generation == impl_->realizationGeneration;
+        };
+        const auto finish = [&]() {
+            std::lock_guard<std::mutex> lock(impl_->realizationMutex);
+            if (isCurrent()) {
+                impl_->diagnostics.realizationPrewarmSkipped += failed;
+                impl_->diagnostics.realizationPrewarmMs = elapsedMs(prewarmStart);
+                impl_->diagnostics.realizationPrewarmFillTasks = fillTasks;
+                impl_->diagnostics.realizationPrewarmStrokeTasks = strokeTasks;
+                impl_->diagnostics.realizationPrewarmContextMs = contextMs;
+                impl_->diagnostics.realizationPrewarmWaitMs = waitMs;
+                impl_->diagnostics.realizationPrewarmFillCreateMs = fillCreateMs;
+                impl_->diagnostics.realizationPrewarmStrokeCreateMs = strokeCreateMs;
+                impl_->diagnostics.realizationPrewarmPublishMs = publishMs;
+                if (!createDurations.empty()) {
+                    std::sort(createDurations.begin(), createDurations.end());
+                    const auto percentile = [&](double value) {
+                        const std::size_t index = static_cast<std::size_t>(
+                            std::ceil(value * static_cast<double>(
+                                createDurations.size() - 1
+                            ))
+                        );
+                        return createDurations[index];
+                    };
+                    impl_->diagnostics.realizationPrewarmCreateP50Ms =
+                        percentile(0.50);
+                    impl_->diagnostics.realizationPrewarmCreateP95Ms =
+                        percentile(0.95);
+                    impl_->diagnostics.realizationPrewarmCreateMaxMs =
+                        createDurations.back();
+                }
+                if (impl_->resourceCacheEnabled) {
+                    while (impl_->realizationResources.size()
+                           > realizationCapacity) {
+                        const auto victim = std::min_element(
+                            impl_->realizationResources.begin(),
+                            impl_->realizationResources.end(),
+                            [](const auto &left, const auto &right) {
+                                return left.second.lastUse
+                                    < right.second.lastUse;
+                            }
+                        );
+                        if (victim == impl_->realizationResources.end()) {
+                            break;
+                        }
+                        impl_->realizationResources.erase(victim);
+                    }
+                }
+                // 被取消（pause/析构）的预热不得标记完成：渲染侧的整
+                // 体门控（realizationReady）按 prewarmComplete 放行
+                // realization 网格路径，半热状态若被置 true 会把「部分
+                // 字符网格 + 部分字符原路径」锁死成常态（2026-10 多
+                // worker 抖动的放大器之一）。取消即保持未完成，渲染继
+                // 续原路径直到下一次 configure 重建预热。
+                impl_->realizationPrewarmComplete.store(
+                    !control->stop.load(std::memory_order_acquire),
+                    std::memory_order_release
+                );
+            }
+            control->done.store(true, std::memory_order_release);
+        };
+        Microsoft::WRL::ComPtr<ID2D1DeviceContext> workerBaseContext;
+        Microsoft::WRL::ComPtr<ID2D1DeviceContext1> workerContext;
+        const auto contextStart = Clock::now();
+        HRESULT contextResult = device_.d2dDevice()->CreateDeviceContext(
+            D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS,
+            workerBaseContext.ReleaseAndGetAddressOf()
+        );
+        if (SUCCEEDED(contextResult)) {
+            contextResult = workerBaseContext.As(&workerContext);
+        }
+        contextMs = elapsedMs(contextStart);
+        if (FAILED(contextResult) || !workerContext) {
+            ++failed;
+            finish();
+            return;
+        }
+        const auto shouldStop = [&]() {
+            return control->stop.load(std::memory_order_acquire);
+        };
+        const auto waitForFrameGap = [&]() {
+            while (!shouldStop()) {
+                if (deferUntilFirstFrame
+                    && !impl_->firstFrameCompleted.load(
+                        std::memory_order_acquire
+                    )) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+                const bool active = impl_->renderActive.load(
+                    std::memory_order_acquire
+                );
+                const std::int64_t idleMs = steadyNowMs()
+                    - impl_->lastRenderCompletedMs.load(
+                        std::memory_order_acquire
+                    );
+                // Continuous 60fps playback never has a 100ms idle
+                // window.  Waiting for that long left the real project
+                // permanently on DrawGeometry.  Start at most one task
+                // in each inter-frame gap after a short foreground grace
+                // period; publishing still waits on realizationMutex, so
+                // a completed resource cannot race the active frame.
+                if (!active && idleMs >= 2) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        };
+        const auto publish = [&] (
+            const Impl::RealizationTask &task,
+            Microsoft::WRL::ComPtr<ID2D1GeometryRealization> created
+        ) {
+            std::lock_guard<std::mutex> lock(impl_->realizationMutex);
+            if (shouldStop() || !isCurrent()) {
+                return false;
+            }
+            if (impl_->resourceCacheEnabled) {
+                impl_->realizationResources[task.cacheKey] = {
+                    task.keyGeometry,
+                    created,
+                    ++impl_->realizationResourceUseSerial,
+                };
+            }
+            const bool published = assignRealization(task, created.Get());
+            if (published) {
+                ++impl_->realizationCount;
+            }
+            return published;
+        };
+        const auto yieldSlice = [&]() {
+            if (elapsedMs(sliceStart) >= 50.0) {
+                std::this_thread::yield();
+                sliceStart = Clock::now();
+            }
+        };
+        // 自适应预热调度（2026-10 用户拍板）：8px 硬门限已废除——任务
+        // 全量入表，何时/何序创建按实测帧成本动态决定：
+        // - 富余（EMA 远低于帧预算）：全速烘烤，贵任务优先（最坏情形
+        //   最早暴露并完成）；稳定尺寸下最终全表完成，帧全部命中缓存。
+        // - 压力（EMA ≥ 帧预算，掉出 60fps）：可见行的任务豁免（命中
+        //   缓存直接消减 EMA），不可见的贵任务让路等待——空闲或压力
+        //   解除后自动继续；已完成任务即时入账，播放/暂停不重做。
+        // - 廉价任务（填充 / 预展开轮廓，≈1ms）任何状态都可跑。
+        // - 任何任务让路超过 stressDeferCeilingMs 后强制入候选：预热必须
+        //   有界收敛，否则全池同步门永远等不到「全员完成」。
+        // 压力判据的帧预算可用 KROK_GPU_PREWARM_FRAME_BUDGET_MS 覆盖
+        // （诊断/验证：压低预算即复现「持续压力」下的调度行为）。
+        const float frameBudgetMs = static_cast<float>(direct2d::environmentDouble(
+            "KROK_GPU_PREWARM_FRAME_BUDGET_MS", 1000.0 / 60.0, 0.05, 1000.0
+        ));
+        const auto lineVisible = [&](std::size_t lineIndex) {
+            if (lineIndex >= impl_->lines.size()) {
+                return false;
+            }
+            const Impl::CachedLine &line = impl_->lines[lineIndex];
+            const std::int64_t now = impl_->lastRenderedTimeMs.load(
+                std::memory_order_acquire
+            );
+            if (now >= line.startMs && now <= line.endMs) {
+                return true;
+            }
+            for (const DisplayWindow &window : line.displayWindows) {
+                if (now >= window.startMs && now <= window.endMs) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto taskVisible = [&](const Impl::RealizationTask &task) {
+            for (const Impl::RealizationTarget &target : task.targets) {
+                if (lineVisible(target.lineIndex)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        std::vector<std::size_t> pending(tasks.size());
+        for (std::size_t index = 0; index < pending.size(); ++index) {
+            pending[index] = index;
+        }
+        // 压力态推迟上限（2026-10 收敛性修复）：不可见贵任务的让路只在
+        // 压力持续期内有效。全池同步门要求全员预热完成才放行 realization
+        // 路径，而原路径直描本身就可能超预算——无限推迟会把池锁死在
+        // 「未烘焙 → 更慢 → 继续压力 → 继续推迟」的循环里（可见行烘完
+        // 也用不上）。每个任务最多让路 2s，之后按成本序补烘，保证有界收敛。
+        constexpr std::int64_t stressDeferCeilingMs = 2000;
+        std::vector<std::int64_t> deferredSinceMs(tasks.size(), 0);
+        std::size_t completed = 0;
+        while (!pending.empty()) {
+            if (!waitForFrameGap()) {
+                pending.clear();
+                break;
+            }
+            const float ema = impl_->frameRenderMsEma.load(
+                std::memory_order_acquire
+            );
+            const bool stress = ema > frameBudgetMs;
+            // 选下一个合格任务：可见（压力态加权）+ 成本降序。
+            std::size_t pickSlot = pending.size();
+            float bestScore = -1.0f;
+            for (std::size_t slot = 0; slot < pending.size(); ++slot) {
+                const std::size_t taskIndex = pending[slot];
+                const Impl::RealizationTask &task = tasks[taskIndex];
+                const bool visible = stress && taskVisible(task);
+                const bool cheap = task.fillOutline
+                    || task.strokeWidth <= 0.0f
+                    || task.estCostMs <= 2.0f;
+                if (!cheap && stress && !visible) {
+                    const std::int64_t nowMs = steadyNowMs();
+                    if (deferredSinceMs[taskIndex] == 0) {
+                        deferredSinceMs[taskIndex] = nowMs;
+                    }
+                    if (nowMs - deferredSinceMs[taskIndex]
+                        < stressDeferCeilingMs) {
+                        continue;
+                    }
+                    // 让路超时：计入候选（可见任务仍以 1e6 加权优先）。
+                }
+                const float score =
+                    (visible ? 1.0e6f : 0.0f) + task.estCostMs;
+                if (score > bestScore) {
+                    bestScore = score;
+                    pickSlot = slot;
+                }
+            }
+            if (pickSlot == pending.size()) {
+                // 压力态下暂无合格任务：小睡后再评估（EMA 与可见性
+                // 随播放变化），停止请求由 waitForFrameGap 处理。
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(50)
+                );
+                continue;
+            }
+            const Impl::RealizationTask &task = tasks[pending[pickSlot]];
+            // 看门狗心跳：逐任务上报。单个任务可能合法耗时数十秒
+            // （密集矢量路径 × 宽描边的 CPU 细分），任务间的心跳保
+            // 证「忙碌但在推进」期间 GUI 的等待租期持续续期。
+            krok::subtitle::native::protocol::emitProgress(
+                QStringLiteral("realize"),
+                completed,
+                tasks.size()
+            );
+            const auto waitStart = Clock::now();
+            if (!waitForFrameGap()) {
+                pending.clear();
+                break;
+            }
+            waitMs += elapsedMs(waitStart);
+            Microsoft::WRL::ComPtr<ID2D1GeometryRealization> created;
+            HRESULT result = E_FAIL;
+            const bool stroked = task.strokeWidth > 0.0f;
+            const auto createStart = Clock::now();
+            // 描边 realization 创建是单体不可中断调用（密集路径 ×
+            // 宽描边实测最坏 49s）：预热线程被它阻塞期间逐任务心跳
+            // 发不出。主线程此时通常空闲（空闲层心跳在喂），但用户
+            // 若恰好再触发 configure，等待期就只剩这里——按预算登记
+            // 代喂兜底（双保险）。矢量字形的描边任务走 fillOutline
+            //（预展开轮廓 + 填充语义，毫秒级），不经过昂贵分支。
+            if (task.fillOutline) {
+                result = workerContext->CreateFilledGeometryRealization(
+                    task.geometry.Get(),
+                    flatteningTolerance,
+                    created.ReleaseAndGetAddressOf()
+                );
+            } else if (stroked) {
+                krok::subtitle::native::diagnostics::LongCallScope
+                    realizeCall("d2d-realize", 240.0);
+                result = workerContext->CreateStrokedGeometryRealization(
+                    task.geometry.Get(),
+                    flatteningTolerance,
+                    task.strokeWidth,
+                    nullptr,
+                    created.ReleaseAndGetAddressOf()
+                );
+            } else {
+                result = workerContext->CreateFilledGeometryRealization(
+                    task.geometry.Get(),
+                    flatteningTolerance,
+                    created.ReleaseAndGetAddressOf()
+                );
+            }
+            const double createMs = elapsedMs(createStart);
+            createDurations.push_back(createMs);
+            if (stroked) {
+                ++strokeTasks;
+                strokeCreateMs += createMs;
+            } else {
+                ++fillTasks;
+                fillCreateMs += createMs;
+            }
+            if (SUCCEEDED(result)) {
+                const auto publishStart = Clock::now();
+                publish(task, std::move(created));
+                publishMs += elapsedMs(publishStart);
+            } else {
+                ++failed;
+            }
+            yieldSlice();
+            pending[pickSlot] = pending.back();
+            pending.pop_back();
+            ++completed;
+        }
+        finish();
+        });
+    }
 }
 
 }  // namespace krok::subtitle::native

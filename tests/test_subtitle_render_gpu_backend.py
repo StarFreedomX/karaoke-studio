@@ -13853,3 +13853,490 @@ def test_gpu_honours_resolved_face_style(monkeypatch) -> None:
             f"style={label}: GPU 墨量 {injected[label]} 与直接请求 {direct[label]} 不符"
             "（说明没有按 style 选 face）"
         )
+
+
+def _pool_prewarm_track(line_count: int = 6, chars_per_line: int = 6) -> TimingTrack:
+    """池化预热用例的场景：多行多字（预热量足够观察中断/恢复）。"""
+    return TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar("歌", line_index * 2_000 + char_index * 100)
+                    for char_index in range(chars_per_line)
+                ],
+                end_ms=line_index * 2_000 + chars_per_line * 100,
+            )
+            for line_index in range(line_count)
+        ]
+    )
+
+
+def _poll_prewarm_complete(
+    renderer: NativeRendererProcess, deadline_s: float = 20.0
+) -> dict:
+    deadline = time.monotonic() + deadline_s
+    diagnostics = renderer.gpu_diagnostics()
+    while time.monotonic() < deadline:
+        if diagnostics.get("realization_prewarm_complete"):
+            break
+        time.sleep(0.05)
+        diagnostics = renderer.gpu_diagnostics()
+    return diagnostics
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_present_rendered_drops_cancelled_generation(monkeypatch) -> None:
+    """取消代际的帧一律不得上屏（native 前置检查）。
+
+    2026-10 探针：渲染 generation 7 的 750ms 帧 → 取消 generation 7 →
+    提交该帧仍返回 gpu_frame_presented。Python 侧的有效性检查在 present
+    之后，拒绝信号救不回已经写进 DComp 的像素。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        renderer.configure_gpu(
+            _g1_track(), _g1_style(), width=320, height=180, fps=60, force_warp=True
+        )
+        rendered = renderer.render_gpu_frame_direct(
+            750, force_warp=True, generation=7, frame_index=0
+        )
+        assert rendered["event"] == "gpu_frame_rendered_direct"
+        renderer.cancel_generation(7)
+        dropped = renderer.present_rendered_gpu_frame(
+            parent_hwnd=1,
+            x=0,
+            y=0,
+            width=320,
+            height=180,
+            t_ms=750,
+            force_warp=True,
+            generation=7,
+        )
+        assert dropped["event"] == "gpu_frame_dropped", dropped
+        assert dropped["reason"] == "generation_cancelled", dropped
+        assert dropped["generation"] == 7
+        # 取消只作用于本代际：新代际照常渲染（检查不得把整条直画路径关死）。
+        fresh = renderer.render_gpu_frame_direct(
+            750, force_warp=True, generation=8, frame_index=1
+        )
+        assert fresh["event"] == "gpu_frame_rendered_direct", fresh
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_pool_resize_cache_resume_restores_interrupted_prewarm(monkeypatch) -> None:
+    """尺寸缓存复用的池必须续烘被打断的 realization 预热。
+
+    2026-10 复现：640×360 预热未完成 → 切 800×450（pause 取消预热）→
+    切回 640×360 命中缓存池 → 持续渲染 15s/795 帧预热恒未完成、全部帧
+    走原路径直描。修复后 resume 会按当前 lines 续烘剩余任务。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = _pool_prewarm_track()
+    style = _g1_style(stroke_width_px=12, stroke2_enabled=True, stroke2_width_px=4)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30.0) as renderer:
+        first = renderer.configure_gpu(
+            track,
+            style,
+            width=640,
+            height=360,
+            fps=60,
+            worker_count=2,
+            defer_followers=True,
+            defer_realizations_until_first_frame=True,
+        )
+        # defer 到首帧：预热线程一定处于「未完成」状态，保证 pause 打断的是
+        # 真实在跑的预热（而不是已经烘完的空转）。
+        assert first["realization_prewarm_complete"] is False, first
+        renderer.resize_gpu_target(width=800, height=450, dpr=1.0, worker_count=2)
+        resumed = renderer.resize_gpu_target(
+            width=640, height=360, dpr=1.0, worker_count=2
+        )
+        assert resumed.get("target_cache_hit") is True, resumed
+
+        diagnostics = _poll_prewarm_complete(renderer)
+
+    assert diagnostics.get("realization_prewarm_complete") is True, {
+        key: diagnostics.get(key)
+        for key in (
+            "realization_prewarm_complete",
+            "realization_prewarm_tasks",
+            "realization_count",
+            "worker_count_ready",
+        )
+    }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_pool_chroma_change_restores_interrupted_prewarm(monkeypatch) -> None:
+    """烘焙中仅改 RGB 颜色后，池也必须续烘（同尺寸不切池，但 pause 取消了预热）。
+
+    2026-10 复现：池 pause 取消预热 → backend 走「仅改色」快速路径提前返回
+    → 持续渲染 12s/627 帧仍未恢复烘焙。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = _pool_prewarm_track()
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30.0) as renderer:
+        first = renderer.configure_gpu(
+            track,
+            _g1_style(
+                stroke_width_px=12,
+                stroke2_enabled=True,
+                stroke2_width_px=4,
+                fill_color="#FF2030",
+            ),
+            width=640,
+            height=360,
+            fps=60,
+            worker_count=2,
+            defer_followers=True,
+            defer_realizations_until_first_frame=True,
+        )
+        assert first["realization_prewarm_complete"] is False, first
+        second = renderer.configure_gpu(
+            track,
+            _g1_style(
+                stroke_width_px=12,
+                stroke2_enabled=True,
+                stroke2_width_px=4,
+                fill_color="#2F6BFF",
+            ),
+            width=640,
+            height=360,
+            fps=60,
+            worker_count=2,
+            defer_followers=True,
+            defer_realizations_until_first_frame=True,
+        )
+        assert second["realization_prewarm_complete"] is False, second
+
+        diagnostics = _poll_prewarm_complete(renderer)
+
+    assert diagnostics.get("realization_prewarm_complete") is True, {
+        key: diagnostics.get(key)
+        for key in (
+            "realization_prewarm_complete",
+            "realization_prewarm_tasks",
+            "realization_count",
+        )
+    }
+
+
+def _raw_vs_baked_metrics(expected: bytes, actual: bytes) -> dict[str, float]:
+    """预乘 RGBA 帧对的画面一致性指标（2026-10 raw/baked 验收口径）。
+
+    回读是**直读** RGBA：低 alpha 像素的 RGB 通道无意义（AA 尾巴处可以
+    0 ↔ 255 乱跳），必须先乘回 alpha 再比较，否则统计被透明噪声主导。
+    返回 mean（可见像素平均通道差）、iou（墨迹掩码交并比）、
+    over8_px / over8_ratio（任一通道差 > 8 的像素数与占比）、
+    max_diff（最大单通道差）、alpha_ratio（墨迹总量比）。
+    """
+    expected_rgba = np.frombuffer(expected, dtype=np.uint8).reshape(-1, 4)
+    actual_rgba = np.frombuffer(actual, dtype=np.uint8).reshape(-1, 4)
+    expected_ink = expected_rgba[:, 3] > 2
+    actual_ink = actual_rgba[:, 3] > 2
+    union = expected_ink | actual_ink
+    intersection = expected_ink & actual_ink
+    alpha_ratio = float(
+        actual_rgba[:, 3].astype(np.int64).sum()
+        / max(int(expected_rgba[:, 3].astype(np.int64).sum()), 1)
+    )
+    union_px = max(int(np.count_nonzero(union)), 1)
+    if not np.any(union):
+        return {
+            "mean": 0.0,
+            "iou": 1.0,
+            "over8_px": 0,
+            "over8_ratio": 0.0,
+            "max_diff": 0,
+            "alpha_ratio": alpha_ratio,
+        }
+    expected_premul = np.concatenate(
+        [
+            expected_rgba[:, :3].astype(np.int32) * expected_rgba[:, 3:4] // 255,
+            expected_rgba[:, 3:4].astype(np.int32),
+        ],
+        axis=1,
+    )
+    actual_premul = np.concatenate(
+        [
+            actual_rgba[:, :3].astype(np.int32) * actual_rgba[:, 3:4] // 255,
+            actual_rgba[:, 3:4].astype(np.int32),
+        ],
+        axis=1,
+    )
+    delta = np.abs(expected_premul[union] - actual_premul[union])
+    per_pixel = delta.max(axis=1)
+    return {
+        "mean": float(np.mean(delta)),
+        "iou": float(np.count_nonzero(intersection)) / union_px,
+        "over8_px": int(np.count_nonzero(per_pixel > 8)),
+        "over8_ratio": float(np.count_nonzero(per_pixel > 8)) / union_px,
+        "max_diff": int(per_pixel.max()),
+        "alpha_ratio": alpha_ratio,
+    }
+
+
+def _render_raw_and_baked(
+    renderer: NativeRendererProcess,
+    style: Style,
+    track: TimingTrack,
+    timestamps: tuple[int, ...],
+    *,
+    width: int,
+    height: int,
+) -> tuple[list[bytes], list[bytes]]:
+    _, raw = _render_g1_frames(
+        renderer,
+        style,
+        timestamps,
+        force_warp=False,
+        track=track,
+        width=width,
+        height=height,
+        realization_enabled=False,
+    )
+    _, baked = _render_g1_frames(
+        renderer,
+        style,
+        timestamps,
+        force_warp=False,
+        track=track,
+        width=width,
+        height=height,
+        realization_enabled=True,
+        wait_realizations=True,
+    )
+    return raw, baked
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("scenario", [(640, 360, 64), (960, 540, 96)])
+def test_gpu_raw_and_baked_frames_stay_within_acceptance_bounds(
+    scenario, monkeypatch
+) -> None:
+    """raw（原路径直描）与 baked（realization 网格）的画面一致性验收。
+
+    Direct2D realization 把曲线展平为多边形近似（flattening 容差 0.25f），
+    边缘 AA 覆盖因此与直描系统性偏移——这是两条绘制路径的固有差别，
+    不是缓存脏读。2026-10 实测（Meiryo/Arial「永漢Abg」，无注音，
+    预乘后比较）：
+
+    | 样式 | 通道差 > 8 的像素 | 最大通道差 | alpha 总量变化 |
+    |---|---:|---:|---:|
+    | 无描边正文 | 1240 | 112 | +1.95% |
+    | 双描边 | 1263 | 105 | +0.06% |
+    | 发光 | 1354 | 105 | +0.01% |
+
+    带注音时正文的墨迹更宽（差 > 8 的像素 1828、alpha +0.75%）。验收口径：
+    墨迹几何一致（IoU ≥ 0.97、平均通道差有界）+ 边缘差局限在 AA 边带
+    （差 > 8 占比有界、最大通道差有界）。四种组合（正文/双描边/发光 ×
+    注音/无注音）在两种输出尺寸与字号下都跑，防止容差或网格选择被改动
+    后画面无声退化。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    width, height, font_size = scenario
+    chars = ["永", "漢", "A", "b", "g"]
+    line = TimingLine(
+        chars=[TimingChar(ch, index * 250) for index, ch in enumerate(chars)],
+        end_ms=1_500,
+    )
+    ruby = RubyAnnotation(
+        kanji="永漢",
+        reading="よんかん",
+        reading_parts=["よん", "かん"],
+        reading_part_ms=[500],
+        pos_start_ms=0,
+        pos_end_ms=1_500,
+    )
+    tracks = {
+        "noruby": TimingTrack(lines=[line]),
+        "ruby": TimingTrack(lines=[line], rubies=[ruby]),
+    }
+    common_style = dict(
+        font_family="Meiryo",
+        font_family_latin="Arial",
+        font_size_px=font_size,
+    )
+    styles = {
+        "body": _g1_style(
+            **common_style,
+            stroke_width_px=0,
+            stroke2_enabled=False,
+            decoration_kind="none",
+        ),
+        "double_stroke": _g1_style(
+            **common_style,
+            stroke_width_px=6,
+            stroke2_enabled=True,
+            stroke2_width_px=4,
+            decoration_kind="none",
+        ),
+        "glow": _g1_style(
+            **common_style,
+            stroke_width_px=6,
+            stroke2_enabled=False,
+            decoration_kind="glow",
+            glow_radius_px=8,
+            glow_before_radius_px=8,
+            glow_after_radius_px=8,
+        ),
+    }
+    timestamps = (500, 1_000)
+    metrics: dict[str, dict[str, float]] = {}
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        for track_label, track in tracks.items():
+            for style_label, style in styles.items():
+                raw, baked = _render_raw_and_baked(
+                    renderer, style, track, timestamps, width=width, height=height
+                )
+                frame_metrics = [
+                    _raw_vs_baked_metrics(expected, actual)
+                    for expected, actual in zip(raw, baked)
+                ]
+                metrics[f"{track_label}/{style_label}"] = {
+                    key: max(frame[key] for frame in frame_metrics)
+                    for key in frame_metrics[0]
+                }
+
+    for label, frame in metrics.items():
+        # 墨迹几何一致（实测 IoU ≥ 0.982、mean ≤ 4.4）。
+        assert frame["iou"] >= 0.97, (label, frame)
+        assert frame["mean"] <= 6.0, (label, frame)
+        # 边缘差局限在 AA 边带（实测差 > 8 最多占可见面积 25.3%，出现在
+        # 墨迹最细的无注音正文；注音/描边类均 < 16%）。
+        assert frame["over8_ratio"] <= 0.35, (label, frame)
+        # alpha 总量（墨迹总量）变化有界：实测 |Δ| ≤ 2.0%。
+        assert abs(frame["alpha_ratio"] - 1.0) <= 0.03, (label, frame)
+        # 最大单通道差有界（实测 ≤ 112；容差/网格退化会把它推高）。
+        assert frame["max_diff"] <= 160, (label, frame)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_prewarm_converges_under_sustained_stress(monkeypatch) -> None:
+    """持续压力下预热必须仍有界推进（不可见贵任务的让路有上限）。
+
+    2026-10 风险：预热在帧耗超预算时推迟不可见行的昂贵任务，而全池同步门
+    必须等全部任务完成才放行 realization 路径——若压力恒不解除（原路径直描
+    本身就超预算），无限推迟会把池锁死在「未烘焙 → 更慢 → 继续压力 →
+    继续推迟」的循环里。KROK_GPU_PREWARM_FRAME_BUDGET_MS 压低预算即制造
+    「持续压力」：修复前 40s/1350 帧仍停在 96/192 任务、永不完成，修复后
+    ≤ 2s 让路上限 + 烘烤耗时内收敛。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("KROK_GPU_PREWARM_FRAME_BUDGET_MS", "0.2")
+    style = _g1_style(stroke_width_px=14, stroke2_enabled=True, stroke2_width_px=6)
+    track = _pool_prewarm_track(line_count=8, chars_per_line=8)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        configured = renderer.configure_gpu(
+            track,
+            style,
+            width=640,
+            height=360,
+            fps=60,
+            realization_enabled=True,
+        )
+        assert configured["realization_prewarm_tasks"] > 0, configured
+        started = time.monotonic()
+        frames = 0
+        diagnostics = configured
+        while time.monotonic() - started < 30.0:
+            # 媒体节奏播放：帧间留缝，预热线程才有切片（连续满负载下预热
+            # 本就不该抢帧，那是 waitForFrameGap 的设计语义）。
+            renderer.render_gpu_frame(
+                int((time.monotonic() - started) * 1000.0) % 3_000,
+                frame_index=frames,
+                include_checksum=False,
+            )
+            frames += 1
+            time.sleep(0.02)
+            if frames % 25 == 0:
+                diagnostics = renderer.gpu_diagnostics()
+                if diagnostics.get("realization_prewarm_complete"):
+                    break
+
+    assert diagnostics.get("realization_prewarm_complete") is True, {
+        key: diagnostics.get(key)
+        for key in (
+            "realization_prewarm_complete",
+            "realization_prewarm_tasks",
+            "realization_count",
+            "realization_prewarm_skipped",
+        )
+    }
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_diagnostics_classifies_resource_bytes(monkeypatch) -> None:
+    """资源分类字节必须随诊断上报，且计入 estimated_cache_bytes 总量。
+
+    2026-10 风险：字体 face 缓存无容量上限，帧仓/发光缓存/网格/画笔各自
+    计限，单看计数无法回答「总共占了多少显存」。分类字节是低显存机器
+    的最小观测口径（多 worker 由池侧聚合求和）。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30.0) as renderer:
+        renderer.configure_gpu(
+            _g1_track(),
+            _g1_style(stroke_width_px=10, stroke2_enabled=True, stroke2_width_px=4),
+            width=320,
+            height=180,
+            fps=60,
+            worker_count=2,
+            realization_enabled=True,
+            wait_realizations=True,
+        )
+        renderer.render_gpu_frame(500, frame_index=0)
+        diagnostics = renderer.gpu_diagnostics()
+
+    for key in (
+        "font_face_count",
+        "font_face_bytes_estimate",
+        "frame_store_slots",
+        "frame_store_bytes_estimate",
+        "glow_cache_bytes_estimate",
+        "realization_resource_bytes_estimate",
+    ):
+        assert key in diagnostics, diagnostics.keys()
+    assert diagnostics["font_face_count"] > 0
+    assert diagnostics["font_face_bytes_estimate"] >= 64 * 1024
+    assert diagnostics["realization_resource_bytes_estimate"] > 0
+    # 分类之和（含画笔等既有口径）不得超过总量估计。
+    classified = (
+        diagnostics["font_face_bytes_estimate"]
+        + diagnostics["frame_store_bytes_estimate"]
+        + diagnostics["glow_cache_bytes_estimate"]
+        + diagnostics["realization_resource_bytes_estimate"]
+    )
+    assert diagnostics["estimated_cache_bytes"] >= classified
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_direct_commands_ignore_unconsumed_cancel_ack(monkeypatch) -> None:
+    """未消费的取消确认不得让后续直画命令的响应整体错位。
+
+    2026-10 探针：``send_cancel_generation`` 只写不读，sidecar 的
+    ``generation_cancelled`` 确认留在响应流里；旧实现「读下一条」把它当作
+    渲染成功返回，真正的渲染响应留给下一条命令（请求渲染 1000ms 拿到
+    渲染 500ms 的成功消息）。修复后按事件类型 + 请求身份匹配。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        renderer.configure_gpu(
+            _g1_track(), _g1_style(), width=320, height=180, fps=60, force_warp=True
+        )
+        first = renderer.render_gpu_frame_direct(
+            500, force_warp=True, generation=3, frame_index=0
+        )
+        assert first["event"] == "gpu_frame_rendered_direct"
+        # 模拟 GUI 侧异步取消：只写不读（确认留在响应流里）。
+        renderer.send_cancel_generation(3)
+        second = renderer.render_gpu_frame_direct(
+            1000, force_warp=True, generation=4, frame_index=1
+        )
+        assert second["event"] == "gpu_frame_rendered_direct", second
+        assert second["t_ms"] == 1000, second
+        assert second["generation"] == 4, second
+        # 错位的确认已被转入积压队列（真正的消费者仍可取到）。
+        assert [
+            event.get("event") for event in renderer._event_backlog
+        ] == ["generation_cancelled"]

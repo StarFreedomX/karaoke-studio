@@ -1269,8 +1269,13 @@ class GpuAsyncSubtitleRenderer(QObject):
                 self._note("cache_hits")
                 self._note("frames_emitted")
                 self.frame_ready.emit(cached, requested_t)
-                # 缓存里只会有 sidecar 渲染的帧（回退帧不入缓存）。
-                self._note_backend_mode("gpu")
+                # 缓存里既有 sidecar 帧也有 CPU 回退帧（fallback 帧带
+                # preview_backend=cpu 标记）：标签按帧的实际来源记，
+                # 不能一律报 gpu——否则 GPU→Painter 的切换被掩盖，
+                # 现场日志与用户看到的画面对不上（2026-10 探针复现）。
+                self._note_backend_mode(
+                    "cpu" if cached.text("preview_backend") == "cpu" else "gpu"
+                )
             else:
                 self._note("cache_misses")
             if self._playing and self._lookahead_frames > 0:
@@ -2567,6 +2572,12 @@ class GpuAsyncSubtitleRenderer(QObject):
                             generation=generation,
                             frame_index=self._frame_index,
                         )
+                        if render_event.get("reason") == "generation_cancelled":
+                            # 本代际已被取消（seek/停止/隐藏视图）：native 不再
+                            # 渲染进帧仓，继续排队只会拿到 dropped。调度器退出，
+                            # 等新代际重新拉起。
+                            self._note("stale_frames_dropped")
+                            return
                         self._frame_index += 1
                         render_ms = float(render_event.get("render_ms") or 0.0)
                         if render_ms > 0.0:
@@ -2616,6 +2627,27 @@ class GpuAsyncSubtitleRenderer(QObject):
                                 )
                             painted += 1
                         key += 1
+                    if painted == 0:
+                        # 窗口内未来帧全部已缓存：等到播放头推进 / 状态变化，
+                        # 不再立刻重扫同一批缓存键。原实现直接 continue，在
+                        # 媒体时钟暂停或恢复窗口内会以每秒二十万次的空转扫
+                        # 描烧 CPU/GIL（2026-10 探针：0.25s ≈ 52416 次循环、
+                        # 新绘制帧 0、CPU 时间 ~0.25s），拖慢 GUI 与低配机。
+                        # 等待上限取到下一个帧键边界（最多 50ms），期间
+                        # condition 上有任何新请求/代际变化都会立刻唤醒。
+                        next_key_ms = cache.timestamp_for_key(floor_key + 1)
+                        wait_s = min(
+                            max((next_key_ms - media_now) / 1000.0, 0.001),
+                            0.05,
+                        )
+                        with self._condition:
+                            if (
+                                self._stopped
+                                or not self._playing
+                                or generation != self._generation
+                            ):
+                                return
+                            self._condition.wait(timeout=wait_s)
                     continue
 
                 # a) 收割一帧完成（小超时等待，避免空转轮询烧 CPU）。
@@ -2791,6 +2823,17 @@ class GpuAsyncSubtitleRenderer(QObject):
         force_warp: bool,
     ) -> None:
         """上屏一帧已渲染的纹理：区域钳制到当前配置纹理内 + 记账/emit。"""
+        # 提交前的代际/目标复核（native 侧另有前置取消检查兜底）：走到这里
+        # 与 GUI 线程改代际/隐藏视图可能只差几条指令，旧代际的像素绝不能
+        # 上屏。目标几何用最新值（同尺寸下的纯位移不该丢帧），代际变了才弃。
+        with self._condition:
+            if self._stopped or generation != self._generation:
+                self._note("stale_frames_dropped")
+                return
+            current_target = self._native_target
+        if current_target is None:
+            self._note("stale_frames_dropped")
+            return
         (
             parent_hwnd,
             target_x,
@@ -2799,7 +2842,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             target_height,
             src_x,
             src_y,
-        ) = native_target
+        ) = current_target
         # 窗口几何来自 GUI 线程的最新值，纹理尺寸是本 worker 最近一次
         # configure/resize 的值——resize 期间两者短暂不一致时把区域
         # 钳进纹理内，避免 present 校验失败被计入连续失败弹回退框。
@@ -2826,9 +2869,9 @@ class GpuAsyncSubtitleRenderer(QObject):
             generation=generation,
         )
         if event.get("dropped"):
-            # 帧仓未命中（代际翻动 / 池满丢帧）：本拍不上屏，屏幕延续上一
-            # 帧。绝不把别的时刻的像素端出去——这是慢机「预览回退」的根
-            # 因修复点。
+            # 帧仓未命中（代际翻动 / 池满丢帧 / 代际已取消）：本拍不上屏，
+            # 屏幕延续上一帧。绝不把别的时刻的像素端出去——这是慢机「预览
+            # 回退」的根因修复点。
             self._note("stale_frames_dropped")
             return
         completed_at = time.monotonic()
@@ -3353,8 +3396,11 @@ class NativeAsyncSubtitleRenderer(QObject):
             with self._condition:
                 self._emitted_request_keys.add(requested_key)
             self.frame_ready.emit(cached, requested_t)
-            # 缓存里只会有 sidecar 渲染的帧（回退帧不入缓存）。
-            self._note_backend_mode("gpu")
+            # 同 NativePreviewRenderer.request：缓存帧的来源以后端标记为准
+            # （回退帧带 preview_backend=cpu），不无条件报 gpu。
+            self._note_backend_mode(
+                "cpu" if cached.text("preview_backend") == "cpu" else "gpu"
+            )
         else:
             self._stats.note_cache_miss()
         with self._condition:

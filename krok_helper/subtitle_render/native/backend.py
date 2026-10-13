@@ -64,6 +64,19 @@ def shared_memory_detach_timeout_s() -> float:
 _DEFAULT_HEARTBEAT_LEASE_S = 10.0
 
 
+# 可能在「没有对应请求」的情况下出现在响应流里的事件：即发即弃的取消确认
+# （send_cancel_generation 只写不读）与池化渲染（G5 提交）的完成/流控回执。
+# _read_command_response 遇到这些事件一律转存积压队列，绝不当作当前命令的响应。
+_ASYNC_EVENT_NAMES = frozenset(
+    {
+        "generation_cancelled",
+        "gpu_frame_ready",
+        "gpu_frame_dropped",
+        "gpu_queue_full",
+    }
+)
+
+
 def heartbeat_lease_s() -> float:
     """看门狗租期（秒）：sidecar 心跳（progress 事件）一次能续多久的等待。
 
@@ -1306,23 +1319,26 @@ class NativeRendererProcess:
         ``x/y/width/height`` 为子窗口在父窗口客户区的物理矩形；``src_x/src_y``
         为该矩形在渲染纹理里的物理像素起点（场景矩形被视口裁剪时非零）。
         """
-        self._send(
-            {
-                "cmd": "gpu_present_frame",
-                "t_ms": int(t_ms),
-                "force_warp": bool(force_warp),
-                "generation": int(generation),
-                "frame_index": int(frame_index),
-                "parent_hwnd": str(int(parent_hwnd)),
-                "x": int(x),
-                "y": int(y),
-                "width": int(width),
-                "height": int(height),
-                "src_x": int(src_x),
-                "src_y": int(src_y),
-            }
+        request = {
+            "cmd": "gpu_present_frame",
+            "t_ms": int(t_ms),
+            "force_warp": bool(force_warp),
+            "generation": int(generation),
+            "frame_index": int(frame_index),
+            "parent_hwnd": str(int(parent_hwnd)),
+            "x": int(x),
+            "y": int(y),
+            "width": int(width),
+            "height": int(height),
+            "src_x": int(src_x),
+            "src_y": int(src_y),
+        }
+        self._send(request)
+        return self._read_command_response(
+            {"gpu_frame_presented", "gpu_frame_dropped"},
+            request=request,
+            waiting_for="gpu_present_frame",
         )
-        return self._expect_ok(self._read_response())
 
     def render_gpu_frame_direct(
         self,
@@ -1338,16 +1354,21 @@ class NativeRendererProcess:
         结果留在 sidecar 纹理里，由宿主在到点后调 present_rendered_gpu_frame
         上屏，持有等待用**真实渲染耗时**校准。
         """
-        self._send(
-            {
-                "cmd": "gpu_render_frame_direct",
-                "t_ms": int(t_ms),
-                "force_warp": bool(force_warp),
-                "generation": int(generation),
-                "frame_index": int(frame_index),
-            }
+        request = {
+            "cmd": "gpu_render_frame_direct",
+            "t_ms": int(t_ms),
+            "force_warp": bool(force_warp),
+            "generation": int(generation),
+            "frame_index": int(frame_index),
+        }
+        self._send(request)
+        # 取消代际时 sidecar 回 gpu_frame_dropped(reason=generation_cancelled)：
+        # 不算渲染成功，调用方据此停止本代际的调度。
+        return self._read_command_response(
+            {"gpu_frame_rendered_direct", "gpu_frame_dropped"},
+            request=request,
+            waiting_for="gpu_render_frame_direct",
         )
-        return self._expect_ok(self._read_response())
 
     def present_rendered_gpu_frame(
         self,
@@ -1364,27 +1385,35 @@ class NativeRendererProcess:
         generation: int = 0,
     ) -> dict[str, Any]:
         """Present the last direct-rendered texture in the DComp child window."""
-        self._send(
-            {
-                "cmd": "gpu_present_rendered",
-                "t_ms": int(t_ms),
-                "force_warp": bool(force_warp),
-                "generation": int(generation),
-                "parent_hwnd": str(int(parent_hwnd)),
-                "x": int(x),
-                "y": int(y),
-                "width": int(width),
-                "height": int(height),
-                "src_x": int(src_x),
-                "src_y": int(src_y),
-            }
+        request = {
+            "cmd": "gpu_present_rendered",
+            "t_ms": int(t_ms),
+            "force_warp": bool(force_warp),
+            "generation": int(generation),
+            "parent_hwnd": str(int(parent_hwnd)),
+            "x": int(x),
+            "y": int(y),
+            "width": int(width),
+            "height": int(height),
+            "src_x": int(src_x),
+            "src_y": int(src_y),
+        }
+        self._send(request)
+        return self._read_command_response(
+            {"gpu_frame_presented", "gpu_frame_dropped"},
+            request=request,
+            waiting_for="gpu_present_rendered",
         )
-        return self._expect_ok(self._read_response())
 
     def close_gpu_preview(self, *, force_warp: bool = False) -> dict[str, Any]:
         """Destroy the sidecar-owned native preview child window."""
-        self._send({"cmd": "gpu_preview_close", "force_warp": bool(force_warp)})
-        return self._expect_ok(self._read_response())
+        request = {"cmd": "gpu_preview_close", "force_warp": bool(force_warp)}
+        self._send(request)
+        return self._read_command_response(
+            {"gpu_preview_closed"},
+            request=request,
+            waiting_for="gpu_preview_close",
+        )
 
     def pump_native_preview(self, *, force_warp: bool = False) -> dict[str, Any]:
         """Pump the sidecar's window message queue (deliver forwarded mouse input).
@@ -1392,8 +1421,13 @@ class NativeRendererProcess:
         DComp 子窗口的鼠标转发消息在暂停/空闲（无 present）时积压在
         sidecar 线程队列里；worker 空闲心跳周期性调用本命令把它投递出去。
         """
-        self._send({"cmd": "pump_native_preview", "force_warp": bool(force_warp)})
-        return self._expect_ok(self._read_response())
+        request = {"cmd": "pump_native_preview", "force_warp": bool(force_warp)}
+        self._send(request)
+        return self._read_command_response(
+            {"native_preview_pumped"},
+            request=request,
+            waiting_for="pump_native_preview",
+        )
 
     def gpu_diagnostics(self, *, force_warp: bool = False) -> dict[str, Any]:
         """Read cache and DXGI memory counters without entering the frame hot path."""
@@ -1430,36 +1464,40 @@ class NativeRendererProcess:
         if shm_key:
             payload["shm_key"] = str(shm_key)
         self._send(payload)
-        return self._expect_ok(self._read_response())
+        return self._read_command_response(
+            {"probe_ready"},
+            request=payload,
+            waiting_for="render_probe",
+        )
 
     def render_frame_png(self, t_ms: int, output_path: str | os.PathLike[str]) -> dict[str, Any]:
-        self._send(
-            {
-                "cmd": "render_frame",
-                "t_ms": int(t_ms),
-                "output_path": str(Path(output_path)),
-            }
+        request = {
+            "cmd": "render_frame",
+            "t_ms": int(t_ms),
+            "output_path": str(Path(output_path)),
+        }
+        self._send(request)
+        return self._read_command_response(
+            {"frame_ready"}, request=request, waiting_for="render_frame"
         )
-        return self._expect_ok(self._read_response())
 
     def render_frame_stats(self, t_ms: int) -> dict[str, Any]:
-        self._send(
-            {
-                "cmd": "render_frame_stats",
-                "t_ms": int(t_ms),
-            }
+        request = {"cmd": "render_frame_stats", "t_ms": int(t_ms)}
+        self._send(request)
+        return self._read_command_response(
+            {"frame_stats"}, request=request, waiting_for="frame_stats"
         )
-        return self._expect_ok(self._read_response())
 
     def render_range_stats(self, timestamps_ms: list[int], *, threads: int) -> dict[str, Any]:
-        self._send(
-            {
-                "cmd": "render_range_stats",
-                "t_ms": [int(t_ms) for t_ms in timestamps_ms],
-                "threads": int(threads),
-            }
+        request = {
+            "cmd": "render_range_stats",
+            "t_ms": [int(t_ms) for t_ms in timestamps_ms],
+            "threads": int(threads),
+        }
+        self._send(request)
+        return self._read_command_response(
+            {"range_stats"}, request=request, waiting_for="range_stats"
         )
-        return self._expect_ok(self._read_response())
 
     def start_render_range(
         self,
@@ -1647,6 +1685,77 @@ class NativeRendererProcess:
         if response.get("ok"):
             return response
         raise NativeRendererError(str(response.get("error") or response))
+
+    @staticmethod
+    def _response_matches_request(
+        response: dict[str, Any], request: dict[str, Any]
+    ) -> bool:
+        """本次响应是否属于本请求（按回显的身份字段比对）。
+
+        渲染/上屏命令都会回显 ``generation``/``t_ms``/``frame_index``；只要
+        请求里带了、响应里也有的身份字段必须逐项相等。仅靠 ``ok=True``
+        判定会让「别的命令的响应」被当成本次成功（2026-10 探针：取消确认
+        插入响应流后，请求渲染 1000ms 拿到的是渲染 500ms 的成功消息）。
+        """
+        # 池化渲染事件带 wire 序号（request_serial）：本命令没发过序号，
+        # 说明它是 G5 池里另一次提交的完成/丢弃事件，不是本次请求的响应。
+        if "request_serial" in response and "request_serial" not in request:
+            return False
+        for key in ("generation", "t_ms", "frame_index", "request_serial"):
+            if key not in request or key not in response:
+                continue
+            try:
+                if int(response[key]) != int(request[key]):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
+
+    def _read_command_response(
+        self,
+        expected_events: set[str],
+        *,
+        request: dict[str, Any],
+        waiting_for: str,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """等待并返回本命令自己的响应（事件类型 + 请求身份双重匹配）。
+
+        读到的其它事件一律进 ``_event_backlog``（供 ``read_event`` /
+        ``_read_until_event`` / 渲染调度器继续消费），绝不当作本命令的结果：
+        ``send_cancel_generation`` 之类的即发即弃命令会把 ``generation_cancelled``
+        确认留在响应流里，盲目取「下一条」会让后续每条命令的响应整体错位。
+        """
+        deadline = time.monotonic() + self._resolved_timeout(timeout_s)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process = self._current_process()
+                raise NativeRendererError(
+                    self._format_timeout_error(
+                        process,
+                        timeout_s=self._resolved_timeout(timeout_s),
+                        waiting_for=waiting_for,
+                    )
+                )
+            response = self._read_response(
+                timeout_s=remaining, waiting_for=waiting_for
+            )
+            event = response.get("event")
+            if event in expected_events:
+                if self._response_matches_request(response, request):
+                    return self._expect_ok(response)
+                # 身份不匹配：过时/错位的响应（例如上一次同类请求的残留）。
+                self._event_backlog.append(response)
+                continue
+            if event in _ASYNC_EVENT_NAMES:
+                # 其它命令的异步事件（取消确认 / 池化渲染完成 / 流控回执）：
+                # 不属于本次请求，留给真正的消费者。
+                self._event_backlog.append(response)
+                continue
+            # 事件名既不是本命令的、也不在已知异步集合里：协议级故障
+            # （ok=False 的错误也走这里，交由 _expect_ok 抛出）。
+            return self._expect_ok(response)
 
     def _require_process(self) -> subprocess.Popen[str]:
         if self._process is None:

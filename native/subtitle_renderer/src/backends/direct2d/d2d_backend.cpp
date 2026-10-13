@@ -140,6 +140,26 @@ void Direct2DGpuBackend::cancelRealizationPrewarm() {
     impl_->retiredRealizationWorkers.clear();
 }
 
+void Direct2DGpuBackend::resumeRealizationPrewarm() {
+    if (impl_->realizationPrewarmComplete.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (impl_->realizationThread.joinable()) {
+        // 预热线程仍在跑（新建或未取消）：由它自己推进，不重复启动。
+        return;
+    }
+    if (!impl_->realizationActive || impl_->lines.empty()) {
+        impl_->realizationPrewarmComplete.store(true, std::memory_order_release);
+        return;
+    }
+    // pause() 取消（或 configure 快速路径提前返回）造成的半热状态：无人
+    // 在续烘。按当前 lines 重算任务续烘剩余部分——已发布进
+    // realizationResources 的网格被复用绑定，不重烘；首帧早已交付，
+    // 恢复时不再等首帧让路窗口（defer=false）。
+    impl_->firstFrameCompleted.store(true, std::memory_order_release);
+    startRealizationPrewarm(false);
+}
+
 void Direct2DGpuBackend::adoptSharedGlyphResources(
     const Direct2DGpuBackend &source
 ) {
@@ -196,11 +216,53 @@ BackendDiagnostics Direct2DGpuBackend::diagnostics() const {
     result.estimatedCacheBytes += impl_->brushes.size()
         * sizeof(Impl::CachedBrush);
     result.realizationCount = impl_->realizationCount;
+    // 网格字节估算：绑定到当前字符的网格 + 资源缓存条目（同一批对象，
+    // 512B/条保守均值，与旧口径一致）。
+    result.realizationResourceBytesEstimate =
+        (static_cast<std::uint64_t>(impl_->realizationResources.size())
+         + impl_->realizationCount) * 512u;
     result.estimatedCacheBytes += impl_->realizationCount * 512;
-    for (const Impl::GlowScratch &scratch : impl_->glowScratchPool) {
-        result.estimatedCacheBytes += static_cast<std::uint64_t>(scratch.width)
-            * static_cast<std::uint64_t>(scratch.height) * 4;
+    result.estimatedCacheBytes += static_cast<std::uint64_t>(
+        impl_->realizationResources.size()
+    ) * 512u;
+    // ---- 资源分类（2026-10 低显存观测）----
+    // 字体 face 缓存此前完全不进字节口径（数量也无上限）。DWrite 共享字体
+    // 文件映射，face 自身持有轮廓/度量缓存；按 64KiB/face 保守估算，只用于
+    // 总量观测，不代表精确分配。
+    result.fontFaceCount = static_cast<std::uint64_t>(
+        impl_->fontFaces.size() + impl_->metricFaces.size()
+    );
+    result.fontFaceBytesEstimate = result.fontFaceCount * (64u * 1024u);
+    result.estimatedCacheBytes += result.fontFaceBytesEstimate;
+    // G6 帧仓：按已分配纹理的像素尺寸记账（未登记的槽不占显存）。
+    for (const Impl::FrameStoreSlot &slot : impl_->frameStore) {
+        if (slot.texture == nullptr) {
+            continue;
+        }
+        D3D11_TEXTURE2D_DESC desc{};
+        slot.texture->GetDesc(&desc);
+        result.frameStoreBytesEstimate += static_cast<std::uint64_t>(desc.Width)
+            * static_cast<std::uint64_t>(desc.Height) * 4u;
+        ++result.frameStoreSlots;
     }
+    result.estimatedCacheBytes += result.frameStoreBytesEstimate;
+    // 发光缓存：glow scratch 池 + 稳态模糊位图缓存（两者都是整幅位图，
+    // 是低显存机器上最容易失控的一类）。
+    std::uint64_t glowBytes = 0;
+    for (const Impl::GlowScratch &scratch : impl_->glowScratchPool) {
+        glowBytes += static_cast<std::uint64_t>(scratch.width)
+            * static_cast<std::uint64_t>(scratch.height) * 4u;
+    }
+    for (const Impl::GlowBlurCacheEntry &entry : impl_->glowBlurCache) {
+        if (entry.blurred == nullptr) {
+            continue;
+        }
+        const D2D1_SIZE_U size = entry.blurred->GetPixelSize();
+        glowBytes += static_cast<std::uint64_t>(size.width)
+            * static_cast<std::uint64_t>(size.height) * 4u;
+    }
+    result.glowCacheBytesEstimate = glowBytes;
+    result.estimatedCacheBytes += glowBytes;
     device_.appendVideoMemoryDiagnostics(&result);
     return result;
 }

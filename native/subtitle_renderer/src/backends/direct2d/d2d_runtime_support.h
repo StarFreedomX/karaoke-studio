@@ -22,6 +22,12 @@ std::size_t environmentSize(
     std::size_t minimum,
     std::size_t maximum
 );
+double environmentDouble(
+    const char *name,
+    double defaultValue,
+    double minimum,
+    double maximum
+);
 std::uint64_t rectAreaPx(const D2D1_RECT_F &rect);
 void checkHr(HRESULT value, const char *operation, const D2DDevice &device);
 std::uint8_t unpremultiply(std::uint8_t value, std::uint8_t alpha);

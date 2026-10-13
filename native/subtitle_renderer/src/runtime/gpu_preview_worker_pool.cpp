@@ -171,6 +171,9 @@ public:
         bool deferFollowers
     ) {
         bool restartFollowers = false;
+        bool restartPrewarm = false;
+        bool reconfigureShared = false;
+        int onlineWorkers = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             cancelFollowerConfigure_ = false;
@@ -181,6 +184,35 @@ public:
                 && backends_.size() > 1;
             if (restartFollowers) {
                 firstFrameDelivered_ = false;
+            }
+            // pause() 取消了各 backend 的 realization 预热，本函数是缓存复用
+            // 的恢复点：已完成的预热保持完成，被打断的必须在此续烘，否则池
+            // 永久停在未烘焙（原路径直描）状态（2026-10 尺寸缓存复用复现：
+            // 15s/795 帧 realization_prewarm_complete 恒 false）。
+            onlineWorkers = readyWorkerCount_;
+            for (int index = 0; index < onlineWorkers; ++index) {
+                if (!backends_[static_cast<std::size_t>(index)]
+                         ->realizationPrewarmComplete()) {
+                    restartPrewarm = true;
+                    break;
+                }
+            }
+            reconfigureShared = restartPrewarm && sharedResources_;
+            if (reconfigureShared) {
+                restartPrewarm = false;
+            }
+        }
+        if (reconfigureShared) {
+            // 共享字形资源模式：follower 的网格是装配时 adopt 的快照，主
+            // worker 续烘不会同步过去。此时重走完整 configure 让 adopt 重新
+            // 对齐（仅预热被 pause 打断时进入，稳态复用不受影响）。
+            configure(scene, false, deferFollowers);
+            return;
+        }
+        if (restartPrewarm) {
+            for (int index = 0; index < onlineWorkers; ++index) {
+                backends_[static_cast<std::size_t>(index)]
+                    ->resumeRealizationPrewarm();
             }
         }
         if (restartFollowers) {
@@ -239,13 +271,23 @@ public:
                 startDeferredFollowers(scene);
             }
         }
+        int onlineWorkers = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (waitForRealizations || !deferFollowers
                 || (sharedResources_ && scene.realizationEnabled)) {
                 readyWorkerCount_ = workerCount_;
             }
+            onlineWorkers = readyWorkerCount_;
             accepting_ = true;
+        }
+        // 预热的恢复点：configure 的快速路径（同场景 / 仅改色）会直接返回，
+        // 不重建预热——此前 pause() 取消的预热若无人续烘，池将永久停在原
+        // 路径直描（2026-10 烘焙中改色复现：12s/627 帧未恢复烘焙）。
+        // 正在跑的预热由 resumeRealizationPrewarm 自行跳过。
+        for (int index = 0; index < onlineWorkers; ++index) {
+            backends_[static_cast<std::size_t>(index)]
+                ->resumeRealizationPrewarm();
         }
         ready_.notify_all();
     }
@@ -344,6 +386,13 @@ public:
              index < static_cast<std::size_t>(readyWorkerCount); ++index) {
             const auto current = backends_[index]->diagnostics();
             aggregate.estimatedCacheBytes += current.estimatedCacheBytes;
+            aggregate.fontFaceCount += current.fontFaceCount;
+            aggregate.fontFaceBytesEstimate += current.fontFaceBytesEstimate;
+            aggregate.frameStoreSlots += current.frameStoreSlots;
+            aggregate.frameStoreBytesEstimate += current.frameStoreBytesEstimate;
+            aggregate.glowCacheBytesEstimate += current.glowCacheBytesEstimate;
+            aggregate.realizationResourceBytesEstimate +=
+                current.realizationResourceBytesEstimate;
             aggregate.realizationPrewarmComplete =
                 aggregate.realizationPrewarmComplete
                 && current.realizationPrewarmComplete;
@@ -451,6 +500,10 @@ private:
                         nativeTrace("follower configure aborted backend=%zu", index);
                         return;
                     }
+                    // 该 backend 可能在 pause 前就装配过（预热被取消后
+                    // configure 命中同场景快速路径）：补一次续烘，避免
+                    // follower 以「未烘焙」状态上岗拖住全池同步门。
+                    backends_[index]->resumeRealizationPrewarm();
                     // Fresh backends default to an open local gate. Close
                     // it before making this follower eligible for work.
                     backends_[index]->setRealizationPoolReady(false);
