@@ -1,5 +1,7 @@
 #include "d2d_font_fallback.h"
 
+#include "../../diagnostics/native_trace.h"
+
 #include <dwrite_3.h>
 #include <winnls.h>
 
@@ -47,6 +49,29 @@ bool localizedStringsContain(
         }
     }
     return false;
+}
+
+// face 的 style 名（DWrite FaceNames 的首个条目，通常即 Qt 报出的 styleName，
+// 如 ``Semilight`` / ``Bold Italic``）。用于按 Python 决策的 face style 选实例。
+std::wstring faceStyleNameOf(IDWriteFont *font) {
+    if (font == nullptr) {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
+    if (FAILED(font->GetFaceNames(names.ReleaseAndGetAddressOf()))
+        || !names || names->GetCount() == 0) {
+        return {};
+    }
+    UINT32 length = 0;
+    if (FAILED(names->GetStringLength(0, &length))) {
+        return {};
+    }
+    std::wstring name(static_cast<std::size_t>(length) + 1, L'\0');
+    if (FAILED(names->GetString(0, name.data(), length + 1))) {
+        return {};
+    }
+    name.resize(length);
+    return name;
 }
 
 // DirectWrite groups faces under the typographic family (``モトヤ教科書 Pro``),
@@ -283,6 +308,58 @@ ResolvedFontFaces resolveUnifiedFaces(
         return result;
     }
 
+    // Python 决策带 face style 时按 style 选实例（同族同字重不同设计、或静态与
+    // 可变共存时，按字重取第一个匹配项可能选到别的 face）；只在需要时读 face 名。
+    const bool styleRequested = hint.present && !hint.style.empty();
+    struct FaceEntry {
+        int weight;
+        bool italic;
+        std::wstring styleName;
+        Microsoft::WRL::ComPtr<IDWriteFont> font;
+    };
+    std::vector<FaceEntry> faces;
+    if (family != nullptr) {
+        const UINT32 count = family->GetFontCount();
+        faces.reserve(count);
+        for (UINT32 index = 0; index < count; ++index) {
+            Microsoft::WRL::ComPtr<IDWriteFont> font;
+            if (FAILED(family->GetFont(index, font.ReleaseAndGetAddressOf()))) {
+                continue;
+            }
+            faces.push_back({
+                static_cast<int>(font->GetWeight()),
+                font->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
+                styleRequested ? faceStyleNameOf(font.Get()) : std::wstring{},
+                font
+            });
+        }
+    }
+    if (faces.empty()) {
+        faces.push_back({
+            static_cast<int>(matchedFont->GetWeight()),
+            matchedFont->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
+            styleRequested ? faceStyleNameOf(matchedFont) : std::wstring{},
+            Microsoft::WRL::ComPtr<IDWriteFont>(matchedFont)
+        });
+    }
+    // 持 face 本身而不是向量内指针：斜体池过滤会把 ``faces`` 整体替换，
+    // 指向旧缓冲的裸指针会悬垂（实测直接导致 build face 失败、整帧降级）。
+    Microsoft::WRL::ComPtr<IDWriteFont> styleMatchedFont;
+    int styleMatchedWeight = 0;
+    bool styleMatchedItalic = false;
+    if (styleRequested) {
+        for (const FaceEntry &entry : faces) {
+            if (!entry.styleName.empty()
+                && _wcsicmp(entry.styleName.c_str(), hint.style.c_str()) == 0) {
+                styleMatchedFont = entry.font;
+                styleMatchedWeight = entry.weight;
+                styleMatchedItalic = entry.italic;
+                break;
+            }
+        }
+    }
+
+
     // 可变字体：轴值即请求字重（DirectWrite 会钳制到轴范围）。axisHint /
     // hint 由 Python 侧统一解析下发——这台 Win11 的 DWrite 对静态字体也报告
     // wght 标准轴，凭 GetFontAxisCount 判可变会把静态族全部劫持进恒定的
@@ -342,11 +419,20 @@ ResolvedFontFaces resolveUnifiedFaces(
             entry.value = hint.italicAxisValue;
             ++requestedCount;
         }
+        Microsoft::WRL::ComPtr<IDWriteFontFace> axisProbe = probeFace;
+        if (styleMatchedFont) {
+            Microsoft::WRL::ComPtr<IDWriteFontFace> styledFace;
+            if (SUCCEEDED(styleMatchedFont->CreateFontFace(
+                    styledFace.ReleaseAndGetAddressOf()
+                ))) {
+                axisProbe = styledFace;
+            }
+        }
         if (auto axisFace = axisInstanceFace(
-                probeFace.Get(), requested, requestedCount, hintSimulations
+                axisProbe.Get(), requested, requestedCount, hintSimulations
             )) {
             result.outline = axisFace;
-            result.metrics = defaultAxisFace(probeFace.Get());
+            result.metrics = defaultAxisFace(axisProbe.Get());
             if (!result.metrics) {
                 result.metrics = axisFace;
             }
@@ -361,35 +447,6 @@ ResolvedFontFaces resolveUnifiedFaces(
             }
             return result;
         }
-    }
-
-    struct FaceEntry {
-        int weight;
-        bool italic;
-        Microsoft::WRL::ComPtr<IDWriteFont> font;
-    };
-    std::vector<FaceEntry> faces;
-    if (family != nullptr) {
-        const UINT32 count = family->GetFontCount();
-        faces.reserve(count);
-        for (UINT32 index = 0; index < count; ++index) {
-            Microsoft::WRL::ComPtr<IDWriteFont> font;
-            if (FAILED(family->GetFont(index, font.ReleaseAndGetAddressOf()))) {
-                continue;
-            }
-            faces.push_back({
-                static_cast<int>(font->GetWeight()),
-                font->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
-                font
-            });
-        }
-    }
-    if (faces.empty()) {
-        faces.push_back({
-            static_cast<int>(matchedFont->GetWeight()),
-            matchedFont->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
-            Microsoft::WRL::ComPtr<IDWriteFont>(matchedFont)
-        });
     }
 
     // Italic requests select among italic faces (and upright requests among
@@ -424,34 +481,12 @@ ResolvedFontFaces resolveUnifiedFaces(
     // = 请求≥600 且匹配 face<600（600/700 face 豁免）。Python 决策在手时，
     // face 字重与两个合成标志直接取决策值。
     const FaceEntry *chosen = nullptr;
-    DWRITE_FONT_SIMULATIONS simulations = DWRITE_FONT_SIMULATIONS_NONE;
     const int targetWeight = hint.present && !hint.variable && hint.faceWeight > 0
         ? hint.faceWeight
         : weight;
-    const auto exact = std::find_if(
-        faces.begin(), faces.end(),
-        [&](const FaceEntry &entry) { return entry.weight == targetWeight; }
-    );
-    if (exact != faces.end()) {
-        chosen = &*exact;
-    } else {
-        chosen = &*std::min_element(
-            faces.begin(), faces.end(),
-            [&](const FaceEntry &lhs, const FaceEntry &rhs) {
-                const int lhsDistance = std::abs(lhs.weight - targetWeight);
-                const int rhsDistance = std::abs(rhs.weight - targetWeight);
-                if (lhsDistance != rhsDistance) {
-                    return lhsDistance < rhsDistance;
-                }
-                const int lhsNormal = std::abs(lhs.weight - 400);
-                const int rhsNormal = std::abs(rhs.weight - 400);
-                if (lhsNormal != rhsNormal) {
-                    return lhsNormal < rhsNormal;
-                }
-                return lhs.weight < rhs.weight;
-            }
-        );
-    }
+    // 模拟标志（合成加粗/倾斜）由决策给出，先算好——style 命中与字重命中两条路
+    // 都要按同一套标志建 face（历史实现里 style 早退会吞掉合成加粗）。
+    DWRITE_FONT_SIMULATIONS simulations = DWRITE_FONT_SIMULATIONS_NONE;
     if (hint.present && !hint.variable) {
         if (hint.syntheticBold) {
             simulations = static_cast<DWRITE_FONT_SIMULATIONS>(
@@ -463,8 +498,67 @@ ResolvedFontFaces resolveUnifiedFaces(
                 simulations | DWRITE_FONT_SIMULATIONS_OBLIQUE
             );
         }
-    } else if (weight >= 600 && chosen->weight < 600) {
+    } else if (weight >= 600 && styleMatchedWeight > 0 && styleMatchedWeight < 600) {
         simulations = DWRITE_FONT_SIMULATIONS_BOLD;
+    }
+    if (styleMatchedFont) {
+        // 决策点名了 face（style 命中）：直接用该 face，不再按字重/斜体猜。
+        result.outline = faceFromFont(styleMatchedFont.Get(), simulations);
+        result.metrics = simulations == DWRITE_FONT_SIMULATIONS_NONE
+            ? result.outline
+            : faceFromFont(styleMatchedFont.Get(), DWRITE_FONT_SIMULATIONS_NONE);
+        if (!result.metrics) {
+            result.metrics = result.outline;
+        }
+        return result;
+    } else {
+        const auto exact = std::find_if(
+            faces.begin(), faces.end(),
+            [&](const FaceEntry &entry) { return entry.weight == targetWeight; }
+        );
+        if (exact != faces.end()) {
+            chosen = &*exact;
+        } else {
+            chosen = &*std::min_element(
+                faces.begin(), faces.end(),
+                [&](const FaceEntry &lhs, const FaceEntry &rhs) {
+                    const int lhsDistance = std::abs(lhs.weight - targetWeight);
+                    const int rhsDistance = std::abs(rhs.weight - targetWeight);
+                    if (lhsDistance != rhsDistance) {
+                        return lhsDistance < rhsDistance;
+                    }
+                    const int lhsNormal = std::abs(lhs.weight - 400);
+                    const int rhsNormal = std::abs(rhs.weight - 400);
+                    if (lhsNormal != rhsNormal) {
+                        return lhsNormal < rhsNormal;
+                    }
+                    return lhs.weight < rhs.weight;
+                }
+            );
+        }
+        if (styleRequested
+            && (chosen->weight != targetWeight || chosen->italic != wantItalic)) {
+            // 决策点名了 face 但族内没有它的 style 名（例如 VF 命名实例在 DWrite
+            // 侧仍叫 Regular），且字重/斜体就近也落到别的 face 上：记降级原因，
+            // 便于后续定位「GPU 用了别的实例」这类分歧。
+            krok::subtitle::native::diagnostics::nativeTrace(
+                "font: face style '%ls' unavailable (family faces=%zu), "
+                "fallback face weight=%d italic=%d target=%d/%d\n",
+                hint.style.c_str(),
+                faces.size(),
+                chosen->weight,
+                chosen->italic ? 1 : 0,
+                targetWeight,
+                wantItalic ? 1 : 0
+            );
+        }
+    }
+    if (!hint.present || hint.variable) {
+        // 无决策/旧 IR：沿用引擎镜像规则（请求≥600 且命中 face<600 → 合成加粗）。
+        simulations = simulations == DWRITE_FONT_SIMULATIONS_NONE
+                && weight >= 600 && chosen->weight < 600
+            ? DWRITE_FONT_SIMULATIONS_BOLD
+            : simulations;
     }
     result.outline = faceFromFont(chosen->font.Get(), simulations);
     // Vertical metrics always come from the unsimulated base face: DWrite's

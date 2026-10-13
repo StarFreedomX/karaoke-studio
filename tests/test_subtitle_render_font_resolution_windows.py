@@ -117,6 +117,95 @@ def build_axis_test_font(
     return out_path
 
 
+def build_dual_weight_vf(out_dir: Path) -> list[Path]:
+    """造「同族直立 + 斜体两份 wght 轴可变字体」（[P1] 回归场景）。
+
+    机型没有这样的真实字体：需要（a）同族两份 VF、（b）两份都带 wght 轴、
+    （c）其中一份是斜体 face。做法＝arial.ttf 子集作 master1(400)，
+    轮廓按中心放大 6% 作 master2(700)（点结构一致，varLib 能算增量；不是
+    真实 Bold 设计，仅验证链路），斜体那份另加 OS/2 + head 的 italic 标记。
+    返回生成的文件列表；fontTools 或基准字体缺失返回 []。
+    """
+    try:
+        from fontTools.designspaceLib import (
+            AxisDescriptor,
+            DesignSpaceDocument,
+            SourceDescriptor,
+        )
+        from fontTools.misc.transform import Transform
+        from fontTools.pens.transformPen import TransformPen
+        from fontTools.pens.ttGlyphPen import TTGlyphPen
+        from fontTools.subset import Options, Subsetter
+        from fontTools.ttLib import TTFont
+        from fontTools.varLib import build as varLibBuild
+    except ImportError:
+        return []
+    base = "C:/Windows/Fonts/arial.ttf"
+    if not Path(base).exists():
+        return []
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def rebuild(font, transform):
+        glyph_set = font.getGlyphSet()
+        rebuilt = {}
+        for name in font.getGlyphOrder():
+            pen = TTGlyphPen(glyph_set)
+            glyph_set[name].draw(TransformPen(pen, transform))
+            rebuilt[name] = pen.glyph()
+        for name, glyph in rebuilt.items():
+            font["glyf"][name] = glyph
+        return font
+
+    written: list[Path] = []
+    for italic in (False, True):
+        subset = TTFont(base)
+        options = Options()
+        options.glyph_names = True
+        options.notdef_outline = True
+        subsetter = Subsetter(options=options)
+        subsetter.populate(text="Ag0")
+        subsetter.subset(subset)
+        regular = rebuild(subset, Transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
+        regular_path = out_dir / ("dual-i-400.ttf" if italic else "dual-400.ttf")
+        regular.save(str(regular_path))
+        heavier = TTFont(str(regular_path))
+        rebuild(heavier, Transform(1.06, 0.0, 0.0, 1.06, -30.0, 0.0))
+        heavier_path = out_dir / ("dual-i-700.ttf" if italic else "dual-700.ttf")
+        heavier.save(str(heavier_path))
+
+        doc = DesignSpaceDocument()
+        axis = AxisDescriptor()
+        axis.name = axis.tag = "wght"
+        axis.minimum, axis.default, axis.maximum = 400.0, 400.0, 700.0
+        doc.addAxis(axis)
+        source_a = SourceDescriptor()
+        source_a.path = str(regular_path)
+        source_a.name = "regular"
+        source_a.location = {"wght": 400.0}
+        doc.addSource(source_a)
+        source_b = SourceDescriptor()
+        source_b.path = str(heavier_path)
+        source_b.name = "heavier"
+        source_b.location = {"wght": 700.0}
+        doc.addSource(source_b)
+        vf, _model, _masters = varLibBuild(doc)
+        family = "TestVF Dual"
+        subfamily = "Italic" if italic else "Regular"
+        full = f"{family} {subfamily}"
+        vf["name"].setName(family, 1, 3, 1, 0x409)
+        vf["name"].setName(subfamily, 2, 3, 1, 0x409)
+        vf["name"].setName(full, 4, 3, 1, 0x409)
+        vf["name"].setName(full.replace(" ", ""), 6, 3, 1, 0x409)
+        if italic:
+            vf["OS/2"].fsSelection = (vf["OS/2"].fsSelection & ~0x40) | 0x21
+            vf["head"].macStyle |= 0x02
+            vf["OS/2"].usWeightClass = 400
+        out_path = out_dir / f"TestVFDual-{subfamily}.ttf"
+        vf.save(str(out_path))
+        written.append(out_path)
+    return written
+
+
 def instance_axis_test_font(source: Path, out_dir: Path, tag: str, value: float) -> Path:
     """把轴字体实例化成静态字体（「轴渲染 == 真实例渲染」的 ground truth）。"""
     from fontTools.ttLib import TTFont
@@ -145,6 +234,7 @@ sys.path.insert(0, str(Path.cwd() / "tests"))
 from test_subtitle_render_font_resolution_windows import (  # noqa: E402
     _AXIS_VF_SLANT_DEG,
     build_axis_test_font,
+    build_dual_weight_vf,
     instance_axis_test_font,
 )
 
@@ -472,6 +562,69 @@ try:
 finally:
     _shutil.rmtree(_axis_dir, ignore_errors=True)
 
+# 同族直立 + 斜体两份 wght 轴 VF：斜体请求必须用斜体那份的轴（[P1] 回归）
+result["dual_vf"] = {"skipped": None, "cases": {}}
+_dual_dir = Path(tempfile.mkdtemp(prefix="krok_dualvf_"))
+try:
+    _dual_paths = build_dual_weight_vf(_dual_dir)
+    if not _dual_paths:
+        result["dual_vf"]["skipped"] = "fontTools or base font unavailable"
+    else:
+        _fids = [QFontDatabase.addApplicationFont(str(path)) for path in _dual_paths]
+        _dual_family = None
+        for _fid in _fids:
+            if _fid >= 0:
+                _names = QFontDatabase.applicationFontFamilies(_fid)
+                if _names:
+                    _dual_family = _names[0]
+        if _dual_family is None:
+            result["dual_vf"]["skipped"] = "dual VF registration failed"
+        else:
+            clear_capabilities_cache()
+            _cap = get_capabilities(_dual_family)
+            result["dual_vf"]["cases"] = {
+                "family": _dual_family,
+                "variable_style": _cap.variable_style if _cap else None,
+                "faces": [
+                    {
+                        "style": face.style_name,
+                        "italic": bool(face.is_italic),
+                        "has_weight_axis": bool(face.has_weight_axis),
+                        "axis_range": [face.axis_min, face.axis_max],
+                    }
+                    for face in (_cap.faces if _cap else ())
+                ],
+                "decisions": {},
+            }
+            for _label, _weight, _italic in (
+                ("upright_400", 400, False), ("upright_550", 550, False),
+                ("italic_400", 400, True), ("italic_550", 550, True),
+                ("italic_950", 950, True),
+            ):
+                _inst = _resolve_instance(_dual_family, _weight, italic=_italic)
+                _font = _build_weight_font(_dual_family, 96, _weight, italic=_italic)
+                _font.setPixelSize(96)
+                _image = QImage(300, 160, QImage.Format.Format_ARGB32_Premultiplied)
+                _image.fill(0)
+                _painter = QPainter(_image)
+                _painter.setFont(_font)
+                _painter.drawText(20, 120, "Ag0")
+                _painter.end()
+                _bytes = bytes(_image.constBits().asstring(_image.sizeInBytes()))
+                _ink = sum(1 for _i in range(3, len(_bytes), 4) if _bytes[_i] > 32)
+                result["dual_vf"]["cases"]["decisions"][_label] = {
+                    "variable": bool(_inst.is_variable),
+                    "face_style": _inst.face_style,
+                    "axis_value": _inst.axis_value,
+                    "synthetic_italic": bool(_inst.synthetic_italic),
+                    "ink": _ink,
+                }
+        for _fid in _fids:
+            if _fid >= 0:
+                QFontDatabase.removeApplicationFont(_fid)
+finally:
+    _shutil.rmtree(_dual_dir, ignore_errors=True)
+
 result["synthetic_bold_rule"] = _sim_rows
 
 result["axis_fingerprint"] = {
@@ -765,3 +918,41 @@ def test_axis_italic_end_to_end_matches_true_instance(probe_result: dict) -> Non
         ir = case["ir"] or {}
         assert ir.get("italic_axis", {}).get("tag") == tag, ir
         assert ir.get("axes", {}).get(tag) == expected[tag][1], ir
+
+
+def test_dual_weight_vf_italic_uses_italic_face_axis(probe_result: dict) -> None:
+    """同族直立+斜体两份可变字体：斜体请求走**斜体那份**的 wght 轴（[P1] 回归）。
+
+    回归现象：族级 ``variable_style`` 指向 Regular，斜体池里没有它 → 退回静态
+    分支，轴值固定成字体默认实例（Italic 550 → Italic 400，插值失效）。
+    """
+    dual = probe_result.get("dual_vf") or {}
+    cases = dual.get("cases") or {}
+    if not cases:
+        pytest.skip(dual.get("skipped") or "dual VF fixture unavailable")
+    faces = {face["style"]: face for face in cases["faces"]}
+    assert "Regular" in faces and "Italic" in faces
+    assert faces["Italic"]["italic"] is True
+    # 两份 face 都必须被认出带 wght 轴（这是本场景的前提）
+    assert faces["Regular"]["has_weight_axis"] is True
+    assert faces["Italic"]["has_weight_axis"] is True
+    assert cases["variable_style"] == "Regular"
+
+    decisions = cases["decisions"]
+    upright_mid = decisions["upright_550"]
+    italic_mid = decisions["italic_550"]
+    assert upright_mid["variable"] is True
+    assert upright_mid["face_style"] == "Regular"
+    assert upright_mid["axis_value"] == 550.0
+    assert italic_mid["variable"] is True, (
+        "斜体 550 退回了静态分支（轴值会被固定在字体默认实例）"
+    )
+    assert italic_mid["face_style"] == "Italic"
+    assert italic_mid["axis_value"] == 550.0
+    # 插值确实作用在渲染上：中间档墨量严格介于两端之间
+    ink_400 = decisions["italic_400"]["ink"]
+    ink_550 = italic_mid["ink"]
+    ink_950 = decisions["italic_950"]["ink"]
+    assert ink_400 < ink_550 <= ink_950
+    assert decisions["italic_950"]["axis_value"] == 700.0  # 斜体那份的轴上限
+    assert decisions["italic_950"]["variable"] is True

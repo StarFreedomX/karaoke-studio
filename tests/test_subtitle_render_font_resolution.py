@@ -403,3 +403,60 @@ def test_axis_italic_keeps_exactness_and_mark_clean():
     assert instance.exact is True
     assert instance.mark is None
     assert "slnt" in instance.identity
+
+# =========================================================================
+# 回归：[P1] 非 BMP 字素簇切分、同族直立/斜体双 VF 的轴选择
+# =========================================================================
+
+
+def test_grapheme_clusters_handle_non_bmp_characters():
+    """QTextBoundaryFinder 给的是 UTF-16 位置，切 Python 串前必须换算成码点下标。
+
+    回归：``'😀AB'`` 曾切成 ``('😀A','B','')``、``'𠮷野家'`` 曾切成 ``('𠮷野','家','')``
+    —— 缺字检测与回退缓存会拿错文本（生僻汉字/emoji 尤其明显）。
+    """
+    from krok_helper.subtitle_render.engine.text.font_fallback import grapheme_clusters
+
+    assert grapheme_clusters("😀AB") == ("😀", "A", "B")
+    assert grapheme_clusters("𠮷野家") == ("𠮷", "野", "家")
+    assert grapheme_clusters("あがA") == ("あ", "が", "A")
+    assert grapheme_clusters("éx") == ("é", "x")
+    assert grapheme_clusters("") == ()
+    # 簇拼接必须还原原串（任何位置都不应有丢字/并字）
+    for text in ("😀AB", "𠮷野家", "あがA", "a𠮷😀b"):
+        assert "".join(grapheme_clusters(text)) == text
+
+
+def test_italic_uses_variable_face_from_request_pool():
+    """同族直立/斜体各一份可变字体：斜体请求必须用**斜体那份**的 wght 轴。
+
+    回归：族级 variable_style 通常指向 Regular，按族级单值判断会让斜体池里
+    没有它而退回静态分支——轴值固定成字体默认实例（实测 Italic 550 →
+    Italic 400），插值失效。
+    """
+    upright = _face_with_axes("Regular", 400, (("wght", 100.0, 400.0, 900.0),))
+    italic = _face_with_axes("Italic", 400, (("wght", 100.0, 400.0, 900.0),))
+    italic = FontFace(
+        italic.weight, "Italic", True,
+        is_variable=True, axis_min=100.0, axis_max=900.0, axis_default=400.0,
+        axes=(("wght", 100.0, 400.0, 900.0),),
+    )
+    cap = FontCapabilities(
+        family="Dual", faces=(upright, italic),
+        axis_min=100.0, axis_max=900.0, axis_default=400.0,
+        axis_effective=True, axis_present=True, variable_style="Regular",
+    )
+    instance = resolve_instance(cap, FontRequest(family="Dual", weight=550, italic=True))
+    assert instance.is_variable is True
+    assert instance.face_style == "Italic"
+    assert instance.axis_value == 550.0
+    assert dict(instance.axis_values) == {"wght": 550.0}
+
+    clamped = resolve_instance(cap, FontRequest(family="Dual", weight=950, italic=True))
+    assert clamped.face_style == "Italic"
+    assert clamped.axis_value == 900.0  # 用斜体那份的轴范围钳制
+
+    # 直立请求仍走直立那份
+    upright_request = resolve_instance(cap, FontRequest(family="Dual", weight=550))
+    assert upright_request.face_style == "Regular"
+    assert upright_request.axis_value == 550.0

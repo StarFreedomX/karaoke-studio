@@ -245,26 +245,38 @@ def resolve_instance(
             return ("slnt", max(slnt[0], min(-14.0, slnt[2])))
         return None
 
-    # ── 真可变 font：只在该 face 参与本次请求（斜体/直立集合内）时走轴实例 ──
-    # 逐 face 能力（variable_style 非空）时要求带轴 face 落在本次请求的
-    # face 池里；只有族级轴信息（手搓 capabilities / 旧调用方）时按族级
-    # 判断，保持旧契约。
-    variable_face = capabilities.variable_face
-    axis_applies = capabilities.is_variable and (
-        variable_face is None or variable_face in pool
-    )
+    # ── 真可变 font：可变 face 从**本次候选池**里选，轴范围取该 face 自己的 ──
+    # 同族直立/斜体各一份 VF 时（两份都有 wght 轴），族级 variable_style 通常
+    # 是 Regular；按族级单值判断会让斜体请求的池里没有它而退回静态分支，
+    # 轴值固定成字体的默认实例（实测 Italic 550 → Italic 400）。因此池内带轴
+    # face 优先，只有池内没有带轴 face 时才回落到族级判断（手搓 capabilities /
+    # 旧调用方保持旧契约）。
+    pool_variable_faces = [face for face in pool if face.has_weight_axis]
+    if pool_variable_faces:
+        variable_face: FontFace | None = min(
+            pool_variable_faces, key=lambda f: (abs(f.weight - 400), f.weight)
+        )
+        axis_applies = capabilities.is_variable
+    else:
+        variable_face = capabilities.variable_face
+        axis_applies = capabilities.is_variable and (
+            variable_face is None or variable_face in pool
+        )
     if axis_applies:
-        assert capabilities.axis_min is not None and capabilities.axis_max is not None
-        if capabilities.axis_min <= weight <= capabilities.axis_max:
+        axis_min, axis_max = capabilities.axis_min, capabilities.axis_max
+        if (
+            variable_face is not None
+            and variable_face.axis_min is not None
+            and variable_face.axis_max is not None
+        ):
+            axis_min, axis_max = variable_face.axis_min, variable_face.axis_max
+        assert axis_min is not None and axis_max is not None
+        if axis_min <= weight <= axis_max:
             axis_value = float(weight)
             exact = True
             reason = None
         else:
-            axis_value = float(
-                capabilities.axis_min
-                if weight < capabilities.axis_min
-                else capabilities.axis_max
-            )
+            axis_value = float(axis_min if weight < axis_min else axis_max)
             exact = False
             reason = "axis_clamped"
         italic_axis = (

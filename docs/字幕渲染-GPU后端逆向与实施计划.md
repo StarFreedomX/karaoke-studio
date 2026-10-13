@@ -1840,6 +1840,20 @@ G6 首批架构与本机性能门槛已落地，仍不得默认开启。下一�
     （Bahnschrift wdth=75 墨迹盒收窄、Segoe UI Variable opsz 生效）。
   - 边界：`opsz` 不按字号自动取值（Qt 也不自动，两侧同为字体默认）；横向
     拉伸仍走几何 scale（v4.2.x 语义），不映射 `wdth`。
+- **外部审查三项修复（2026-10-11 第三轮）**：
+  - **[P1] 非 BMP 字素簇切分**：`QTextBoundaryFinder` 给的是 **UTF-16 位置**，直接切
+    Python 串在 emoji / 扩展 B 区汉字上会把后一个字符并进前一簇（`'😀AB'` →
+    `('😀A','B','')`、`'𠮷野家'` → `('𠮷野','家','')`）→ 缺字检测与回退缓存拿错
+    文本。现在先把边界位置换算成码点下标再切，并按「簇拼接还原原串」断言。
+  - **[P1] 同族直立/斜体双 VF 的轴选择**：族级 `variable_style` 通常指向 Regular，
+    按族级单值判断会让斜体请求的池里没有它而退回静态分支（Italic 550 → Italic
+    400，插值失效）。现在**可变 face 从本次候选池里选**，轴范围取该 face 自己的；
+    池内无带轴 face 时才回落族级判断（旧契约不变）。
+  - **[P2] GPU 未执行 `hint.style`**：解析了 face style 却没用，静态分支仍按字重取
+    第一个匹配项。现在按 DWrite FaceNames 匹配决策点名的 face（可变分支也用它做
+    probe），匹配不到时回落字重/斜体规则并在 `KROK_NATIVE_TRACE=1` 下打降级原因
+    （`font: face style '%ls' unavailable ...`）。合成标志（BOLD/OBLIQUE）在
+    style 命中前算好——历史结构里 style 早退会吞掉合成加粗。
 - 验证：`tests/test_subtitle_render_font_resolution.py`（纯逻辑 + face 级断言）、
   `tests/test_subtitle_render_font_resolution_windows.py`（真实平台子进程探针，
   决策↔引擎交叉验证）、GPU 侧 `test_gpu_draws_python_supplied_fallback_family` /

@@ -13771,3 +13771,79 @@ def test_gpu_vector_round_stroke_preserves_circular_corners():
     intersection = np.count_nonzero(ideal & ink)
     union = np.count_nonzero(ideal | ink)
     assert intersection / union >= 0.998
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_honours_resolved_face_style(monkeypatch) -> None:
+    """GPU 按决策的 face style 选实例（[P2] 回归）。
+
+    历史实现解析了 ``hint.style`` 却没用：静态分支只按字重取第一个匹配项，
+    同族同字重不同设计/静态与可变共存时会选错实例。这里让决策的 style 与
+    字重字段**互相矛盾**（字重恒为 400、style 分别是 Light/Regular/Bold）：
+    若 GPU 尊重 style，三种注入渲染应分别等于直接请求 Light/Regular/Bold
+    的结果；若按字重猜，三者会一模一样。
+    """
+    import krok_helper.subtitle_render.engine.text.font_weight as font_weight
+    from krok_helper.subtitle_render.engine.text.weight_resolver import ResolvedFontInstance
+
+    family = "Bahnschrift"
+    from PyQt6.QtGui import QFontDatabase
+
+    if family not in QFontDatabase.families():
+        pytest.skip(f"{family} not installed")
+
+    track = TimingTrack(
+        lines=[TimingLine(chars=[TimingChar("H", 0), TimingChar("a", 500)], end_ms=1_000)]
+    )
+
+    def _ink(style) -> int:
+        with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+            _, frames = _render_g1_frames(
+                renderer, style, (500,), force_warp=True, track=track
+            )
+        return sum(1 for index in range(3, len(frames[0]), 4) if frames[0][index] > 32)
+
+    real = font_weight.resolve_font_instance
+
+    def _forced(style_name: str):
+        def patched(fam, weight, italic=False, stretch_pct=100):
+            instance = real(fam, weight, italic=italic, stretch_pct=stretch_pct)
+            if str(fam) != family:
+                return instance
+            return ResolvedFontInstance(
+                requested=instance.requested,
+                family=instance.family,
+                face_style=style_name,
+                face_weight=400,  # 故意与 style 不符：只能靠 style 选中
+                axis_value=None,
+                synthetic_bold=False,
+                synthetic_italic=False,
+                axis_values=(),
+                exact=False,
+                reason="style_probe",
+                is_variable=False,
+            )
+
+        return patched
+
+    probe_kwargs = dict(
+        font_family=family, font_family_latin=family, font_size_px=96,
+        stroke_width_px=0, stroke2_enabled=False, decoration_kind="none",
+    )
+    try:
+        direct = {}
+        for label, weight in (("Light", 300), ("Regular", 400), ("Bold", 700)):
+            direct[label] = _ink(_g1_style(**{**probe_kwargs, "font_weight": weight}))
+        injected = {}
+        for label in ("Light", "Regular", "Bold"):
+            monkeypatch.setattr(font_weight, "resolve_font_instance", _forced(label))
+            injected[label] = _ink(_g1_style(**{**probe_kwargs, "font_weight": 400}))
+    finally:
+        monkeypatch.setattr(font_weight, "resolve_font_instance", real)
+
+    assert direct["Light"] < direct["Regular"] < direct["Bold"], direct
+    for label in ("Light", "Regular", "Bold"):
+        assert injected[label] == direct[label], (
+            f"style={label}: GPU 墨量 {injected[label]} 与直接请求 {direct[label]} 不符"
+            "（说明没有按 style 选 face）"
+        )
