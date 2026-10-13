@@ -248,6 +248,9 @@ def _face_weight_axis(
     return None if axes is None else axes.get("wght")
 
 
+_NORMAL_STYLE_NAMES = frozenset({"regular", "normal", "标准", "標準", "レギュラー"})
+
+
 _AXIS_PROBE_TEXT = "Ag0Wg指あそ爽永"
 
 
@@ -417,8 +420,16 @@ def get_capabilities(family: str) -> FontCapabilities | None:
     axis_effective = False
     family_axis_inventory: tuple[tuple[str, float, float, float], ...] = ()
     if variable_faces:
+        # 平局时优先「常规」face：族内可能有宽度变体（Bahnschrift 的 Condensed），
+        # 只按 |w−400| 排序会因字母序选中 Condensed，导致族级轴信息取错 face。
         variable_face = min(
-            variable_faces, key=lambda f: (abs(f.weight - 400), f.weight)
+            variable_faces,
+            key=lambda f: (
+                abs(f.weight - 400),
+                0 if f.style_name.casefold() in _NORMAL_STYLE_NAMES else 1,
+                f.weight,
+                f.style_name,
+            ),
         )
         variable_style = variable_face.style_name
         axis_min = variable_face.axis_min

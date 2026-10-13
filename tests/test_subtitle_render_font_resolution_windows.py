@@ -225,6 +225,7 @@ def instance_axis_test_font(source: Path, out_dir: Path, tag: str, value: float)
 
 _PROBE = r'''
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -625,6 +626,119 @@ try:
 finally:
     _shutil.rmtree(_dual_dir, ignore_errors=True)
 
+# face 名匹配与降级 trace（[P2] 回归）：读 sidecar stderr 的 native-trace
+os.environ["KROK_NATIVE_TRACE"] = "1"
+result["face_style_trace"] = {"skipped": None, "cases": {}}
+try:
+    import time as _time
+
+    from krok_helper.subtitle_render.domain.models import (
+        Style as _Style,
+        TimingChar as _TimingChar,
+        TimingLine as _TimingLine,
+        TimingTrack as _TimingTrack,
+    )
+    from krok_helper.subtitle_render.engine.text import font_weight as _font_weight
+    from krok_helper.subtitle_render.engine.text.weight_resolver import (
+        ResolvedFontInstance as _ResolvedFontInstance,
+    )
+    from krok_helper.subtitle_render.native.backend import (
+        NativeRendererProcess as _NativeRendererProcess,
+        SharedFrameRingReader as _SharedFrameRingReader,
+    )
+
+    # 用**字符串正斜杠**形式：本机沙箱对绝对路径与反斜杠形式 stat 会被拒
+    # （相对正斜杠正常），而 pathlib.Path 会在内部归一成反斜杠 —— 所以这里
+    # 刻意不用 Path 构造，也不要"顺手改成 Path"。
+    _renderer_exe = "build/native-renderer/krok_subtitle_render.exe"
+    for _attempt in range(40):
+        try:
+            if os.path.isfile(_renderer_exe):
+                break
+        except OSError:
+            pass
+        _time.sleep(0.5)
+
+    def _render_once(family: str, style_name: str | None, weight: int = 400) -> list[str]:
+        real = _font_weight.resolve_font_instance
+
+        def _patched(fam, weight_, italic=False, stretch_pct=100):
+            instance = real(fam, weight_, italic=italic, stretch_pct=stretch_pct)
+            if str(fam) != family:
+                return instance
+            return _ResolvedFontInstance(
+                requested=instance.requested,
+                family=instance.family,
+                face_style=style_name,
+                face_weight=weight,
+                axis_value=instance.axis_value,
+                synthetic_bold=False,
+                synthetic_italic=instance.synthetic_italic,
+                italic_axis_tag=instance.italic_axis_tag,
+                italic_axis_value=instance.italic_axis_value,
+                axis_values=instance.axis_values,
+                exact=False,
+                reason="style_probe",
+                is_variable=instance.is_variable,
+            )
+
+        _font_weight.resolve_font_instance = _patched
+        try:
+            style = _Style(
+                font_family=family,
+                font_family_latin="",
+                font_size_px=64,
+                font_weight=weight,
+                line_y_position="center",
+                line_horizontal_layout="center",
+                line_lead_in_ms=0,
+                line_tail_ms=2000,
+                stroke_width_px=0,
+                stroke2_enabled=False,
+                decoration_kind="none",
+            )
+            track = _TimingTrack(
+                lines=[_TimingLine(chars=[_TimingChar("A", 0)], end_ms=1000)]
+            )
+            with _NativeRendererProcess(_renderer_exe, response_timeout_s=120.0) as renderer:
+                event = renderer.configure_gpu(
+                    track, style, width=320, height=180, fps=60, force_warp=True
+                )
+                event = renderer.render_gpu_frame(0, force_warp=True, frame_index=0)
+                reader = _SharedFrameRingReader.from_event(event)
+                reader.attach()
+                try:
+                    reader.read_qimage(event)
+                finally:
+                    reader.close()
+                tail = list(getattr(renderer, "_stderr_tail", []) or [])
+            return [line for line in tail if "style" in line and "unmatched" in line]
+        finally:
+            _font_weight.resolve_font_instance = real
+
+    if not os.path.isfile(_renderer_exe):
+        # 注意：受限沙箱里**嵌套子进程**的 stat 会被拒（同目录 listdir 却能看到
+        # exe），此时探针只能跳过；正常终端 / CI 下不会走到这里。
+        result["face_style_trace"]["skipped"] = (
+            "native renderer path not stat-able from this process "
+            "(sandboxed nested process or sidecar not built)"
+        )
+    else:
+        for _family in ("KaiTi", "MS Gothic", "SimSun", "Noto Sans SC",
+                        "Iwata UD Gothic 08StdN VF TTF"):
+            if _family not in QFontDatabase.families():
+                continue
+            _probe = _QFont(_family)
+            _probe.setPixelSize(48)
+            _real_style = QRawFont.fromFont(_probe).styleName() or QFontInfo(_probe).styleName()
+            result["face_style_trace"]["cases"][_family] = {
+                "real_style": _real_style,
+                "bogus_style_traces": _render_once(_family, "NoSuchStyleZZZ"),
+                "real_style_traces": _render_once(_family, _real_style),
+            }
+except Exception as _error:  # noqa: BLE001 — 探针容错
+    result["face_style_trace"]["skipped"] = repr(_error)
+
 result["synthetic_bold_rule"] = _sim_rows
 
 result["axis_fingerprint"] = {
@@ -956,3 +1070,36 @@ def test_dual_weight_vf_italic_uses_italic_face_axis(probe_result: dict) -> None
     assert ink_400 < ink_550 <= ink_950
     assert decisions["italic_950"]["axis_value"] == 700.0  # 斜体那份的轴上限
     assert decisions["italic_950"]["variable"] is True
+
+
+def test_face_style_matching_and_degradation_trace(probe_result: dict) -> None:
+    """face 名**全枚举**匹配 + 两条分支都记降级（[P2] 回归）。
+
+    - 真实 style（Qt 报出的面名，含首个 DWrite 面名是本地化名的字体，如楷体
+      面名列表以 ``Normal`` 开头）必须匹配成功 → 不应出现 unmatched trace；
+    - 不存在的 style 必须打降级 trace，且**静态分支与轴实例分支都要打**
+      （历史实现只在字重分支、且只在字重/斜体不一致时记；轴分支提前 return
+      会整段漏掉诊断）。
+    """
+    trace = probe_result.get("face_style_trace") or {}
+    cases = trace.get("cases") or {}
+    if not cases:
+        pytest.skip(trace.get("skipped") or "face style probe unavailable")
+
+    saw_axis_stage = False
+    saw_weight_stage = False
+    for family, case in cases.items():
+        assert case["real_style_traces"] == [], (
+            f"{family}: 真实 style {case['real_style']!r} 未匹配上（打了 "
+            f"{len(case['real_style_traces'])} 条降级 trace）"
+        )
+        bogus = case["bogus_style_traces"]
+        assert bogus, f"{family}: 不存在的 style 未打降级 trace"
+        for line in bogus:
+            assert family in line, line
+            if "axis-instance" in line:
+                saw_axis_stage = True
+            if "weight-fallback" in line:
+                saw_weight_stage = True
+    assert saw_axis_stage, "轴实例分支未记录降级（可变字体场景）"
+    assert saw_weight_stage, "字重回退分支未记录降级"

@@ -14,6 +14,9 @@
 
 namespace krok::subtitle::native::direct2d {
 
+// 族名归一化（定义在本文件后段的 direct2d 作用域，诊断 trace 用）。
+std::wstring familyNameOf(IDWriteFontFamily *family);
+
 namespace {
 
 // Unified weight resolution -- mirrors engine/text/font_weight.py on the
@@ -51,27 +54,96 @@ bool localizedStringsContain(
     return false;
 }
 
-// face 的 style 名（DWrite FaceNames 的首个条目，通常即 Qt 报出的 styleName，
-// 如 ``Semilight`` / ``Bold Italic``）。用于按 Python 决策的 face style 选实例。
-std::wstring faceStyleNameOf(IDWriteFont *font) {
+// face 的**全部本地化** style 名（DWrite FaceNames 的每个条目）。
+//
+// 只看第一个条目会漏配：带多语言面名的字体会按语言排布（例如 ja-JP ``標準``
+// 在前、en-US ``Regular`` 在后），而 Python 决策里的 face style 来自 Qt
+// （可能是另一种语言的名字）。用于按决策选实例。
+std::vector<std::wstring> faceStyleNamesOf(IDWriteFont *font) {
+    std::vector<std::wstring> values;
     if (font == nullptr) {
-        return {};
+        return values;
     }
     Microsoft::WRL::ComPtr<IDWriteLocalizedStrings> names;
     if (FAILED(font->GetFaceNames(names.ReleaseAndGetAddressOf()))
         || !names || names->GetCount() == 0) {
-        return {};
+        return values;
     }
-    UINT32 length = 0;
-    if (FAILED(names->GetStringLength(0, &length))) {
-        return {};
+    const UINT32 count = names->GetCount();
+    values.reserve(count);
+    for (UINT32 index = 0; index < count; ++index) {
+        UINT32 length = 0;
+        if (FAILED(names->GetStringLength(index, &length))) {
+            continue;
+        }
+        std::wstring name(static_cast<std::size_t>(length) + 1, L'\0');
+        if (FAILED(names->GetString(index, name.data(), length + 1))) {
+            continue;
+        }
+        name.resize(length);
+        values.push_back(std::move(name));
     }
-    std::wstring name(static_cast<std::size_t>(length) + 1, L'\0');
-    if (FAILED(names->GetString(0, name.data(), length + 1))) {
-        return {};
+    return values;
+}
+
+// 空白归一化（``Semi Bold`` ↔ ``Semibold``；仅收拢空白，不改大小写）。
+std::wstring collapseSpaces(const std::wstring &value) {
+    std::wstring out;
+    out.reserve(value.size());
+    bool pendingSpace = false;
+    for (const wchar_t ch : value) {
+        if (ch == L' ' || ch == L'\t') {
+            pendingSpace = !out.empty();
+            continue;
+        }
+        if (pendingSpace) {
+            out.push_back(L' ');
+            pendingSpace = false;
+        }
+        out.push_back(ch);
     }
-    name.resize(length);
-    return name;
+    return out;
+}
+
+// face 名等于决策点名的 style 吗（大小写不敏感；再退一步容忍空格差异）。
+bool styleNameMatches(
+    const std::vector<std::wstring> &names,
+    const std::wstring &wanted
+) {
+    if (wanted.empty()) {
+        return false;
+    }
+    const std::wstring wantedCollapsed = collapseSpaces(wanted);
+    for (const std::wstring &name : names) {
+        if (name.empty()) {
+            continue;
+        }
+        if (_wcsicmp(name.c_str(), wanted.c_str()) == 0) {
+            return true;
+        }
+        if (_wcsicmp(collapseSpaces(name).c_str(), wantedCollapsed.c_str()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 诊断摘要：每条截断，最多 4 条。
+std::wstring joinNamesForTrace(const std::vector<std::wstring> &names) {
+    std::wstring out;
+    std::size_t emitted = 0;
+    for (const std::wstring &name : names) {
+        if (emitted >= 4) {
+            out += L",...";
+            break;
+        }
+        if (emitted > 0) {
+            out += L",";
+        }
+        out += name.size() > 24 ? name.substr(0, 24) + L"..." : name;
+        ++emitted;
+    }
+    return out;
 }
 
 // DirectWrite groups faces under the typographic family (``モトヤ教科書 Pro``),
@@ -314,7 +386,7 @@ ResolvedFontFaces resolveUnifiedFaces(
     struct FaceEntry {
         int weight;
         bool italic;
-        std::wstring styleName;
+        std::vector<std::wstring> styleNames;
         Microsoft::WRL::ComPtr<IDWriteFont> font;
     };
     std::vector<FaceEntry> faces;
@@ -329,7 +401,7 @@ ResolvedFontFaces resolveUnifiedFaces(
             faces.push_back({
                 static_cast<int>(font->GetWeight()),
                 font->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
-                styleRequested ? faceStyleNameOf(font.Get()) : std::wstring{},
+                styleRequested ? faceStyleNamesOf(font.Get()) : std::vector<std::wstring>{},
                 font
             });
         }
@@ -338,7 +410,7 @@ ResolvedFontFaces resolveUnifiedFaces(
         faces.push_back({
             static_cast<int>(matchedFont->GetWeight()),
             matchedFont->GetStyle() == DWRITE_FONT_STYLE_ITALIC,
-            styleRequested ? faceStyleNameOf(matchedFont) : std::wstring{},
+            styleRequested ? faceStyleNamesOf(matchedFont) : std::vector<std::wstring>{},
             Microsoft::WRL::ComPtr<IDWriteFont>(matchedFont)
         });
     }
@@ -347,10 +419,13 @@ ResolvedFontFaces resolveUnifiedFaces(
     Microsoft::WRL::ComPtr<IDWriteFont> styleMatchedFont;
     int styleMatchedWeight = 0;
     bool styleMatchedItalic = false;
+    std::size_t facesWithNames = 0;
     if (styleRequested) {
         for (const FaceEntry &entry : faces) {
-            if (!entry.styleName.empty()
-                && _wcsicmp(entry.styleName.c_str(), hint.style.c_str()) == 0) {
+            if (!entry.styleNames.empty()) {
+                ++facesWithNames;
+            }
+            if (styleNameMatches(entry.styleNames, hint.style)) {
                 styleMatchedFont = entry.font;
                 styleMatchedWeight = entry.weight;
                 styleMatchedItalic = entry.italic;
@@ -358,6 +433,34 @@ ResolvedFontFaces resolveUnifiedFaces(
             }
         }
     }
+    // 决策点名了 face 却没有这个名字（或字体没提供面名）：降级原因在这里统一
+    // 生成一次，供**轴实例分支与字重分支共用**——历史实现只在字重分支、且只在
+    // 字重/斜体也不一致时才记；轴分支提前 return 会整段漏掉诊断。
+    const auto traceUnmatchedStyle = [&](const char *stage) {
+        if (!styleRequested || styleMatchedFont) {
+            return;
+        }
+        std::wstring available;
+        for (const FaceEntry &entry : faces) {
+            if (available.size() > 128) {
+                available += L",...";
+                break;
+            }
+            if (!available.empty()) {
+                available += L"|";
+            }
+            available += joinNamesForTrace(entry.styleNames);
+        }
+        krok::subtitle::native::diagnostics::nativeTrace(
+            "font: %s style '%ls' unmatched in family '%ls' (faces=%zu withNames=%zu names=[%ls])\n",
+            stage,
+            hint.style.c_str(),
+            family != nullptr ? familyNameOf(family).c_str() : L"<gdi-name>",
+            faces.size(),
+            facesWithNames,
+            available.c_str()
+        );
+    };
 
 
     // 可变字体：轴值即请求字重（DirectWrite 会钳制到轴范围）。axisHint /
@@ -419,6 +522,7 @@ ResolvedFontFaces resolveUnifiedFaces(
             entry.value = hint.italicAxisValue;
             ++requestedCount;
         }
+        traceUnmatchedStyle("axis-instance");
         Microsoft::WRL::ComPtr<IDWriteFontFace> axisProbe = probeFace;
         if (styleMatchedFont) {
             Microsoft::WRL::ComPtr<IDWriteFontFace> styledFace;
@@ -536,22 +640,11 @@ ResolvedFontFaces resolveUnifiedFaces(
                 }
             );
         }
-        if (styleRequested
-            && (chosen->weight != targetWeight || chosen->italic != wantItalic)) {
-            // 决策点名了 face 但族内没有它的 style 名（例如 VF 命名实例在 DWrite
-            // 侧仍叫 Regular），且字重/斜体就近也落到别的 face 上：记降级原因，
-            // 便于后续定位「GPU 用了别的实例」这类分歧。
-            krok::subtitle::native::diagnostics::nativeTrace(
-                "font: face style '%ls' unavailable (family faces=%zu), "
-                "fallback face weight=%d italic=%d target=%d/%d\n",
-                hint.style.c_str(),
-                faces.size(),
-                chosen->weight,
-                chosen->italic ? 1 : 0,
-                targetWeight,
-                wantItalic ? 1 : 0
-            );
-        }
+        traceUnmatchedStyle(
+            chosen->weight != targetWeight || chosen->italic != wantItalic
+                ? "weight-fallback-mismatch"
+                : "weight-fallback-same-weight"
+        );
     }
     if (!hint.present || hint.variable) {
         // 无决策/旧 IR：沿用引擎镜像规则（请求≥600 且命中 face<600 → 合成加粗）。
