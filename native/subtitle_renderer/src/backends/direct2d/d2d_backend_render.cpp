@@ -629,6 +629,7 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
     // empty frames and animated geometry can legitimately have no hits.
     const bool realizationReady = realizationPathReady();
     frameDiagnostics.realizationPathReady = realizationReady;
+    frameDiagnostics.realizationGeneration = impl_->realizationGeneration;
     const auto fillWithRealization = [&] (
         ID2D1GeometryRealization *realization,
         ID2D1Geometry *geometry,
@@ -8640,7 +8641,11 @@ NativePreviewResult Direct2DGpuBackend::presentFrame(
     purgeForeignFrameGenerations(generation);
     const int slotIndex = acquireFrameStoreSlot(generation, tMs);
     const auto rendered = renderFrameInternal(tMs, false, false, slotIndex);
-    registerFrameStoreSlot(slotIndex, generation, tMs, rendered.frameDiagnostics.realizationPathReady);
+    registerFrameStoreSlot(
+        slotIndex, generation, tMs,
+        rendered.frameDiagnostics.realizationPathReady,
+        rendered.frameDiagnostics.realizationGeneration
+    );
     if (!rendered.frameDiagnostics.realizationPathReady && realizationPathReady()) {
         impl_->frameStore[static_cast<std::size_t>(slotIndex)].tMs = -1;
         NativePreviewResult result;
@@ -8676,9 +8681,14 @@ NativeRenderOnlyResult Direct2DGpuBackend::renderFrameOnly(
     purgeForeignFrameGenerations(generation);
     const int slotIndex = acquireFrameStoreSlot(generation, tMs);
     const auto rendered = renderFrameInternal(tMs, false, false, slotIndex);
-    registerFrameStoreSlot(slotIndex, generation, tMs, rendered.frameDiagnostics.realizationPathReady);
+    registerFrameStoreSlot(
+        slotIndex, generation, tMs,
+        rendered.frameDiagnostics.realizationPathReady,
+        rendered.frameDiagnostics.realizationGeneration
+    );
     NativeRenderOnlyResult result;
     result.renderMs = rendered.renderMs;
+    result.frameDiagnostics = rendered.frameDiagnostics;
     return result;
 }
 
@@ -8703,6 +8713,10 @@ NativePreviewResult Direct2DGpuBackend::presentRendered(
     }
     purgeForeignFrameGenerations(generation);
     const std::size_t foundIndex = static_cast<std::size_t>(found);
+    result.realizationPathReady =
+        impl_->frameStore[foundIndex].realizationPathReady;
+    result.realizationGeneration =
+        impl_->frameStore[foundIndex].realizationGeneration;
     if (!impl_->frameStore[foundIndex].realizationPathReady && realizationPathReady()) {
         impl_->frameStore[foundIndex].tMs = -1;
         result.dropped = true;
@@ -8783,13 +8797,15 @@ void Direct2DGpuBackend::registerFrameStoreSlot(
     int index,
     int generation,
     std::int64_t tMs,
-    bool pathReady
+    bool pathReady,
+    std::uint64_t realizationGeneration
 ) {
     Impl::FrameStoreSlot &slot = impl_->frameStore[
         static_cast<std::size_t>(index)
     ];
     slot.generation = generation;
     slot.realizationPathReady = pathReady;
+    slot.realizationGeneration = realizationGeneration;
     slot.tMs = tMs;
     slot.lastUse = ++impl_->frameStoreUseSerial;
 }

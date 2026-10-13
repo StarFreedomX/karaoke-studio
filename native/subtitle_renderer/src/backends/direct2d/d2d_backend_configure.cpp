@@ -3451,7 +3451,15 @@ void Direct2DGpuBackend::startRealizationPrewarm(bool deferUntilFirstFrame) {
         // seek/style churn while staying inside the wide-stroke A/B gate.
         // Match N3's export precision. Export uses these cached realizations
         // directly, so a coarse tolerance becomes visible as faceted curves.
-        constexpr float flatteningTolerance = 0.25f;
+        // 展平精度（DIP 单位，误差上限）：0.25 是 D2D 推荐的质量/成本平衡点，
+        // 但实测它与直描路径在不同曲线密度下会留下可见边缘差（2026-10
+        // raw/baked 一致性调查）。KROK_GPU_REALIZATION_TOLERANCE 覆盖用于
+        // A/B 测量（默认不变，避免无数据地改变画面）。
+        const float flatteningTolerance = static_cast<float>(
+            direct2d::environmentDouble(
+                "KROK_GPU_REALIZATION_TOLERANCE", 0.25, 0.001, 4.0
+            )
+        );
         const auto prewarmStart = Clock::now();
         auto sliceStart = prewarmStart;
         std::uint64_t failed = 0;

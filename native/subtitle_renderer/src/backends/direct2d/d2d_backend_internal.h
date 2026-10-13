@@ -440,6 +440,9 @@ struct Direct2DGpuBackend::Impl {
     // 只占实际在飞深度，25 是上界不是常态。env KROK_SUBTITLE_GPU_FRAME_STORE。
     struct FrameStoreSlot {
         bool realizationPathReady = false;
+        // 登记时的 realization 代际（资源版本）：present 时回报，用于把
+        // 「屏幕上的像素」与「哪一代资源」对上号。
+        std::uint64_t realizationGeneration = 0;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         Microsoft::WRL::ComPtr<ID2D1Bitmap1> bitmap;
         int generation = -1;

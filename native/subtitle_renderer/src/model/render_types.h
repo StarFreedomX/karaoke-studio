@@ -44,10 +44,6 @@ struct NativePreviewTarget {
 
 // G6 拆分路径第一步：只渲染到纹理（不上屏），Python 侧到点后调
 // gpu_present_rendered 上屏——「渲染可提前，播放必须到点」。
-struct NativeRenderOnlyResult {
-    double renderMs = 0.0;
-};
-
 struct NativePreviewResult {
     double renderMs = 0.0;
     double presentMs = 0.0;
@@ -58,6 +54,10 @@ struct NativePreviewResult {
     // 根因（2026-10）。
     bool dropped = false;
     bool realizationPathStale = false;
+    // 上屏像素的路径与资源版本（帧仓登记值时记录）：present 成功后据此把
+    // 画面变化与路径/资源换代对上号。
+    bool realizationPathReady = false;
+    std::uint64_t realizationGeneration = 0;
 };
 
 struct ProbeOptions {
@@ -93,6 +93,10 @@ struct ProbeResult {
         bool countersEnabled = true;
         // Actual frame-wide path selection, independent of diagnostic counters.
         bool realizationPathReady = false;
+        // 资源版本：本帧渲染时的 realization 代际（configure 重建时递增）。
+        // 画面在某帧发生变化时，据此判断是否与资源换代相关（2026-10 抖动
+        // 定位闭环：路径 + 代际 + 命中数一起记录，不再靠 FPS 猜）。
+        std::uint64_t realizationGeneration = 0;
         std::uint64_t brushCreated = 0;
         std::uint64_t geometryCreatedStable = 0;
         std::uint64_t geometryCreatedDynamic = 0;
@@ -121,6 +125,13 @@ struct ProbeResult {
         double gpuWaitMs = 0.0;
         double readbackCopyMs = 0.0;
     } frameDiagnostics;
+};
+
+struct NativeRenderOnlyResult {
+    double renderMs = 0.0;
+    // 本帧的路径 / 资源版本诊断（直画路径也要能回答「这一帧是谁画的、
+    // 用的哪一代资源」——抖动定位闭环，2026-10）。
+    ProbeResult::FrameDiagnostics frameDiagnostics;
 };
 
 struct RgbaColor {

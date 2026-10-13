@@ -458,6 +458,11 @@ QJsonObject handlePresentGpuFrame(
         out.insert(QStringLiteral("readback_ms"), 0.0);
         out.insert(QStringLiteral("child_hwnd"), QString::number(result.childWindow));
         out.insert(QStringLiteral("transport"), QStringLiteral("direct_composition"));
+        out.insert(QStringLiteral("realization_path_ready"), result.realizationPathReady);
+        out.insert(
+            QStringLiteral("realization_generation"),
+            static_cast<qint64>(result.realizationGeneration)
+        );
         return out;
     } catch (const std::exception &exception) {
         QJsonObject out = response(false, QStringLiteral("gpu_present_frame"));
@@ -506,6 +511,9 @@ QJsonObject handleRenderGpuFrameDirect(
         out.insert(QStringLiteral("generation"), generation);
         out.insert(QStringLiteral("t_ms"), tMs);
         out.insert(QStringLiteral("render_ms"), result.renderMs);
+        // 路径 + 资源版本 + 命中数：直画帧也要能回答「这一帧是谁画的、
+        // 用的哪一代资源」（抖动定位闭环，2026-10）。
+        appendGpuFrameDiagnostics(&out, result.frameDiagnostics);
         return out;
     } catch (const std::exception &exception) {
         QJsonObject out = response(false, QStringLiteral("gpu_render_frame_direct"));
@@ -598,6 +606,13 @@ QJsonObject handlePresentRenderedGpuFrame(
         out.insert(QStringLiteral("readback_ms"), 0.0);
         out.insert(QStringLiteral("child_hwnd"), QString::number(result.childWindow));
         out.insert(QStringLiteral("transport"), QStringLiteral("direct_composition"));
+        // 上屏像素的渲染路径与资源版本（帧仓登记时记录）：画面变化时
+        // 直接把「屏幕上这帧」与路径/资源换代对上号。
+        out.insert(QStringLiteral("realization_path_ready"), result.realizationPathReady);
+        out.insert(
+            QStringLiteral("realization_generation"),
+            static_cast<qint64>(result.realizationGeneration)
+        );
         return out;
     } catch (const std::exception &exception) {
         QJsonObject out = response(false, QStringLiteral("gpu_present_rendered"));

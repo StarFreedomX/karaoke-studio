@@ -324,6 +324,10 @@ void appendGpuFrameDiagnostics(
     const ProbeResult::FrameDiagnostics &diagnostics
 ) {
     out->insert(QStringLiteral("realization_path_ready"), diagnostics.realizationPathReady);
+    out->insert(
+        QStringLiteral("realization_generation"),
+        static_cast<qint64>(diagnostics.realizationGeneration)
+    );
     out->insert(QStringLiteral("counters_enabled"), diagnostics.countersEnabled);
     out->insert(QStringLiteral("brush_created"), static_cast<qint64>(diagnostics.brushCreated));
     out->insert(QStringLiteral("geometry_created_stable"), static_cast<qint64>(diagnostics.geometryCreatedStable));

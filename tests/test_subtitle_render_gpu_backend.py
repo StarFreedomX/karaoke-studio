@@ -14340,3 +14340,616 @@ def test_gpu_direct_commands_ignore_unconsumed_cancel_ack(monkeypatch) -> None:
         assert [
             event.get("event") for event in renderer._event_backlog
         ] == ["generation_cancelled"]
+
+
+# ---------------------------------------------------------------------------
+# 抖动识别验收（2026-10 第 1 项）
+#
+# 三类测试分别针对：
+#   1. 同一时间戳重复渲染 → 必须逐字节一致（worker / 缓存冷热 / 逐出重建）；
+#   2. raw→baked 切换 → 局部笔画、轮廓位置与边缘亮度，而不是整幅平均值；
+#   3. 连续播放 → 记录上屏时间戳、渲染路径与资源版本，查倒帧/重复切换/冻结。
+#
+# 场景覆盖正文、注音、混合字体、斜体、双描边、发光、矢量导唱符与动态字；
+# 第 3 类含改色 / seek / 缩放后再验证不变量。
+# ---------------------------------------------------------------------------
+
+_FILL_STYLE = dict(font_family="Meiryo", font_family_latin="Arial", font_size_px=64)
+
+
+def _jit_lines():
+    return TimingLine(
+        chars=[
+            TimingChar(ch, index * 250)
+            for index, ch in enumerate(["永", "漢", "A", "b", "g"])
+        ],
+        end_ms=1_500,
+    )
+
+
+def _jit_ruby():
+    return RubyAnnotation(
+        kanji="永漢",
+        reading="よんかん",
+        reading_parts=["よん", "かん"],
+        reading_part_ms=[500],
+        pos_start_ms=0,
+        pos_end_ms=1_500,
+    )
+
+
+def _jit_vector_symbol() -> GuideSymbol:
+    return GuideSymbol(
+        path_commands=(
+            ("M", 100.0, -100.0),
+            ("C", 500.0, -1_000.0, 800.0, -1_000.0, 900.0, -100.0),
+            ("L", 900.0, -800.0),
+            ("L", 100.0, -800.0),
+            ("Z",),
+        ),
+        units_per_em=1000,
+        advance_width=1000.0,
+    )
+
+
+def _jit_scene(name: str) -> tuple[TimingTrack, Style]:
+    """抖动验收场景矩阵：每项 = (轨道, 样式)。"""
+    fill_style = _g1_style(**_FILL_STYLE, stroke_width_px=0, stroke2_enabled=False,
+                           decoration_kind="none")
+    if name == "body":
+        return TimingTrack(lines=[_jit_lines()]), fill_style
+    if name == "ruby":
+        return (
+            TimingTrack(lines=[_jit_lines()], rubies=[_jit_ruby()]),
+            fill_style,
+        )
+    if name == "mixed_font":
+        return (
+            TimingTrack(lines=[_jit_lines()]),
+            _g1_style(
+                font_family="MS Gothic", font_family_latin="Comic Sans MS",
+                font_size_px=64, stroke_width_px=0, stroke2_enabled=False,
+                decoration_kind="none",
+            ),
+        )
+    if name == "italic":
+        return (
+            TimingTrack(lines=[_jit_lines()]),
+            _g1_style(**_FILL_STYLE, stroke_width_px=0, stroke2_enabled=False,
+                      decoration_kind="none", italic=True),
+        )
+    if name == "double_stroke":
+        return (
+            TimingTrack(lines=[_jit_lines()]),
+            _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=True,
+                      stroke2_width_px=4, decoration_kind="none"),
+        )
+    if name == "glow":
+        return (
+            TimingTrack(lines=[_jit_lines()]),
+            _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=False,
+                      decoration_kind="glow", glow_radius_px=8,
+                      glow_before_radius_px=8, glow_after_radius_px=8),
+        )
+    if name == "vector_guide":
+        symbol = _jit_vector_symbol()
+        return (
+            TimingTrack(
+                lines=[
+                    TimingLine(
+                        chars=[
+                            TimingChar("\uFFFC", 0, vector_glyph=symbol),
+                            TimingChar("\uFFFC", 500, vector_glyph=symbol),
+                        ],
+                        end_ms=1_500,
+                    )
+                ]
+            ),
+            _g1_style(**{**_FILL_STYLE, "font_size_px": 120}, stroke_width_px=8,
+                      stroke2_enabled=False, decoration_kind="none"),
+        )
+    if name == "animated":
+        return (
+            TimingTrack(lines=[_jit_lines()]),
+            _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=False,
+                      decoration_kind="none", entry_anim="utopia",
+                      exit_anim="utopia", entry_lead_ms=500, exit_fade_ms=500),
+        )
+    raise AssertionError(f"unknown scene {name!r}")
+
+
+_JIT_SCENES = (
+    "body",
+    "ruby",
+    "mixed_font",
+    "italic",
+    "double_stroke",
+    "glow",
+    "vector_guide",
+    "animated",
+)
+
+
+def _jit_layers_pixels(payload: bytes, width: int, height: int) -> dict:
+    """预乘口径的局部差异指标（边缘亮度带 + 轮廓位置 + 墨迹总量）。"""
+    rgba = np.frombuffer(payload, dtype=np.uint8).reshape(height, width, 4)
+    premul = np.concatenate(
+        [
+            rgba[:, :, :3].astype(np.int32) * rgba[:, :, 3:4].astype(np.int32) // 255,
+            rgba[:, :, 3:4].astype(np.int32),
+        ],
+        axis=2,
+    )
+    return {"premul": premul, "alpha": rgba[:, :, 3].astype(np.int32)}
+
+
+def _jit_compare(
+    expected: bytes, actual: bytes, width: int, height: int
+) -> dict:
+    e = _jit_layers_pixels(expected, width, height)
+    a = _jit_layers_pixels(actual, width, height)
+    ink_e = e["alpha"] > 2
+    ink_a = a["alpha"] > 2
+    union = ink_e | ink_a
+    inter = ink_e & ink_a
+    union_px = max(int(union.sum()), 1)
+    delta = np.abs(e["premul"] - a["premul"])
+    per_pixel = delta.max(axis=2)
+    # 边缘亮度带：任一图处于半透明斜坡的像素（AA 边带）。
+    edge_band = union & (
+        ((e["alpha"] > 24) & (e["alpha"] < 232))
+        | ((a["alpha"] > 24) & (a["alpha"] < 232))
+    )
+    ys, xs = np.mgrid[0:height, 0:width]
+    we = e["alpha"].astype(np.float64)
+    wa = a["alpha"].astype(np.float64)
+    centroid = (
+        float((xs * wa).sum() / wa.sum() - (xs * we).sum() / we.sum()),
+        float((ys * wa).sum() / wa.sum() - (ys * we).sum() / we.sum()),
+    )
+    return {
+        "iou": float(inter.sum()) / union_px,
+        "over8": int((per_pixel[union] > 8).sum()),
+        "over32": int((per_pixel[union] > 32).sum()),
+        "max": int(per_pixel[union].max()) if union.any() else 0,
+        "mean": float(per_pixel[union].mean()) if union.any() else 0.0,
+        "alpha_ratio": float(a["alpha"].sum() / max(int(e["alpha"].sum()), 1)),
+        "centroid": centroid,
+        "edge_max": int(per_pixel[edge_band].max()) if edge_band.any() else 0,
+        "edge_mean": float(per_pixel[edge_band].mean()) if edge_band.any() else 0.0,
+        "edge_px": int(edge_band.sum()),
+    }
+
+
+def _jit_render(
+    renderer: NativeRendererProcess,
+    track: TimingTrack,
+    style: Style,
+    *,
+    timestamps: tuple[int, ...],
+    width: int = 640,
+    height: int = 360,
+    dpr: float = 1.0,
+    realization_enabled: bool = True,
+    wait_realizations: bool = False,
+    extra_tracks: list[TimingTrack] | None = None,
+) -> tuple[dict, list[bytes]]:
+    return _render_g1_frames(
+        renderer,
+        style,
+        timestamps,
+        force_warp=False,
+        track=track,
+        width=width,
+        height=height,
+        extra_tracks=extra_tracks,
+        realization_enabled=realization_enabled,
+        wait_realizations=wait_realizations,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("scene", _JIT_SCENES)
+def test_gpu_same_timestamp_repeats_are_byte_identical(scene, monkeypatch) -> None:
+    """同一时间戳重复渲染必须逐字节一致（第 1 类抖动验收）。
+
+    覆盖：同配置连续重复、跨时间戳/槽位复用后重复、跨 configure（资源缓存
+    逐出与重建）后重复。任一情况出现像素漂移即为用户反馈的「字体抖动」。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track, style = _jit_scene(scene)
+    t_ms = 1_000
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        _, first = _jit_render(
+            renderer, track, style, timestamps=(t_ms,), realization_enabled=False
+        )
+        _, second = _jit_render(
+            renderer, track, style, timestamps=(t_ms,), realization_enabled=False
+        )
+        # 跨时间戳（帧仓 / 槽位 / 布局缓存周转）后回到原时间戳。
+        _, churned = _jit_render(
+            renderer, track, style, timestamps=(250, 750, 1_250, t_ms),
+            realization_enabled=False,
+        )
+        # 跨 configure：换样式再换回（几何/字形资源整体重建）。
+        other_style = replace(style, stroke_color="#3050FF", shadow_color="#FF00AA")
+        _jit_render(
+            renderer, track, other_style, timestamps=(t_ms,),
+            realization_enabled=False,
+        )
+        _, rebuilt = _jit_render(
+            renderer, track, style, timestamps=(t_ms,), realization_enabled=False
+        )
+
+    assert first[0] == second[0], f"{scene}: 同配置重复渲染像素不一致"
+    assert first[0] == churned[-1], f"{scene}: 跨时间戳周转后像素不一致"
+    assert first[0] == rebuilt[0], f"{scene}: 资源重建后像素不一致"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_same_timestamp_repeats_are_byte_identical_across_pool_workers(monkeypatch) -> None:
+    """多 worker 池下同一时间戳重复渲染必须逐字节一致（worker 间不得有像素差）。
+
+    预热完成（全池同步门放行）后所有 worker 走同一路径；任一 worker 输出
+    不同的像素都会在播放中显形为逐帧跳动。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track, style = _jit_scene("double_stroke")
+    frames: list[bytes] = []
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        configured = renderer.configure_gpu(
+            track,
+            style,
+            width=640,
+            height=360,
+            fps=60,
+            worker_count=3,
+            realization_enabled=True,
+            wait_realizations=True,
+        )
+        assert configured["realization_prewarm_complete"] is True, {
+            key: configured.get(key)
+            for key in ("realization_prewarm_complete", "realization_prewarm_tasks")
+        }
+        for index in range(6):
+            event = renderer.render_gpu_frame(1_000, frame_index=index)
+            deadline = time.monotonic() + 20.0
+            while (
+                not event.get("realization_path_ready", False)
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+                event = renderer.render_gpu_frame(1_000, frame_index=index)
+            assert event["event"] == "gpu_frame_ready", event
+            with SharedFrameRingReader.from_event(event) as reader:
+                frames.append(bytes(reader.read_frame(event).payload))
+
+    distinct = {frame for frame in frames}
+    assert len(distinct) == 1, (
+        f"池化重复渲染出现 {len(distinct)} 种像素结果（worker 间像素不一致）"
+    )
+
+
+@pytest.mark.parametrize("dpr", [1.0, 2.0])
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_same_timestamp_repeats_are_byte_identical_across_dpr(dpr, monkeypatch) -> None:
+    """不同 DPR（预览质量）下重复渲染同样必须一致。"""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track, style = _jit_scene("ruby")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        _, first = _render_g1_frames(
+            renderer, style, (1_000,), force_warp=False, track=track,
+            width=640, height=360, realization_enabled=False,
+        )
+        renderer.configure(
+            track, style, width=640, height=360, fps=60, dpr=dpr
+        )
+        _, second = _render_g1_frames(
+            renderer, style, (1_000,), force_warp=False, track=track,
+            width=640, height=360, realization_enabled=False,
+        )
+    # configure() 走 dpr 参数；两次渲染必须给出相同像素（同一 DPR 下）。
+    assert first[0] == second[0], f"dpr={dpr}: 重复渲染像素不一致"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize(
+    "layer",
+    ["fill_only", "double_stroke", "glow", "vector_outline_stroke"],
+)
+def test_gpu_raw_vs_baked_local_metrics(layer, monkeypatch) -> None:
+    """raw→baked 切换的局部差异验收（第 2 类）。
+
+    逐像素预乘比较，按「轮廓位置（IoU/重心）+ 边缘亮度带（AA 斜坡最大/平均
+    差）+ 墨迹总量」三维度验收，不看整幅平均值。2026-10 实测基线（
+    640×360、Meiryo/Arial「永漢Abg」、预乘口径）：
+
+    | 层 | IoU | 重心位移 | 差>8 像素 | 最大通道差 | alpha 变化 |
+    |---|---:|---:|---:|---:|---:|
+    | 正文填充（曲线几何） | 0.9826 | 0.32px | 1240 | 112 | +1.95% |
+    | 双描边 | 0.9997 | 0.04px | 1263 | 105 | +0.06% |
+    | 发光 | 1.0000 | 0.01px | 1354 | 105 | +0.01% |
+    | 矢量轮廓描边（同多边形） | 0.9991 | — | 269 | 96 | -0.09% |
+
+    纯多边形（矩形）实测最大差 3/255 —— 说明差异来自「两条路径对同一条曲线
+    各做各的近似」，不是光栅化器差异，也不是展平容差能调掉的（容差 0.25→0.005
+    实测反而更大）。本测试钉住基线防回归；像素级统一的目标见
+    ``test_gpu_raw_baked_goal_unified_pixels``。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    if layer == "vector_outline_stroke":
+        symbol = _jit_vector_symbol()
+        track = TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[TimingChar("\uFFFC", 0, vector_glyph=symbol)],
+                    end_ms=1_500,
+                )
+            ]
+        )
+        style = _g1_style(
+            **{**_FILL_STYLE, "font_size_px": 160}, stroke_width_px=10,
+            stroke2_enabled=False, decoration_kind="none",
+            fill_color="#00FF2030", base_color="#00FF2030",
+        )
+    else:
+        track = TimingTrack(lines=[_jit_lines()])
+        styles = {
+            "fill_only": dict(stroke_width_px=0, stroke2_enabled=False,
+                              decoration_kind="none"),
+            "double_stroke": dict(stroke_width_px=6, stroke2_enabled=True,
+                                  stroke2_width_px=4, decoration_kind="none"),
+            "glow": dict(stroke_width_px=6, stroke2_enabled=False,
+                         decoration_kind="glow", glow_radius_px=8,
+                         glow_before_radius_px=8, glow_after_radius_px=8),
+        }
+        style = _g1_style(**_FILL_STYLE, **styles[layer])
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        _, raw = _jit_render(
+            renderer, track, style, timestamps=(1_000,), realization_enabled=False
+        )
+        _, baked = _jit_render(
+            renderer, track, style, timestamps=(1_000,), realization_enabled=True,
+            wait_realizations=True,
+        )
+        diagnostics = renderer.gpu_diagnostics()
+    # 预热完成 + 真的用了网格（count 在 configure 响应里还是 0：响应早于预热）。
+    assert diagnostics["realization_prewarm_complete"] is True, diagnostics
+    assert diagnostics["realization_count"] > 0, diagnostics
+    metric = _jit_compare(raw[0], baked[0], 640, 360)
+
+    # 轮廓位置一致：交并比 + 重心位移（局部，不用整幅均值）。
+    assert metric["iou"] >= 0.97, (layer, metric)
+    assert abs(metric["centroid"][0]) <= 1.0, (layer, metric)
+    assert abs(metric["centroid"][1]) <= 1.0, (layer, metric)
+    # 边缘亮度带：AA 斜坡上的差必须有界（实测 ≤ 128）。
+    assert metric["edge_max"] <= 160, (layer, metric)
+    # 墨迹总量变化有界（实测 |Δ| ≤ 2.0%）。
+    assert abs(metric["alpha_ratio"] - 1.0) <= 0.03, (layer, metric)
+    # 差 > 8 的像素数上限：按各层实测基线留 ~1.6× 余量。
+    budgets = {
+        "fill_only": 2000,
+        "double_stroke": 2000,
+        "glow": 2200,
+        "vector_outline_stroke": 450,
+    }
+    assert metric["over8"] <= budgets[layer], (layer, metric)
+    assert metric["max"] <= 160, (layer, metric)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "像素来源尚未统一：raw/baked 各自近似同一条曲线（实测差 40-130/255）。"
+        "目标路线：两条路径共用同一多边形（曲线先展平，再同时用于直描与 "
+        "realization）——纯多边形实测最大差 3/255。"
+    ),
+)
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_raw_baked_goal_unified_pixels(monkeypatch) -> None:
+    """目标验收（当前已知不达标，strict xfail 钉住）：静态层 raw/baked 像素一致。
+
+    通过条件：正文填充层 raw 与 baked 的最大通道差 ≤ 8、IoU ≥ 0.999。
+    实现「两条路径共用同一多边形」后本测试应转为通过——届时 strict xfail
+    会让套件失败，强制把它改成正式验收。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(lines=[_jit_lines()])
+    style = _g1_style(**_FILL_STYLE, stroke_width_px=0, stroke2_enabled=False,
+                      decoration_kind="none")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        _, raw = _jit_render(
+            renderer, track, style, timestamps=(1_000,), realization_enabled=False
+        )
+        _, baked = _jit_render(
+            renderer, track, style, timestamps=(1_000,), realization_enabled=True,
+            wait_realizations=True,
+        )
+    metric = _jit_compare(raw[0], baked[0], 640, 360)
+    assert metric["iou"] >= 0.999, metric
+    assert metric["max"] <= 8, metric
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_playback_sequence_records_path_and_resource_version(monkeypatch) -> None:
+    """连续播放记录验收（第 3 类）：上屏时间戳 + 渲染路径 + 资源版本。
+
+    以媒体节奏驱动「渲染提前、到点上屏」的直画序列，长跑中包含**改色、
+    seek 与缩放**，逐帧记录上屏时间戳、渲染路径（raw/baked）、realization
+    代际（资源版本）与渲染耗时，然后检查：
+
+    - 倒帧：记录的时间戳严格递增（seek 跳跃也只前进）；
+    - 重复切换：稳态内路径不得来回抖动，每次 configure 最多一次 raw→baked；
+    - 资源版本：代际单调不减，且每次 configure 后有界帧数内回到烘焙路径
+      （预热有界收敛的端到端回归）；
+    - 冻结：帧序列持续推进，不出现长时间空洞。
+
+    物理上屏（DComp 子窗口）由 ``test_gpu_g6_direct_composition_child_window_has_zero_readback``
+    覆盖；本套件会话固定 offscreen（conftest），故这里记录的是到点提交序列，
+    在真实桌面平台下会额外执行真实 present（platform=windows 时）。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(ch, 4_000 + index * 400)
+                    for index, ch in enumerate("永漢Abg")
+                ],
+                end_ms=7_000,
+            )
+        ]
+    )
+    base_style = _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=True,
+                           stroke2_width_px=4, decoration_kind="none")
+    frame_ms = 1000.0 / 60.0
+    frame_count = 90
+    reconfigures: list[int] = []
+    records: list[dict] = []
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30.0) as process:
+        # G6 直画走单后端（池化 configure 配置的是池内 worker，直画后端
+        # 由 ensureGpuBackend 按需建，worker_count>1 会拿不到场景）。
+        process.configure_gpu(
+            track, base_style, width=320, height=180, fps=60,
+            realization_enabled=True,
+        )
+        generation = 0
+        offset = 0
+        for index in range(frame_count):
+            t_ms = 4_000 + int(index * frame_ms) + offset
+            reason = None
+            if index == frame_count // 6:
+                # 前段缩放：整场景重建（realization 代际前进 = 资源版本换代）。
+                process.resize_gpu_target(
+                    width=480, height=270, dpr=1.0, realization_enabled=True
+                )
+                generation += 1
+                process.send_cancel_generation(generation - 1)
+                reconfigures.append(index)
+                reason = "resize"
+            elif index == frame_count // 3:
+                # 中段改色（同尺寸）：池走仅改色快速路径，场景换代。
+                process.configure_gpu(
+                    track, replace(base_style, stroke_color="#2040C0"),
+                    width=320, height=180, fps=60,
+                    realization_enabled=True,
+                )
+                generation += 1
+                process.send_cancel_generation(generation - 1)
+                reconfigures.append(index)
+                reason = "recolor"
+            elif index == 2 * frame_count // 3:
+                # 中段 seek：代际前进 + 时间戳跳变（只允许向前）。
+                generation += 1
+                process.send_cancel_generation(generation - 1)
+                offset += 700
+                t_ms += 700
+                reconfigures.append(index)
+                reason = "seek"
+            # 媒体节奏（真实播放的墙钟推进）：预热线程要在帧间空隙里推进，
+            # 全速空跑会让本用例永远停在 raw 路径、验不到切换不变量。
+            time.sleep(frame_ms / 1000.0)
+            rendered = process.render_gpu_frame_direct(
+                t_ms, generation=generation, frame_index=index
+            )
+            if rendered.get("reason") == "generation_cancelled":
+                records.append(
+                    {
+                        "index": index,
+                        "t_ms": t_ms,
+                        "generation": generation,
+                        "cancelled": True,
+                        "path_ready": None,
+                        "resource_version": None,
+                        "render_ms": 0.0,
+                        "reason": reason,
+                    }
+                )
+                continue
+            records.append(
+                {
+                    "index": index,
+                    "t_ms": t_ms,
+                    "generation": generation,
+                    "cancelled": False,
+                    "path_ready": bool(rendered.get("realization_path_ready")),
+                    "resource_version": rendered.get("realization_generation"),
+                    "render_ms": float(rendered.get("render_ms") or 0.0),
+                    "reason": reason,
+                }
+            )
+
+    assert records, "没有记录到任何帧"
+    live = [record for record in records if not record["cancelled"]]
+    assert len(live) >= frame_count - 8, len(live)
+
+    # 时间正确：时间戳严格递增，不出现倒帧或重复提交。
+    timestamps = [record["t_ms"] for record in live]
+    assert all(current > previous for previous, current in zip(timestamps, timestamps[1:])), (
+        [
+            (previous, current)
+            for previous, current in zip(timestamps, timestamps[1:])
+            if current <= previous
+        ]
+    )
+
+    # 帧序列只前进：索引连续（允许被取消的帧缺号）。
+    indices = [record["index"] for record in live]
+    assert indices == sorted(indices)
+
+    # 持续出帧：不出现超过 20 帧的空洞（冻结信号）。
+    gaps = [
+        current - previous
+        for previous, current in zip(indices, indices[1:])
+        if current - previous > 1
+    ]
+    assert not gaps or max(gaps) <= 20, gaps
+
+    # 重复切换：稳态段内路径不得抖动；每次 configure 之后路径只能切换一次。
+    segments: list[list[dict]] = []
+    segment: list[dict] = []
+    for record in live:
+        if record["reason"] is not None and segment:
+            segments.append(segment)
+            segment = []
+        segment.append(record)
+    if segment:
+        segments.append(segment)
+    for segment in segments:
+        flips = sum(
+            1
+            for previous, current in zip(segment, segment[1:])
+            if previous["path_ready"] != current["path_ready"]
+        )
+        assert flips <= 1, [(record["index"], record["path_ready"]) for record in segment]
+
+    # 非空跑校验：序列里必须真的出现过烘焙路径（否则切换不变量形同虚设）。
+    assert any(record["path_ready"] for record in live), (
+        "整段播放都没走上 realization 路径：预热未收敛或门控未放行"
+    )
+
+    # 每次 configure 之后必须有界帧数内回到烘焙路径（预热有界收敛端到端）。
+    for reconfig_index in reconfigures:
+        following = [
+            record for record in live if record["index"] >= reconfig_index
+        ][:90]
+        assert any(record["path_ready"] for record in following), (
+            reconfig_index,
+            [(record["index"], record["path_ready"]) for record in following][:20],
+        )
+
+    # 资源版本：单调不减；出现过的不同版本数与 configure 次数相称。
+    versions = [
+        record["resource_version"]
+        for record in live
+        if record["resource_version"] is not None
+    ]
+    if versions:
+        assert versions == sorted(versions), versions
+        assert len(set(versions)) >= 2, versions
+
+    # 系统读数：改色/seek 之后仍在出帧（没有把预览卡死）。
+    tail = [record["render_ms"] for record in live[-20:]]
+    assert tail and max(tail) < 60.0, tail
