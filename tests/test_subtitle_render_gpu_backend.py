@@ -13631,12 +13631,11 @@ def test_gpu_applies_non_weight_axis_from_decision(monkeypatch) -> None:
     def _bounds(frame: bytes) -> tuple[int, int, int, int]:
         return _payload_alpha_bounds(frame)
 
-    def _render() -> tuple[int, int, int, int]:
+    def _render(renderer) -> tuple[int, int, int, int]:
         style = _g1_style(**probe)
-        with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
-            _, frames = _render_g1_frames(
-                renderer, style, (500,), force_warp=True, track=track
-            )
+        _, frames = _render_g1_frames(
+            renderer, style, (500,), force_warp=True, track=track
+        )
         return _bounds(frames[0])
 
     real = font_weight.resolve_font_instance
@@ -13663,9 +13662,11 @@ def test_gpu_applies_non_weight_axis_from_decision(monkeypatch) -> None:
             is_variable=instance.is_variable,
         )
 
-    default_bounds = _render()
-    monkeypatch.setattr(font_weight, "resolve_font_instance", _with_axis)
-    condensed_bounds = _render()
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        # Reuse the preview backend; a fresh process hides stale face-cache hits.
+        default_bounds = _render(renderer)
+        monkeypatch.setattr(font_weight, "resolve_font_instance", _with_axis)
+        condensed_bounds = _render(renderer)
     width_default = default_bounds[2] - default_bounds[0]
     width_condensed = condensed_bounds[2] - condensed_bounds[0]
     assert width_condensed < width_default * 0.92, (
@@ -13796,11 +13797,13 @@ def test_gpu_honours_resolved_face_style(monkeypatch) -> None:
         lines=[TimingLine(chars=[TimingChar("H", 0), TimingChar("a", 500)], end_ms=1_000)]
     )
 
-    def _ink(style) -> int:
-        with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
-            _, frames = _render_g1_frames(
-                renderer, style, (500,), force_warp=True, track=track
-            )
+    def _ink(style, renderer=None) -> int:
+        if renderer is None:
+            with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as fresh:
+                return _ink(style, fresh)
+        _, frames = _render_g1_frames(
+            renderer, style, (500,), force_warp=True, track=track
+        )
         return sum(1 for index in range(3, len(frames[0]), 4) if frames[0][index] > 32)
 
     real = font_weight.resolve_font_instance
@@ -13835,9 +13838,12 @@ def test_gpu_honours_resolved_face_style(monkeypatch) -> None:
         for label, weight in (("Light", 300), ("Regular", 400), ("Bold", 700)):
             direct[label] = _ink(_g1_style(**{**probe_kwargs, "font_weight": weight}))
         injected = {}
-        for label in ("Light", "Regular", "Bold"):
-            monkeypatch.setattr(font_weight, "resolve_font_instance", _forced(label))
-            injected[label] = _ink(_g1_style(**{**probe_kwargs, "font_weight": 400}))
+        with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+            for label in ("Light", "Regular", "Bold"):
+                monkeypatch.setattr(font_weight, "resolve_font_instance", _forced(label))
+                injected[label] = _ink(
+                    _g1_style(**{**probe_kwargs, "font_weight": 400}), renderer
+                )
     finally:
         monkeypatch.setattr(font_weight, "resolve_font_instance", real)
 

@@ -516,6 +516,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             faceHint.syntheticBold,
             faceHint.syntheticItalic,
             faceHint.axis,
+            faceHint.present,
+            faceHint.variable,
+            faceHint.style,
+            faceHint.italicAxisTag,
+            faceHint.italicAxisValue,
+            faceHint.axes,
         };
         const auto found = impl_->fontFaces.find(key);
         if (found != impl_->fontFaces.end()) {

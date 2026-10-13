@@ -234,8 +234,12 @@ struct Direct2DGpuBackend::Impl {
     // the Python-resolved instance must be part of the key, so a static
     // lookup cannot poison the cache for a later axis instance (and vice
     // versa) sharing the same (family, weight, italic).
+    // Include face style and the full axis snapshot: these can change without
+    // changing the requested weight, including during reuse of a preview pool.
     using FontFaceKey = std::tuple<
-        std::wstring, int, bool, bool, int, bool, bool, float
+        std::wstring, int, bool, bool, int, bool, bool, float,
+        bool, bool, std::wstring, std::wstring, float,
+        std::vector<std::pair<std::wstring, float>>
     >;
     using TextGlyphKey = std::tuple<
         std::uintptr_t, int, std::uint32_t, int, std::vector<UINT16>
