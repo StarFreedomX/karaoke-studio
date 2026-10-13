@@ -1103,3 +1103,24 @@ def test_face_style_matching_and_degradation_trace(probe_result: dict) -> None:
                 saw_weight_stage = True
     assert saw_axis_stage, "轴实例分支未记录降级（可变字体场景）"
     assert saw_weight_stage, "字重回退分支未记录降级"
+
+
+def test_variable_face_tie_prefers_normal_style(probe_result: dict) -> None:
+    """族内多个可变 face 平局（|w−400| 相同）时优先「常规」face。
+
+    实测坑：Bahnschrift 的 face 里同时有 Regular 与 Condensed，按 |w−400| 平局
+    再按字母序会选中 Condensed → 族级轴信息（variable_style / 轴快照）取到宽度
+    变体。现在平局优先 Regular/Normal/标准/標準。
+    """
+    caps = probe_result.get("caps") or {}
+    for family, entry in caps.items():
+        if not entry or not entry.get("axis_present"):
+            continue
+        style = entry.get("variable_style")
+        if style is None:
+            continue  # 族级兜底路径（如 Segoe UI Variable）没有具体 face
+        assert style.casefold() in {"regular", "normal", "标准", "標準", "レギュラー"}, (
+            f"{family}: variable_style 落到非常规 face {style!r}"
+        )
+    if "Bahnschrift" in caps and caps["Bahnschrift"]:
+        assert caps["Bahnschrift"]["variable_style"] == "Regular"
