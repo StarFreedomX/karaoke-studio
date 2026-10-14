@@ -389,6 +389,13 @@ class PreviewCanvas(QWidget):
         logical_h: int,
         dpr: float,
     ) -> Optional[QImage]:
+        if (
+            self._video_path is not None
+            and self._video_player is not None
+            and self._video_player.duration() > 0
+            and self._t_ms >= self._video_player.duration()
+        ):
+            return None
         if self._video_image is None or self._video_image.isNull():
             return None
         canvas_x, canvas_y, canvas_w, canvas_h = self._fit_output_rect(
@@ -947,6 +954,10 @@ class TransportBar(QWidget):
             self.set_time(0)
         self._tick_anchor_ms = self._slider.value()
         self._tick_anchor_real.start()
+        if self._media_tail_active():
+            self._tick_timer.start()
+            self._update_play_button(True)
+            return
         if self._use_controller():
             # Slider edits already seek. On resume the media clock is the
             # authority; the last UI tick may trail it by a few milliseconds.
@@ -996,6 +1007,8 @@ class TransportBar(QWidget):
         self.set_time(self.current_time_ms + int(delta_ms))
 
     def is_playing(self) -> bool:
+        if self._tick_timer.isActive():
+            return True
         if self._use_controller():
             return self._controller.is_playing()
         if self._has_audio and self._player is not None:
@@ -1023,6 +1036,8 @@ class TransportBar(QWidget):
         try:
             duration = int(player.duration())
             if duration > 0:
+                if duration < self._slider.maximum():
+                    return False
                 return int(player.position()) >= duration - 1
             return player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia
         except (AttributeError, RuntimeError, TypeError):
@@ -1063,6 +1078,15 @@ class TransportBar(QWidget):
         if self._tick_timer.isActive() or self._position_poll_timer.isActive():
             self._tick_anchor_ms = value
             self._tick_anchor_real.restart()
+            if self._tick_timer.isActive() and not self._media_tail_active():
+                if self._use_controller():
+                    self._tick_timer.stop()
+                    self._controller.play()
+                    self._position_poll_timer.start()
+                elif self._has_audio and self._player is not None:
+                    self._tick_timer.stop()
+                    self._player.play()
+                    self._position_poll_timer.start()
 
     def _on_player_position(self, ms: int) -> None:
         if not self._has_audio:
@@ -1074,6 +1098,8 @@ class TransportBar(QWidget):
 
     def _on_player_state_changed(self, state) -> None:
         if state == QMediaPlayer.PlaybackState.StoppedState and self._has_audio:
+            if self._playing_state and self._media_tail_active():
+                return
             # 音频自然结束 → 停轮询 + 复位按钮
             self._position_poll_timer.stop()
             self._update_play_button(False)
@@ -1110,6 +1136,11 @@ class TransportBar(QWidget):
         self._preview_quality_combo.setToolTip(tooltip)
 
     def _on_audio_clock_tick(self) -> None:
+        if self._media_tail_active():
+            self._position_poll_timer.stop()
+            self._tick_timer.start()
+            self._on_tick()
+            return
         if self._use_controller():
             audio_pos_source = self._controller.position()
         elif self._player is not None and self._has_audio:
@@ -1132,6 +1163,16 @@ class TransportBar(QWidget):
             self.pause()
             return
         self._set_slider_silently(target)
+
+    def _media_tail_active(self) -> bool:
+        player = self._controller if self._use_controller() else self._player
+        if player is None:
+            return False
+        duration = int(getattr(player, "duration", lambda: 0)())
+        return (
+            0 < duration < self._slider.maximum()
+            and (self.current_time_ms >= duration or int(player.position()) >= duration - 1)
+        )
 
     def _on_tick(self) -> None:
         elapsed = self._tick_anchor_real.elapsed()

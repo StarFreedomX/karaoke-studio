@@ -69,6 +69,60 @@ def _bar(qapp) -> TransportBar:
     return bar
 
 
+def test_short_media_continues_lyrics_on_visual_clock(qapp):
+    bar = _bar(qapp)
+
+    class Media:
+        def has_media(self):
+            return True
+
+        def duration(self):
+            return 1000
+
+        def position(self):
+            return 1000
+
+        def seek(self, ms):
+            pass
+
+        def pause(self):
+            pass
+
+        def is_playing(self):
+            return False
+
+    bar.attach_playback_controller(Media())
+    bar.set_time(1000)
+    bar.play()
+    assert bar.current_time_ms == 1000
+    assert bar.is_playing()
+    bar._tick_anchor_ms = 1500
+    bar._on_tick()
+    assert bar.current_time_ms >= 1500
+    bar.pause()
+    assert not bar.is_playing()
+
+
+def test_video_preview_hides_finished_video_and_restores_on_seek(qapp):
+    from krok_helper.subtitle_render.domain.background import BackgroundSource
+    from krok_helper.subtitle_render.frontend.preview.preview_graphics import PreviewGraphicsView
+
+    view = PreviewGraphicsView()
+
+    class Media:
+        def duration(self):
+            return 1000
+
+    view._external_player = Media()
+    view._background_source = BackgroundSource(kind="video", path="video.mp4")
+    for time_ms, visible in [(500, True), (1000, False), (20000, False), (500, True)]:
+        view._t_ms = time_ms
+        view._sync_video_position()
+        assert view._video_item.isVisible() == visible
+    view._external_player = None
+    view.close()
+
+
 def test_native_renderer_process_owner_centralizes_lazy_restart_and_close():
     from krok_helper.subtitle_render.native.backend import NativeRendererProcessOwner
 

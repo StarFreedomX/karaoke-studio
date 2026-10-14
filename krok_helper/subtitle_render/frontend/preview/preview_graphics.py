@@ -1178,6 +1178,12 @@ class PreviewGraphicsView(QGraphicsView):
     # ------------------------------------------------------------------ internal
 
     def _sync_video_position(self, *, force: bool = False) -> None:
+        player = self._external_player or self._video_player
+        duration = int(getattr(player, "duration", lambda: 0)())
+        self._video_item.setVisible(
+            self._background_source.kind == "video"
+            and not (duration > 0 and self._t_ms >= duration)
+        )
         if self._external_player is not None:
             # 视频 seek 由 TransportBar→controller 统一驱动，本视图不再各自 seek。
             return

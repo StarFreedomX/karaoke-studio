@@ -249,6 +249,8 @@ def test_validate_render_job_rejects_output_path_that_is_a_directory(tmp_path):
 
 def test_build_render_command_contains_rawvideo_overlay_and_audio(tmp_path):
     job = _job(tmp_path, include_audio=True)
+    padded = build_render_command("ffmpeg", job)
+    assert padded[padded.index("-af") + 1] == "apad"
 
     command = build_render_command("ffmpeg", job)
 
@@ -331,6 +333,7 @@ def test_background_filter_video_is_always_contain(tmp_path):
     graph = _filter_graph(build_render_command("ffmpeg", _job(tmp_path, include_audio=False)))
     assert "force_original_aspect_ratio=decrease" in graph
     assert "pad=320:180" in graph
+    assert "tpad=stop_mode=add:stop=-1:color=black,trim=" in graph
 
 
 def test_background_filter_image_fit_cover_and_contain(tmp_path):

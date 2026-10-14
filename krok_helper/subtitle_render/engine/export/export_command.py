@@ -84,6 +84,9 @@ def background_scale_chain(job: RenderJob, duration_seconds: float) -> str:
     if not format_needs_background(job.output_format):
         return transparent_background_chain(job, duration_seconds)
     source = resolved_background(job)
+    # Extend a finished video with black frames rather than repeating its last
+    # frame. Trim afterwards so longer videos keep the requested duration.
+    tail = "tpad=stop_mode=add:stop=-1:color=black," if source.kind == "video" else ""
     cover = source.kind in {"image", "image_sequence"} and source.image_fit == "cover"
     if cover:
         return (
@@ -96,7 +99,7 @@ def background_scale_chain(job: RenderJob, duration_seconds: float) -> str:
     return (
         f"[1:v:0]scale={job.width}:{job.height}:force_original_aspect_ratio=decrease,"
         f"pad={job.width}:{job.height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"fps={job.fps},trim=duration={duration_seconds:.6f},setpts=PTS-STARTPTS[bg];"
+        f"fps={job.fps},{tail}trim=duration={duration_seconds:.6f},setpts=PTS-STARTPTS[bg];"
     )
 
 
@@ -253,6 +256,9 @@ def build_render_command(
     command.extend(["-filter_complex", filter_graph, "-map", video_label])
     if audio_input_index is not None:
         command.extend(["-map", f"{audio_input_index}:a:0?"])
+        # Keep the audio timeline as long as the rendered video. apad emits
+        # silence after EOF; the output -t bounds both streams to the job.
+        command.extend(["-af", "apad"])
     command.extend(
         ["-t", f"{duration_seconds:.6f}", "-r", str(job.fps), "-fps_mode", "cfr"]
     )
