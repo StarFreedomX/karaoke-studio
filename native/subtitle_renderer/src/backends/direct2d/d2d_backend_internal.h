@@ -395,47 +395,6 @@ struct Direct2DGpuBackend::Impl {
         4096
     );
     Microsoft::WRL::ComPtr<ID2D1DeviceContext1> realizationContext;
-    // ---- 静态层蒙版缓存（2026-10 原型：KROK_GPU_STATIC_LAYER_MASK，默认关）----
-    // 生成：用当前 baked 路径（DrawGeometryRealization + 实际画笔）把静态
-    // 字符层离屏栅格化成小位图；**完整绘制变换（DPR/缩放/亚像素落点）烘进
-    // 位图内容**，落点取整数像素。命中：identity 变换下 NEAREST 1:1 blit，
-    // 绝不二次采样/分数平移。生成帧与命中帧画的是同一张位图 ⇒ 像素一致由
-    // 构造保证；位图内容 = 旧 baked 栅格化结果 ⇒ 观感不变（与直接
-    // DrawGeometryRealization 到目标逐位一致是验收门槛，不是假设）。
-    // 键 = (realization 指针, brush 指针)：before/after 卡拉OK状态与描边/
-    // 描边2/保护描边天然分键；configure 全量重建与仅改色两处都会清缓存
-    // （画笔指针随之失效），角色样式每帧新建 ownedBrush 的字符不进缓存。
-    // 蒙版生成的专用 DeviceContext：主帧渲染正处于 BeginDraw 作用域内，
-    // 同一 context 嵌套 BeginDraw 非法（D2DERR）——预热线程同款做法，
-    // 从设备新建独立 context（同设备的 realization/brush 可跨 context 用）。
-    Microsoft::WRL::ComPtr<ID2D1DeviceContext1> staticMaskContext;
-    struct StaticMaskEntry {
-        Microsoft::WRL::ComPtr<ID2D1Bitmap1> bitmap;
-        float originX = 0.0f;
-        float originY = 0.0f;
-        int width = 0;
-        int height = 0;
-        std::uint64_t lastUse = 0;
-    };
-    std::map<std::pair<ID2D1GeometryRealization *, ID2D1Brush *>, StaticMaskEntry>
-        staticMaskCache;
-    std::uint64_t staticMaskUseSerial = 0;
-    static constexpr std::size_t defaultStaticMaskCapacity = 4096;
-    std::size_t staticMaskCapacity = direct2d::environmentSize(
-        "KROK_GPU_STATIC_MASK_CAPACITY",
-        defaultStaticMaskCapacity,
-        1,
-        65536
-    );
-    bool staticMaskEnabled = direct2d::environmentFlagEnabled(
-        "KROK_GPU_STATIC_LAYER_MASK",
-        false
-    );
-    // 诊断计数（countersEnabled 才累计）。
-    std::uint64_t staticMaskGenerated = 0;
-    std::uint64_t staticMaskHits = 0;
-    double staticMaskGenerateMs = 0.0;
-    std::uint64_t staticMaskBytesEstimate = 0;
     std::uint64_t realizationCount = 0;
     std::uint64_t realizationGeneration = 0;
     std::map<RealizationCacheKey, CachedRealization> realizationResources;

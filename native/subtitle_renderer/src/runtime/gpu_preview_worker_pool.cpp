@@ -393,21 +393,6 @@ public:
             aggregate.glowCacheBytesEstimate += current.glowCacheBytesEstimate;
             aggregate.realizationResourceBytesEstimate +=
                 current.realizationResourceBytesEstimate;
-            aggregate.staticMaskBytesEstimate +=
-                current.staticMaskBytesEstimate;
-            aggregate.staticMaskCacheSize += current.staticMaskCacheSize;
-            aggregate.staticMaskGenerated = std::max(
-                aggregate.staticMaskGenerated, current.staticMaskGenerated
-            );
-            aggregate.staticMaskHits = std::max(
-                aggregate.staticMaskHits, current.staticMaskHits
-            );
-            aggregate.staticMaskGenerateMs = std::max(
-                aggregate.staticMaskGenerateMs, current.staticMaskGenerateMs
-            );
-            aggregate.frameStoreRegistered = std::max(
-                aggregate.frameStoreRegistered, current.frameStoreRegistered
-            );
             aggregate.realizationPrewarmComplete =
                 aggregate.realizationPrewarmComplete
                 && current.realizationPrewarmComplete;

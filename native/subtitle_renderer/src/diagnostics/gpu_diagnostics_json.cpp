@@ -291,33 +291,6 @@ void appendGpuDiagnostics(
         QStringLiteral("glow_dirty_rect_enabled"),
         diagnostics.glowDirtyRectEnabled
     );
-    // 静态层蒙版缓存（2026-10 原型）与 G6 帧仓在飞槽数。
-    out->insert(
-        QStringLiteral("static_mask_cache_size"),
-        static_cast<qint64>(diagnostics.staticMaskCacheSize)
-    );
-    out->insert(
-        QStringLiteral("static_mask_cache_capacity"),
-        static_cast<qint64>(diagnostics.staticMaskCacheCapacity)
-    );
-    out->insert(
-        QStringLiteral("static_mask_generated"),
-        static_cast<qint64>(diagnostics.staticMaskGenerated)
-    );
-    out->insert(
-        QStringLiteral("static_mask_hits"),
-        static_cast<qint64>(diagnostics.staticMaskHits)
-    );
-    out->insert(QStringLiteral("static_mask_generate_ms"),
-                diagnostics.staticMaskGenerateMs);
-    out->insert(
-        QStringLiteral("static_mask_bytes_estimate"),
-        static_cast<qint64>(diagnostics.staticMaskBytesEstimate)
-    );
-    out->insert(
-        QStringLiteral("frame_store_registered"),
-        static_cast<qint64>(diagnostics.frameStoreRegistered)
-    );
     // 资源分类（2026-10 低显存观测）：类别字节估算，均包含在
     // estimated_cache_bytes 里；多 worker/缓存池由宿主侧聚合。
     out->insert(

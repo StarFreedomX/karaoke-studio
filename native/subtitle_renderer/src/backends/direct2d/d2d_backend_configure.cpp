@@ -166,13 +166,6 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 ++impl_->diagnostics.brushCacheInvalidations;
             }
         }
-        // 仅改色也会换掉全部画笔：蒙版缓存键含画笔指针，整批作废重建
-        // （2026-10 蒙版原型；颜色变化本来就是蒙版方案的重生成点）。
-        impl_->staticMaskCache.clear();
-        impl_->staticMaskBytesEstimate = 0;
-        impl_->staticMaskGenerated = 0;
-        impl_->staticMaskHits = 0;
-        impl_->staticMaskGenerateMs = 0.0;
         impl_->diagnostics.realizationPrewarmTasks = 0;
         impl_->diagnostics.realizationPrewarmSkipped = 0;
         impl_->diagnostics.realizationPrewarmMs = 0.0;
@@ -209,13 +202,6 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         std::lock_guard<std::mutex> realizationLock(impl_->realizationMutex);
         ++impl_->realizationGeneration;
         impl_->realizationCount = 0;
-        // lines/realization 即将全部重建：旧键指向将释放的对象（且地址可能
-        // 被新 realization 复用 → 键碰撞画错字），必须在重建前清空。
-        impl_->staticMaskCache.clear();
-        impl_->staticMaskBytesEstimate = 0;
-        impl_->staticMaskGenerated = 0;
-        impl_->staticMaskHits = 0;
-        impl_->staticMaskGenerateMs = 0.0;
     }
     impl_->realizationControl.reset();
     impl_->realizationPrewarmComplete.store(true, std::memory_order_release);

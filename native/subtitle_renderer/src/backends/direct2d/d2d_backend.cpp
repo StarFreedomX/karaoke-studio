@@ -263,23 +263,6 @@ BackendDiagnostics Direct2DGpuBackend::diagnostics() const {
     }
     result.glowCacheBytesEstimate = glowBytes;
     result.estimatedCacheBytes += glowBytes;
-    // 静态层蒙版缓存（原型）与 G6 帧仓在飞槽数。
-    result.staticMaskCacheSize = static_cast<std::uint64_t>(
-        impl_->staticMaskCache.size()
-    );
-    result.staticMaskCacheCapacity = static_cast<std::uint64_t>(
-        impl_->staticMaskCapacity
-    );
-    result.staticMaskGenerated = impl_->staticMaskGenerated;
-    result.staticMaskHits = impl_->staticMaskHits;
-    result.staticMaskGenerateMs = impl_->staticMaskGenerateMs;
-    result.staticMaskBytesEstimate = impl_->staticMaskBytesEstimate;
-    result.estimatedCacheBytes += impl_->staticMaskBytesEstimate;
-    for (const Impl::FrameStoreSlot &slot : impl_->frameStore) {
-        if (slot.tMs >= 0) {
-            ++result.frameStoreRegistered;
-        }
-    }
     device_.appendVideoMemoryDiagnostics(&result);
     return result;
 }

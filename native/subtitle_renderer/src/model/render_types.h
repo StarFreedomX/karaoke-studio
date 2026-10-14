@@ -703,15 +703,6 @@ struct BackendDiagnostics {
     double realizationPrewarmCreateP95Ms = 0.0;
     double realizationPrewarmCreateMaxMs = 0.0;
     bool glowDirtyRectEnabled = true;
-    // ---- 静态层蒙版缓存（2026-10 原型）----
-    std::uint64_t staticMaskCacheSize = 0;
-    std::uint64_t staticMaskCacheCapacity = 0;
-    std::uint64_t staticMaskGenerated = 0;
-    std::uint64_t staticMaskHits = 0;
-    double staticMaskGenerateMs = 0.0;
-    std::uint64_t staticMaskBytesEstimate = 0;
-    // G6 帧仓当前已登记（在飞未消费）槽数：缓存填满验收的观测口径。
-    std::uint64_t frameStoreRegistered = 0;
     // ---- 资源分类计数（2026-10 低显存观测）----
     // D2D/DWrite 不暴露真实分配字节，以下为保守估算，供总量观测与低配机
     // 诊断；全部计入 estimatedCacheBytes（池侧跨 worker 求和后即为总占用）。
