@@ -77,9 +77,12 @@ def resolve_font_instance(
     )
     instance = resolve_instance(capabilities, request)
     instance = replace(instance, generation=capabilities_generation())
-    if os.name == "nt":
+    if os.name == "nt" and instance.reason != "missing_family":
         from krok_helper.subtitle_render.engine.text.font_resource import snapshot_raw_font
-        font = QFont(family)
+        # The catalog resolves localized aliases before choosing the face.
+        # Passing the original spelling to Qt can silently select Tahoma and
+        # export that unrelated face as the requested Japanese/Korean font.
+        font = QFont(instance.family)
         font.setPixelSize(64)
         apply_font_instance(font, instance)
         if italic and instance.italic_axis_tag is None:
@@ -184,10 +187,10 @@ def build_weight_font(
     family: str, size_px: int, weight: int, italic: bool = False
 ) -> QFont:
     """按统一口径构造 QFont。"""
-    font = QFont(family, max(int(size_px), 1))
-    font.setPixelSize(max(int(size_px), 1))
     instance = resolve_instance(get_capabilities(family),
                                 FontRequest(family=family, weight=weight, italic=italic))
+    font = QFont(instance.family, max(int(size_px), 1))
+    font.setPixelSize(max(int(size_px), 1))
     apply_font_instance(font, instance)
     if italic and instance.italic_axis_tag is None:
         # 轴表达的斜体（ital/slnt）已经自带倾斜设计：再 setItalic 会二次倾斜。

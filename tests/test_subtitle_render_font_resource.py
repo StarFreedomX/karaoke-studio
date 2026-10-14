@@ -1,11 +1,135 @@
 """Physical face transfer, including fonts unavailable in the system catalog."""
 from pathlib import Path
+import json
 import os
+import subprocess
+import sys
 
 import pytest
 from PyQt6.QtGui import QFont, QFontDatabase, QRawFont
 
 from krok_helper.subtitle_render.engine.text.font_resource import snapshot_raw_font
+
+
+@pytest.fixture(scope="module")
+def localized_resource_probe():
+    """Use the Windows catalog: offscreen cannot reproduce localized aliases."""
+    if os.name != "nt":
+        pytest.skip("Windows font resources")
+    root = Path(__file__).resolve().parent.parent
+    script = r'''
+import json, sys
+from pathlib import Path
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QRawFont
+app = QApplication([])
+from krok_helper.subtitle_render.engine.text.font_weight import (
+    build_weight_font, resolve_font_instance,
+)
+from krok_helper.subtitle_render.engine.text.font_capabilities import get_capabilities
+from krok_helper.subtitle_render.engine.text.font_fallback import (
+    prewarm_fallback, lookup_fallback_instance,
+)
+from krok_helper.subtitle_render.native.protocol import apply_resolved_font_faces
+samples = [
+    ("UD デジタル 教科書体 NP-B", "UD Digi Kyokasho NP-B", "例え運命が真逆にABC0123456789"),
+    ("UD デジタル 教科書体 N-B", "UD Digi Kyokasho N-B", "さだめまぎゃくABC0123456789"),
+    ("メイリオ", "Meiryo", "重ね合う二つの輪廻ABC0123456789"),
+    ("맑은 고딕", "Malgun Gothic", "한글노래ABC0123456789"),
+    ("Malgun Gothic", "Malgun Gothic", "한글노래ABC0123456789"),
+    ("Arial", "Arial", "English0123456789"),
+    ("Comic Sans MS", "Comic Sans MS", "English0123456789"),
+]
+results = []
+for alias, canonical, text in samples:
+    cap = get_capabilities(canonical)
+    if cap is None or not cap.faces:
+        results.append({"alias": alias, "unavailable": True})
+        continue
+    for weight in (400, 700):
+        selected = resolve_font_instance(alias, weight)
+        reference = resolve_font_instance(canonical, weight)
+        raw = QRawFont(selected.resource_path, 64)
+        painter_raw = QRawFont.fromFont(build_weight_font(alias, 64, weight))
+        expected_raw = QRawFont.fromFont(build_weight_font(canonical, 64, weight))
+        results.append({
+            "alias": alias, "weight": weight, "actual": raw.familyName(),
+            "same_resource": selected.resource_path == reference.resource_path,
+            "covered": all(raw.glyphIndexesForString(text)),
+            "painter_same_face": bytes(painter_raw.fontTable("cmap")) == bytes(expected_raw.fontTable("cmap")),
+        })
+missing = resolve_font_instance("LinK Nonexistent Font 8b17c9", 700)
+payload = {"font_family": missing.family, "font_weight": 700}
+apply_resolved_font_faces(payload)
+prewarm_fallback("Arial", 400, False, ["한"])
+fallback = lookup_fallback_instance("Arial", 400, False, "한")
+fallback_covered = bool(fallback and all(QRawFont(fallback.resource_path, 64).glyphIndexesForString("한")))
+
+# Main, Latin/digit and ruby slots must render identically for both spellings.
+sys.path.insert(0, str(Path.cwd() / "tests"))
+from test_subtitle_render_gpu_backend import _render_g1_frames, _g1_style
+from krok_helper.subtitle_render.native.backend import NativeRendererProcess, resolve_native_renderer_path
+from krok_helper.subtitle_render.domain.models import TimingTrack, TimingLine, TimingChar, RubyAnnotation
+gpu = []
+if resolve_native_renderer_path() is not None:
+    for alias, canonical, text in (samples[0], samples[3], samples[5]):
+        if not get_capabilities(canonical):
+            continue
+        text = text[:8] + "A09"
+        track = TimingTrack(
+            lines=[TimingLine(chars=[TimingChar(c, i * 100) for i, c in enumerate(text)], end_ms=3000)],
+            rubies=[RubyAnnotation(kanji=text[0], reading=text[1:3], reading_part_ms=[],
+                                  pos_start_ms=0, pos_end_ms=100, target_line_index=0,
+                                  target_char_start=0, target_char_end=1)],
+        )
+        frames = []
+        for family in (alias, canonical):
+            style = _g1_style(font_family=family, font_family_latin=family,
+                              ruby_font_family=family, ruby_font_family_latin=family,
+                              font_size_px=32, ruby_font_size_px=16)
+            with NativeRendererProcess(response_timeout_s=60) as renderer:
+                _, rendered = _render_g1_frames(renderer, style, (500, 1500),
+                                                force_warp=True, track=track)
+                frames.append(rendered)
+        gpu.append({"alias": alias, "equal": frames[0] == frames[1],
+                    "nonempty": any(frames[0][0][3::4])})
+print(json.dumps({"samples": results, "missing_resource": missing.resource_path,
+                  "missing_hint": "font_resolved" in payload,
+                  "fallback_covered": fallback_covered, "gpu": gpu}))
+'''
+    env = dict(os.environ, QT_QPA_PLATFORM="windows", PYTHONPATH=str(root),
+               PYTHONIOENCODING="utf-8")
+    completed = subprocess.run([sys.executable, "-c", script], cwd=root, env=env,
+                               capture_output=True, timeout=180)
+    stdout = completed.stdout.decode("utf-8", errors="replace")
+    assert completed.returncode == 0, stdout + completed.stderr.decode("utf-8", errors="replace")
+    return json.loads(stdout.strip().splitlines()[-1])
+
+
+def test_localized_font_resources_preserve_selected_face_and_script(localized_resource_probe):
+    rows = [row for row in localized_resource_probe["samples"] if not row.get("unavailable")]
+    assert rows
+    for row in rows:
+        assert row["same_resource"], row
+        assert row["covered"], row
+        assert row["painter_same_face"], row
+
+
+def test_missing_font_does_not_pin_unrelated_default_resource(localized_resource_probe):
+    assert not localized_resource_probe["missing_resource"]
+    assert not localized_resource_probe["missing_hint"]
+
+
+def test_korean_fallback_resource_covers_selected_character(localized_resource_probe):
+    assert localized_resource_probe["fallback_covered"]
+
+
+def test_localized_font_gpu_main_latin_and_ruby_match_canonical(localized_resource_probe):
+    if not localized_resource_probe["gpu"]:
+        pytest.skip("sidecar unavailable")
+    for row in localized_resource_probe["gpu"]:
+        assert row["equal"], row
+        assert row["nonempty"], row
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows font resources")
