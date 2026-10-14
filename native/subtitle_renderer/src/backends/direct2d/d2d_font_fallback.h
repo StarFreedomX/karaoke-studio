@@ -27,6 +27,8 @@ struct ResolvedFontFaces {
     Microsoft::WRL::ComPtr<IDWriteFontFace> metrics;
 };
 
+ResolvedFontFaces loadFontResource(IDWriteFactory *factory, const ResolvedFaceHint &hint);
+
 // Resolve one family name through the unified weight rules (see
 // d2d_font_fallback.cpp).  ``collection`` is the classic GDI-model system
 // collection; ``typographicCollection`` (nullable) is the typographic-model
@@ -91,10 +93,14 @@ bool textFullyCovered(
 // the requested weight/style) -- never a hardcoded per-script family list.
 // The lookup is a pure function of (base family, weight, italic, text): an
 // earlier character's success never changes a later character's priority.
-// Returns the covering family name (empty when not found); the caller
-// resolves the face through its cached resolver so the pointer stays stable
-// for the glyph-geometry cache.
-std::wstring findFallbackFontFace(
+// Returns the actual covering face and scale; retain the face for cache
+// identity instead of converting it to a family name and selecting again.
+struct FallbackFontFace {
+    Microsoft::WRL::ComPtr<IDWriteFontFace> face;
+    float scale = 1.0f;
+};
+
+FallbackFontFace findFallbackFontFace(
     IDWriteFontFallback *systemFallback,
     IDWriteFontCollection *collection,
     IDWriteFontCollection *typographicCollection,

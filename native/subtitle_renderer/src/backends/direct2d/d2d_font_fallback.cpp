@@ -376,7 +376,9 @@ ResolvedFontFaces resolveUnifiedFaces(
 ) {
     ResolvedFontFaces result;
     Microsoft::WRL::ComPtr<IDWriteFontFace> probeFace;
-    if (FAILED(matchedFont->CreateFontFace(probeFace.ReleaseAndGetAddressOf()))) {
+    if (matchedFont == nullptr
+        || FAILED(matchedFont->CreateFontFace(probeFace.ReleaseAndGetAddressOf()))
+        || !probeFace) {
         return result;
     }
 
@@ -472,9 +474,10 @@ ResolvedFontFaces resolveUnifiedFaces(
     // 斜体在 GPU 上不倾斜（CPU 侧 QFont 合成），逐像素对照实测差 10px 墨迹
     // 盒宽度。
     const DWRITE_FONT_SIMULATIONS hintSimulations =
-        hint.present && hint.syntheticItalic
-            ? DWRITE_FONT_SIMULATIONS_OBLIQUE
-            : DWRITE_FONT_SIMULATIONS_NONE;
+        static_cast<DWRITE_FONT_SIMULATIONS>(
+            (hint.present && hint.syntheticItalic ? DWRITE_FONT_SIMULATIONS_OBLIQUE : 0)
+            | (hint.present && hint.syntheticBold ? DWRITE_FONT_SIMULATIONS_BOLD : 0)
+        );
     // 决策可同时带 wght 与斜体轴（ital / slnt）：同一轴实例上一次设全，
     // 其余轴（opsz / wdth / ...）保持字体默认——与 Qt.setVariableAxis 同口径。
     const bool hintHasItalicAxis =
@@ -667,6 +670,44 @@ ResolvedFontFaces resolveUnifiedFaces(
 }
 
 }  // namespace
+
+ResolvedFontFaces loadFontResource(IDWriteFactory *factory, const ResolvedFaceHint &hint) {
+    ResolvedFontFaces result;
+    if (factory == nullptr || hint.resourcePath.empty()) return result;
+    Microsoft::WRL::ComPtr<IDWriteFontFile> file;
+    if (FAILED(factory->CreateFontFileReference(hint.resourcePath.c_str(), nullptr,
+                                               file.ReleaseAndGetAddressOf())) || !file) return result;
+    BOOL supported = FALSE;
+    DWRITE_FONT_FILE_TYPE fileType{};
+    DWRITE_FONT_FACE_TYPE faceType{};
+    UINT32 count = 0;
+    if (FAILED(file->Analyze(&supported, &fileType, &faceType, &count))
+        || !supported || count != 1) return result;
+    IDWriteFontFile *files[] = {file.Get()};
+    Microsoft::WRL::ComPtr<IDWriteFontFace> base;
+    if (FAILED(factory->CreateFontFace(faceType, 1, files, 0,
+            DWRITE_FONT_SIMULATIONS_NONE, base.ReleaseAndGetAddressOf())) || !base) return result;
+    const auto simulations = static_cast<DWRITE_FONT_SIMULATIONS>(
+        (hint.syntheticBold ? DWRITE_FONT_SIMULATIONS_BOLD : 0)
+        | (hint.syntheticItalic ? DWRITE_FONT_SIMULATIONS_OBLIQUE : 0));
+    std::vector<DWRITE_FONT_AXIS_VALUE> axes;
+    for (const auto &entry : hint.axes) {
+        if (entry.first.size() != 4 || !std::isfinite(entry.second)) return result;
+        axes.push_back({static_cast<DWRITE_FONT_AXIS_TAG>(DWRITE_MAKE_FONT_AXIS_TAG(
+            entry.first[0], entry.first[1], entry.first[2], entry.first[3])), entry.second});
+    }
+    if (!axes.empty()) {
+        result.outline = axisInstanceFace(base.Get(), axes.data(),
+                                          static_cast<UINT32>(axes.size()), simulations);
+    } else if (simulations == DWRITE_FONT_SIMULATIONS_NONE) {
+        result.outline = base;
+    } else {
+        factory->CreateFontFace(faceType, 1, files, 0, simulations,
+                                result.outline.ReleaseAndGetAddressOf());
+    }
+    if (result.outline) result.metrics = base;
+    return result;
+}
 
 ResolvedFontFaces resolveFontFaces(
     IDWriteFontCollection *collection,
@@ -1023,7 +1064,7 @@ std::wstring familyNameOfFont(IDWriteFont *font) {
 // 系统字体回退（MapCharacters，带语言/字重/斜体）」。没有按脚本硬编码的
 // 候选表，也不复用「上一个字符成功过的族」——同一请求恒得同一结果，缺字
 // 观感不再随前一个字符漂移。
-std::wstring findFallbackFontFace(
+FallbackFontFace findFallbackFontFace(
     IDWriteFontFallback *systemFallback,
     IDWriteFontCollection *collection,
     IDWriteFontCollection *typographicCollection,
@@ -1034,7 +1075,7 @@ std::wstring findFallbackFontFace(
     const std::wstring &preferredFamily,
     std::vector<UINT16> &glyphs
 ) {
-    auto tryFamily = [&](const std::wstring &familyName) -> std::wstring {
+    auto tryFamily = [&](const std::wstring &familyName) -> FallbackFontFace {
         if (familyName.empty()) {
             return {};
         }
@@ -1049,11 +1090,10 @@ std::wstring findFallbackFontFace(
             return {};
         }
         glyphs = std::move(candidate);
-        return familyName;
+        return {faces.outline, 1.0f};
     };
 
-    if (const std::wstring preferred = tryFamily(preferredFamily);
-        !preferred.empty()) {
+    if (const auto preferred = tryFamily(preferredFamily); preferred.face) {
         return preferred;
     }
 
@@ -1075,12 +1115,12 @@ std::wstring findFallbackFontFace(
             mapped.ReleaseAndGetAddressOf(),
             &scale
         );
-        (void)scale;
-        if (SUCCEEDED(hr) && mapped) {
-            const std::wstring family = familyNameOfFont(mapped.Get());
-            if (const std::wstring resolved = tryFamily(family);
-                !resolved.empty()) {
-                return resolved;
+        if (SUCCEEDED(hr) && mapped && mappedLength >= text.size()
+            && std::isfinite(scale) && scale > 0) {
+            Microsoft::WRL::ComPtr<IDWriteFontFace> face;
+            if (SUCCEEDED(mapped->CreateFontFace(face.ReleaseAndGetAddressOf())) && face
+                && textFullyCovered(face.Get(), text, &glyphs)) {
+                return {face, scale};
             }
         }
     }

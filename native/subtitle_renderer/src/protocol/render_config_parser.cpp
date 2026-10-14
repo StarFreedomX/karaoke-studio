@@ -30,6 +30,8 @@ FontInstanceHint parseFontInstanceHint(
     }
     const QJsonObject resolved = value.toObject();
     hint.present = true;
+    hint.resourcePath = stringValue(resolved, QStringLiteral("resource_path")).toStdWString();
+    hint.scale = static_cast<float>(resolved.value(QStringLiteral("scale")).toDouble(1.0));
     hint.style = stringValue(resolved, QStringLiteral("style")).toStdWString();
     hint.faceWeight = intValue(resolved, QStringLiteral("weight"), 0);
     hint.syntheticBold = resolved.value(
@@ -2103,6 +2105,7 @@ static void parseSourceTracks(
                 ch.fallbackFamily = stringValue(
                     charObject, QStringLiteral("fallback_family")
                 );
+                ch.fallbackHint = parseFontInstanceHint(charObject, QStringLiteral("fallback_font"));
                 ch.vectorGlyph = resolveVectorGlyph(charObject);
                 ch.bitmapGuide = parseBitmapGuide(
                     charObject.value(QStringLiteral("bitmap_guide"))

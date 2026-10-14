@@ -258,14 +258,15 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
             and instance.reason is None
             and instance.face_style is not None
         )
-        if trivial:
+        if trivial and not instance.resource_path:
             return False, None
-        if instance.reason == "missing_family":
+        if instance.reason == "missing_family" and not instance.resource_path:
             # Python 侧枚举不到这个族（别名/本地化名 DirectWrite 认得而 Qt 不认
             # 的少数情况）：不发半截决策——C++ 侧保持引擎镜像规则（含合成粗体
             # 判定），与本改动前的行为逐字节一致。
             return False, None
         resolved: dict[str, Any] = {
+            "resource_path": instance.resource_path,
             "style": instance.face_style,
             "weight": int(instance.face_weight),
             "axis": instance.axis_value,
@@ -576,7 +577,7 @@ def timing_char_to_ir(
     ch: TimingChar,
     glyph_table: VectorGlyphTable | None = None,
     anim_anchor_ms: int | None = None,
-    fallback_family: str | None = None,
+    fallback_family: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # 「缺省即空」的字段值为默认时整个键不发（C++ 解析器对缺 key 本就按
     # 默认处理，scanline/zoom_pulse 等字段一直是这个惯例）：624 字里上千
@@ -596,7 +597,11 @@ def timing_char_to_ir(
     if fallback_family:
         # 请求字体缺字时 Qt(CPU) 实际选中的回退族名（GUI 线程预热算出）。
         # GPU 端优先用同一个族，不再按脚本硬编码候选链猜字。
-        char["fallback_family"] = str(fallback_family)
+        if isinstance(fallback_family, dict):
+            char["fallback_family"] = fallback_family["family"]
+            char["fallback_font"] = fallback_family["hint"]
+        else:
+            char["fallback_family"] = str(fallback_family)
     guide = bitmap_guide_to_ir(ch.vector_glyph, anim_anchor_ms)
     if guide is not None:
         char["bitmap_guide"] = guide
@@ -670,7 +675,7 @@ def timing_line_to_ir(
     glyph_table: VectorGlyphTable | None = None,
     fx_table: "FxPayloadTable | None" = None,
     layout_table: "LineLayoutTable | None" = None,
-    char_fallbacks: list[str | None] | None = None,
+    char_fallbacks: list[str | dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     render_line = render_line or line
     # 与 painter._paint_line_static 的动图锚点同一公式：行显示窗口起点，
@@ -1036,15 +1041,31 @@ def font_fallback_family(style: Style | None, text: str) -> str | None:
     return lookup_fallback(family, weight, italic, text)
 
 
-def _line_char_fallbacks(style: Style, render_line: TimingLine) -> list[str | None]:
-    """逐字符回退族名（与 ``chars`` 数组同序；无回退为 None）。"""
-    return [
-        font_fallback_family(
-            style_for_role(style, getattr(ch, "role_label", None)),
-            str(getattr(ch, "text", "") or ""),
-        )
-        for ch in render_line.chars
-    ]
+def _line_char_fallbacks(style: Style, render_line: TimingLine) -> list[dict[str, Any] | None]:
+    """逐字符回退实例（与 ``chars`` 数组同序；无回退为 None）。"""
+    from krok_helper.subtitle_render.engine.text.metrics import font_slot_for_text
+    result = []
+    for ch in render_line.chars:
+        effective = style_for_role(style, getattr(ch, "role_label", None))
+        text = str(getattr(ch, "text", "") or "")
+        family = font_fallback_family(effective, text)
+        if family:
+            slot = font_slot_for_text(effective, text)
+            payload = {"font_family": family, "font_weight": slot[1], "italic": slot[2]}
+            _font_face_slot_overrides(payload)
+            from krok_helper.subtitle_render.engine.text.font_fallback import lookup_fallback_instance
+            instance = lookup_fallback_instance(*slot, text)
+            if instance is not None:
+                hint = payload.setdefault("font_resolved", {})
+                hint.update(resource_path=instance.resource_path, style=instance.face_style,
+                            scale=instance.fallback_scale,
+                            weight=instance.face_weight, sim_bold=instance.synthetic_bold,
+                            sim_italic=instance.synthetic_italic)
+            result.append({"family": family, "hint": payload.get("font_resolved", {})})
+        else:
+            result.append(None)
+    return result
+
 
 
 def lines_style_to_ir(

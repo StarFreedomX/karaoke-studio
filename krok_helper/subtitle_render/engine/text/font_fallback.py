@@ -45,6 +45,7 @@ _OPTIONAL_CATEGORIES = frozenset({"Mn", "Me", "Cf", "Cc"})
 
 # 回退表键： (代际, 规范族名, 字重, 斜体, 文本簇)
 _FALLBACK_TABLE: dict[tuple, str | None] = {}
+_FALLBACK_FONT_TABLE: dict[tuple, object] = {}
 _FALLBACK_MAX = 65536
 _TABLE_LOCK = threading.RLock()
 
@@ -59,6 +60,7 @@ def clear_font_fallback_cache() -> None:
     """字体装卸 / 文本变动后清空（随 capability 代际一起失效）。"""
     with _TABLE_LOCK:
         _FALLBACK_TABLE.clear()
+        _FALLBACK_FONT_TABLE.clear()
         _RESOLUTION_CACHE.clear()
         _RAW_FONT_CACHE.clear()
         _SLOT_FONT_CACHE.clear()
@@ -332,6 +334,7 @@ def prewarm_fallback(
             if len(_RESOLUTION_CACHE) >= _FALLBACK_MAX:
                 _RESOLUTION_CACHE.clear()
                 _FALLBACK_TABLE.clear()
+                _FALLBACK_FONT_TABLE.clear()
             _RESOLUTION_CACHE[key] = missing
         for cluster in missing:
             pending_missing.setdefault(cluster, text)
@@ -346,6 +349,19 @@ def prewarm_fallback(
         family_hit = resolved_by_cluster.get(cluster)
         if not family_hit:
             continue
+        from krok_helper.subtitle_render.engine.text.font_weight import remember_fallback_face
+        layout = QTextLayout(cluster, slot_font(family, weight, italic))
+        layout.beginLayout()
+        line = layout.createLine()
+        line.setLineWidth(1_000_000)
+        layout.endLayout()
+        for run in line.glyphRuns():
+            raw = run.rawFont()
+            if raw.familyName().casefold() == family_hit.casefold():
+                instance = remember_fallback_face(family_hit, weight, italic, raw)
+                with _TABLE_LOCK:
+                    _FALLBACK_FONT_TABLE[(generation,) + (cache_key_base, text)] = instance
+                break
         with _TABLE_LOCK:
             _FALLBACK_TABLE[(generation,) + (cache_key_base, text)] = family_hit
         written += 1
@@ -366,6 +382,11 @@ def lookup_fallback(family: str, weight: int, italic: bool, text: str) -> str | 
     )
     with _TABLE_LOCK:
         return _FALLBACK_TABLE.get(key)
+
+
+def lookup_fallback_instance(family: str, weight: int, italic: bool, text: str):
+    with _TABLE_LOCK:
+        return _FALLBACK_FONT_TABLE.get((capabilities_generation(), _slot_key(family, weight, italic), text))
 
 
 def missing_clusters_lookup(

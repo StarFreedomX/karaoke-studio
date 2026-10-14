@@ -2,6 +2,7 @@
 
 #include "d2d_backend.h"
 #include "d2d_runtime_support.h"
+#include "d2d_font_fallback.h"
 
 #include <d2d1_2.h>
 #include <dwrite.h>
@@ -239,7 +240,7 @@ struct Direct2DGpuBackend::Impl {
     using FontFaceKey = std::tuple<
         std::wstring, int, bool, bool, int, bool, bool, float,
         bool, bool, std::wstring, std::wstring, float,
-        std::vector<std::pair<std::wstring, float>>
+        std::vector<std::pair<std::wstring, float>>, std::wstring
     >;
     using TextGlyphKey = std::tuple<
         std::uintptr_t, int, std::uint32_t, int, std::vector<UINT16>
@@ -375,7 +376,7 @@ struct Direct2DGpuBackend::Impl {
     Microsoft::WRL::ComPtr<IDWriteFontFallback> systemFontFallback;
     // (key, weight, italic, text) -> covering family name.  Pure function of
     // the request: no "previous character succeeded with family X" bias.
-    std::map<std::tuple<std::wstring, int, bool, std::wstring>, std::wstring>
+    std::map<std::tuple<std::wstring, int, bool, std::wstring>, direct2d::FallbackFontFace>
         fallbackFamiliesByText;
     std::map<TextGlyphKey, GlyphGeometryResource> textGlyphResources;
     std::map<VectorGlyphKey, GlyphGeometryResource> vectorGlyphResources;

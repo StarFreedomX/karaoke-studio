@@ -522,6 +522,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             faceHint.italicAxisTag,
             faceHint.italicAxisValue,
             faceHint.axes,
+            faceHint.resourcePath,
         };
         const auto found = impl_->fontFaces.find(key);
         if (found != impl_->fontFaces.end()) {
@@ -533,7 +534,11 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                     : found->second
             );
         }
-        auto faces = resolveFontFaces(
+        auto faces = direct2d::loadFontResource(device_.dwriteFactory(), faceHint);
+        if (!faceHint.resourcePath.empty() && !faces.outline) {
+            throw BackendError("DirectWrite could not load the resolved Qt font resource");
+        }
+        if (!faces.outline) faces = resolveFontFaces(
             fontCollection.Get(),
             typographicFontCollection.Get(),
             resolvedFamily,
@@ -550,7 +555,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 weight,
                 italic,
                 false,
-                faceHint
+                {}
             );
         }
         if (!faces.outline) {
@@ -592,42 +597,23 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
         }
         return impl_->systemFontFallback.Get();
     };
-    auto resolveFallbackFamily = [&](
-        const std::wstring &baseFamily,
-        const std::wstring &text,
-        int weight,
-        bool italic,
-        const std::wstring &preferredFamily,
-        std::vector<UINT16> &glyphs
-    ) -> std::wstring {
+    // A new configuration can follow installation/removal of fonts.
+    impl_->fallbackFamiliesByText.clear();
+    auto resolveFallbackFamily = [&](const std::wstring &baseFamily,
+        const std::wstring &text, int weight, bool italic,
+        const std::wstring &preferredFamily, std::vector<UINT16> &glyphs) {
         const auto cacheKey = std::make_tuple(baseFamily, weight, italic, text);
         const auto cached = impl_->fallbackFamiliesByText.find(cacheKey);
         if (cached != impl_->fallbackFamiliesByText.end()) {
-            if (cached->second.empty()) {
-                glyphs.clear();
-                return {};
-            }
-            const auto faces = resolveFaces(cached->second, weight, italic, false);
-            if (faces.first) {
-                return textFullyCovered(faces.first.Get(), text, &glyphs)
-                    ? cached->second
-                    : std::wstring{};
-            }
-            return {};
+            if (cached->second.face) textFullyCovered(cached->second.face.Get(), text, &glyphs);
+            else glyphs.clear();
+            return cached->second;
         }
-        const std::wstring family = findFallbackFontFace(
-            systemFallback(),
-            fontCollection.Get(),
-            typographicFontCollection.Get(),
-            baseFamily,
-            text,
-            weight,
-            italic,
-            preferredFamily,
-            glyphs
-        );
-        impl_->fallbackFamiliesByText.emplace(cacheKey, family);
-        return family;
+        const auto result = findFallbackFontFace(systemFallback(), fontCollection.Get(),
+            typographicFontCollection.Get(), baseFamily, text, weight, italic,
+            preferredFamily, glyphs);
+        impl_->fallbackFamiliesByText.emplace(cacheKey, result);
+        return result;
     };
 
     auto extendBounds = [](D2D1_RECT_F &target, bool &hasBounds, const D2D1_RECT_F &value) {
@@ -735,12 +721,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
     auto textRealizationFor = [&] (
         const Microsoft::WRL::ComPtr<IDWriteFontFace> &face,
         const std::vector<UINT16> &glyphs,
-        int unit,
+        float unit,
         int stretchPct
     ) -> GlyphGeometryResource & {
         const Impl::TextGlyphKey key{
             reinterpret_cast<std::uintptr_t>(face.Get()),
-            unit,
+            static_cast<int>(std::bit_cast<std::uint32_t>(unit)),
             layoutScaleKey,
             stretchPct,
             glyphs,
@@ -1130,6 +1116,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
             }
 
             std::vector<UINT16> glyphs;
+            float fallbackScale = 1.0f;
             Microsoft::WRL::ComPtr<IDWriteFontFace> outlineFace;
             Microsoft::WRL::ComPtr<ID2D1PathGeometry> path;
             GlyphGeometryResource *glyphResource = nullptr;
@@ -1159,11 +1146,12 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 // 不再让 GPU 按脚本猜候选链。
                 if (!preferredFallback.empty()) {
                     auto preferred = resolveFace(
-                        preferredFallback, charWeight, charItalic
+                        preferredFallback, charWeight, charItalic, false, sourceChar.fallbackHint
                     );
                     if (preferred
                         && textFullyCovered(preferred.Get(), sourceChar.text, &glyphs)) {
                         outlineFace = preferred;
+                        fallbackScale = sourceChar.fallbackHint.scale;
                         covered = true;
                     }
                 }
@@ -1181,7 +1169,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                             : (latin
                                    ? style.latinFontFamily.value_or(style.fontFamily)
                                    : style.fontFamily);
-                    const std::wstring fallbackFamily = resolveFallbackFamily(
+                    const auto fallbackFace = resolveFallbackFamily(
                         baseFamily,
                         sourceChar.text,
                         charWeight,
@@ -1189,12 +1177,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         preferredFallback,
                         glyphs
                     );
-                    if (!fallbackFamily.empty()) {
-                        // 经带缓存的解析器取 face：同一 (family,weight,italic)
-                        // 全程同指针，字形几何缓存键稳定。
-                        outlineFace = resolveFace(
-                            fallbackFamily, charWeight, charItalic
-                        );
+                    if (fallbackFace.face) {
+                        outlineFace = fallbackFace.face;
+                        fallbackScale = fallbackFace.scale;
                     } else if (outlineFace) {
                         // 无回退可用：保持请求 face 的原行为（缺字显示为豆腐）。
                         glyphs = glyphIndices(outlineFace.Get(), sourceChar.text);
@@ -1202,7 +1187,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 }
                 if (outlineFace && !glyphs.empty()) {
                     glyphResource = &textRealizationFor(
-                        outlineFace, glyphs, unit, stretchPct
+                        outlineFace, glyphs, unit * fallbackScale, stretchPct
                     );
                     path = glyphResource->path;
                 }
@@ -2012,10 +1997,11 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 );
 
                 std::vector<UINT16> glyphs;
+                float fallbackScale = 1.0f;
                 Microsoft::WRL::ComPtr<IDWriteFontFace> outlineFace = drawingFace;
                 if (!outlineFace
                     || !textFullyCovered(outlineFace.Get(), sourceUnit.text, &glyphs)) {
-                    const std::wstring fallbackFamily = resolveFallbackFamily(
+                    const auto fallbackFace = resolveFallbackFamily(
                         latin
                             ? rubyStyle.rubyLatinFontFamily.value_or(
                                   rubyStyle.rubyFontFamily.empty()
@@ -2033,14 +2019,9 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         {},
                         glyphs
                     );
-                    if (!fallbackFamily.empty()) {
-                        outlineFace = resolveFace(
-                            fallbackFamily,
-                            latin
-                                ? rubyStyle.rubyLatinFontWeight.value_or(rubyStyle.rubyFontWeight)
-                                : rubyStyle.rubyFontWeight,
-                            rubyStyle.italic
-                        );
+                    if (fallbackFace.face) {
+                        outlineFace = fallbackFace.face;
+                        fallbackScale = fallbackFace.scale;
                     } else if (outlineFace) {
                         glyphs = glyphIndices(outlineFace.Get(), sourceUnit.text);
                     }
@@ -2049,7 +2030,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 GlyphGeometryResource *glyphResource = nullptr;
                 if (outlineFace && !glyphs.empty()) {
                     glyphResource = &textRealizationFor(
-                        outlineFace, glyphs, drawingUnit, stretchPct
+                        outlineFace, glyphs, drawingUnit * fallbackScale, stretchPct
                     );
                     path = glyphResource->path;
                 }
@@ -2070,7 +2051,7 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                         || !textFullyCovered(
                             metricFace.Get(), sourceUnit.text, &measureGlyphs
                         )) {
-                        const std::wstring fallbackFamily = resolveFallbackFamily(
+                        const auto fallbackFace = resolveFallbackFamily(
                             latin
                                 ? rubyStyle.rubyLatinFontFamily.value_or(
                                       rubyStyle.rubyFontFamily.empty()
@@ -2088,14 +2069,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                             {},
                             measureGlyphs
                         );
-                        if (!fallbackFamily.empty()) {
-                            metricFace = resolveMetricsFace(
-                                fallbackFamily,
-                                latin
-                                    ? rubyStyle.rubyLatinFontWeight.value_or(rubyStyle.rubyFontWeight)
-                                    : rubyStyle.rubyFontWeight,
-                                rubyStyle.italic
-                            );
+                        if (fallbackFace.face) {
+                            metricFace = fallbackFace.face;
                         }
                     }
                     std::vector<DWRITE_GLYPH_METRICS> metrics(measureGlyphs.size());

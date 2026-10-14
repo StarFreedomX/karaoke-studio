@@ -864,6 +864,7 @@ krok::subtitle::native::RenderScene gpuSceneFromConfig(const RenderConfig &confi
                 sourceLine.chars[index].vectorGlyph,
                 sourceLine.chars[index].bitmapGuide,
             };
+            sceneChar.fallbackHint = sourceLine.chars[index].fallbackHint;
             sceneChar.fallbackFamily =
                 sourceLine.chars[index].fallbackFamily.toStdWString();
             if (sceneChar.bitmapGuide.has_value()) {

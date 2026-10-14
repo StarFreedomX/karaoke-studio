@@ -49,6 +49,8 @@ class ExportRuntimeController:
         preview_width: int,
         callbacks: ExportRuntimeCallbacks,
     ) -> ExportRuntimeHandles:
+        from krok_helper.subtitle_render.engine.text.font_preparation import prepare_fonts
+        prepare_fonts(job.track, job.style, list(job.extra_tracks))
         thread = self._thread_factory(parent)
         worker = self._worker_factory(
             job,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from krok_helper.subtitle_render.frontend.workflow.export_runtime import (
     ExportRuntimeCallbacks,
@@ -82,7 +83,7 @@ def test_export_runtime_prepares_worker_thread_and_all_signal_routes() -> None:
         thread_finished=_callback("thread_finished"),
     )
     parent = object()
-    job = object()
+    job = SimpleNamespace(track=None, style=None, extra_tracks=())
     preview_path = Path("preview.jpg")
 
     handles = controller.prepare(
@@ -116,7 +117,7 @@ def test_export_runtime_start_active_and_cancel_use_retained_handles() -> None:
     callback = _callback("callback")
     handles = controller.prepare(
         parent=object(),
-        job=object(),
+        job=SimpleNamespace(track=None, style=None, extra_tracks=()),
         ffmpeg_dir=None,
         preview_image_path=None,
         preview_width=320,

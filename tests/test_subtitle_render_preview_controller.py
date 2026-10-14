@@ -276,6 +276,7 @@ def test_preview_context_contract_rejects_hidden_export_or_non_preview() -> None
 
 
 def test_prewarm_font_axis_capabilities_warms_on_app_thread(qapp, monkeypatch):
+    from krok_helper.subtitle_render.engine.text import font_preparation
     """set_state 预热：GUI 线程逐族焐热能力缓存；非 GUI 线程安全跳过。
 
     渲染线程 configure 里的 ``apply_resolved_font_faces`` 依赖这份缓存，
@@ -289,7 +290,7 @@ def test_prewarm_font_axis_capabilities_warms_on_app_thread(qapp, monkeypatch):
 
     warmed: list[str] = []
     monkeypatch.setattr(
-        preview_async,
+        font_preparation,
         "collect_referenced_font_families",
         lambda *roots: ["Yu Gothic", "MS Gothic"],
     )

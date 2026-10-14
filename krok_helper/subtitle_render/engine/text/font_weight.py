@@ -26,9 +26,10 @@ CPU 侧刻意保持「请求而不是钉死 face」：Qt 的引擎匹配就是�
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QPainterPath
+from PyQt6.QtGui import QFont, QPainterPath, QRawFont
 
 from krok_helper.subtitle_render.engine.text.font_capabilities import (
     FontCapabilities,
@@ -48,6 +49,8 @@ from krok_helper.subtitle_render.engine.text.weight_resolver import (
 )
 
 _AXIS_TAG_WEIGHT = b"wght"
+_RESOURCE_INSTANCES: dict[tuple, ResolvedFontInstance] = {}
+_RESOURCE_GENERATION = -1
 
 
 def resolve_font_instance(
@@ -57,6 +60,14 @@ def resolve_font_instance(
     stretch_pct: int = 100,
 ) -> ResolvedFontInstance:
     """(family, 字重, 斜体, 拉伸) → 字体实例决策（带字体库代际）。"""
+    global _RESOURCE_GENERATION
+    generation = capabilities_generation()
+    if generation != _RESOURCE_GENERATION:
+        _RESOURCE_INSTANCES.clear()
+        _RESOURCE_GENERATION = generation
+    resource_key = (generation, family, weight, italic, stretch_pct)
+    if resource_key in _RESOURCE_INSTANCES:
+        return _RESOURCE_INSTANCES[resource_key]
     capabilities = get_capabilities(family)
     request = FontRequest(
         family=str(family),
@@ -65,7 +76,17 @@ def resolve_font_instance(
         stretch_pct=int(stretch_pct),
     )
     instance = resolve_instance(capabilities, request)
-    return replace(instance, generation=capabilities_generation())
+    instance = replace(instance, generation=capabilities_generation())
+    if os.name == "nt":
+        from krok_helper.subtitle_render.engine.text.font_resource import snapshot_raw_font
+        font = QFont(family)
+        font.setPixelSize(64)
+        apply_font_instance(font, instance)
+        if italic and instance.italic_axis_tag is None:
+            font.setItalic(True)
+        instance = replace(instance, resource_path=snapshot_raw_font(QRawFont.fromFont(font), resource_key))
+    _RESOURCE_INSTANCES[resource_key] = instance
+    return instance
 
 
 def instance_fields(instance: ResolvedFontInstance) -> dict[str, object]:
@@ -82,6 +103,20 @@ def instance_fields(instance: ResolvedFontInstance) -> dict[str, object]:
         "variable": bool(instance.is_variable),
         "identity": instance.identity,
     }
+
+
+def remember_fallback_face(family: str, weight: int, italic: bool, raw: QRawFont) -> ResolvedFontInstance:
+    """Pin the physical face returned by Qt shaping, rather than rematching its name."""
+    from krok_helper.subtitle_render.engine.text.font_resource import snapshot_raw_font
+    key = (capabilities_generation(), family, weight, italic, 100)
+    instance = resolve_font_instance(family, weight, italic)
+    resource = snapshot_raw_font(raw, key + (raw.styleName(), "fallback"))
+    return replace(instance, resource_path=resource,
+        fallback_scale=raw.pixelSize() / 64.0,
+        face_style=raw.styleName(), face_weight=int(raw.weight()),
+        synthetic_bold=not instance.is_variable and weight >= 600 and int(raw.weight()) < 600,
+        synthetic_italic=italic and instance.italic_axis_tag is None
+                         and raw.style() == QFont.Style.StyleNormal)
 
 
 def resolve_weight_plan(
@@ -151,7 +186,8 @@ def build_weight_font(
     """按统一口径构造 QFont。"""
     font = QFont(family, max(int(size_px), 1))
     font.setPixelSize(max(int(size_px), 1))
-    instance = resolve_font_instance(family, weight, italic=italic)
+    instance = resolve_instance(get_capabilities(family),
+                                FontRequest(family=family, weight=weight, italic=italic))
     apply_font_instance(font, instance)
     if italic and instance.italic_axis_tag is None:
         # 轴表达的斜体（ital/slnt）已经自带倾斜设计：再 setItalic 会二次倾斜。

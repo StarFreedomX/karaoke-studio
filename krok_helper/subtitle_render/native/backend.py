@@ -997,6 +997,8 @@ class NativeRendererProcess:
             # None = 全量重排（默认，行为同历史版本）；"titles" / "paint"
             # 分别表示仅标题或仅上色变化，歌词布局计划按签名复用。
             ir_kwargs["relayout_scope"] = relayout_scope
+        from krok_helper.subtitle_render.engine.text.font_preparation import prepare_fonts
+        prepare_fonts(track, style, extra_tracks)
         ir = build_render_ir(track, style, **ir_kwargs)
         # 统一字重解析的生效结果（face 字重 + 模拟标志）随 IR 下发，
         # GPU 端按显式决策建 face，不再独立匹配（见 protocol.py 注释）。

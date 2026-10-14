@@ -13977,6 +13977,34 @@ def test_gpu_honours_resolved_face_style(monkeypatch) -> None:
         )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_axis_snapshot_preserves_synthetic_bold(monkeypatch) -> None:
+    """A non-weight axis snapshot must not discard requested bold simulation."""
+    import krok_helper.subtitle_render.engine.text.font_weight as font_weight
+    from PyQt6.QtGui import QFontDatabase
+
+    if "Bahnschrift" not in QFontDatabase.families():
+        pytest.skip("Bahnschrift not installed")
+    original = font_weight.resolve_font_instance
+    track = TimingTrack(lines=[TimingLine(chars=[TimingChar("H", 0)], end_ms=1000)])
+    style = _g1_style(font_family="Bahnschrift", font_family_latin="Bahnschrift",
+                      font_size_px=96, stroke_width_px=0, stroke2_enabled=False,
+                      decoration_kind="none")
+    counts = []
+    for bold in (False, True):
+        def forced(family, weight, italic=False, stretch_pct=100):
+            instance = original(family, weight, italic=italic, stretch_pct=stretch_pct)
+            return replace(instance, face_style="Regular", face_weight=400,
+                           axis_value=None, is_variable=False,
+                           axis_values=(("wght", 400.0), ("wdth", 100.0)),
+                           synthetic_bold=bold, exact=False, reason="axis_probe")
+        monkeypatch.setattr(font_weight, "resolve_font_instance", forced)
+        with NativeRendererProcess(_renderer_path(), response_timeout_s=60) as renderer:
+            _, frames = _render_g1_frames(renderer, style, (500,), force_warp=True, track=track)
+        counts.append(sum(frames[0][index] > 32 for index in range(3, len(frames[0]), 4)))
+    assert counts[1] > counts[0], counts
+
+
 def _pool_prewarm_track(line_count: int = 6, chars_per_line: int = 6) -> TimingTrack:
     """池化预热用例的场景：多行多字（预热量足够观察中断/恢复）。"""
     return TimingTrack(

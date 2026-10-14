@@ -206,6 +206,33 @@ struct WipePoint {
     bool operator==(const WipePoint &) const = default;
 };
 
+struct FontInstanceHint {
+    std::wstring resourcePath;
+    float scale = 1.0f;
+    bool present = false;
+    std::wstring style;
+    int faceWeight = 0;
+    bool syntheticBold = false;
+    // Family has no real italic face: the requested italic is drawn by the
+    // DirectWrite oblique simulation, mirroring QFont's synthetic oblique.
+    bool syntheticItalic = false;
+    // True variable-font decision: instantiate the wght axis at ``axis``.
+    bool variable = false;
+    float axis = 0.0f;
+    // Real italic axis (``ital`` / ``slnt``) when the family expresses italic
+    // through an axis instead of an italic face: applied together with wght on
+    // the same axis instance, with no oblique simulation on top.
+    std::wstring italicAxisTag;
+    float italicAxisValue = 0.0f;
+    // Full axis snapshot (every axis of the face at its value, wght included
+    // when variable).  Qt and DirectWrite can pick *different* default
+    // instances when an axis is unspecified (measured: Segoe UI Variable ->
+    // Qt 'Small' vs DWrite fvar default), so pinning the whole set is what
+    // keeps both backends on one instance.
+    std::vector<std::pair<std::wstring, float>> axes;
+    bool operator==(const FontInstanceHint &) const = default;
+};
+
 struct TextChar {
     std::wstring text;
     int startMs = 0;
@@ -222,6 +249,7 @@ struct TextChar {
     // Empty = the requested face covers the cell or no decision was shipped.
     // Kept last so positional aggregate initialization stays valid.
     std::wstring fallbackFamily;
+    FontInstanceHint fallbackHint;
     bool operator==(const TextChar &other) const {
         const auto sameGlyph =
             (vectorGlyph == other.vectorGlyph)
@@ -231,6 +259,7 @@ struct TextChar {
             && endMs == other.endMs
             && styleIndex == other.styleIndex
             && fallbackFamily == other.fallbackFamily
+            && fallbackHint == other.fallbackHint
             && sameGlyph
             && bitmapGuide == other.bitmapGuide
             && wipePoints == other.wipePoints;
@@ -375,30 +404,7 @@ struct TextLine {
 // The GPU executes the decision instead of matching on its own, so both
 // backends draw the same face.  ``present`` false keeps the engine-mirrored
 // rules (old IR / slots Python resolved trivially).
-struct FontInstanceHint {
-    bool present = false;
-    std::wstring style;
-    int faceWeight = 0;
-    bool syntheticBold = false;
-    // Family has no real italic face: the requested italic is drawn by the
-    // DirectWrite oblique simulation, mirroring QFont's synthetic oblique.
-    bool syntheticItalic = false;
-    // True variable-font decision: instantiate the wght axis at ``axis``.
-    bool variable = false;
-    float axis = 0.0f;
-    // Real italic axis (``ital`` / ``slnt``) when the family expresses italic
-    // through an axis instead of an italic face: applied together with wght on
-    // the same axis instance, with no oblique simulation on top.
-    std::wstring italicAxisTag;
-    float italicAxisValue = 0.0f;
-    // Full axis snapshot (every axis of the face at its value, wght included
-    // when variable).  Qt and DirectWrite can pick *different* default
-    // instances when an axis is unspecified (measured: Segoe UI Variable ->
-    // Qt 'Small' vs DWrite fvar default), so pinning the whole set is what
-    // keeps both backends on one instance.
-    std::vector<std::pair<std::wstring, float>> axes;
-    bool operator==(const FontInstanceHint &) const = default;
-};
+
 
 struct TextStyle {
     std::string layoutSemantics = "legacy";

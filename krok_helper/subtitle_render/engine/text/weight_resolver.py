@@ -109,6 +109,8 @@ class ResolvedFontInstance:
     """决策是否走了可变轴实例。"""
 
     generation: int = 0
+    resource_path: str = ""
+    fallback_scale: float = 1.0
     """解析时字体库代际（缓存失效用）。"""
 
     @property

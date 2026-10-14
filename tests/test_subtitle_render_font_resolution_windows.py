@@ -867,7 +867,8 @@ def test_cluster_coverage_and_fallback_are_self_consistent(
 
 def test_resolved_instance_ir_contract(probe_result: dict) -> None:
     ir = probe_result["ir"]
-    assert ir["trivial_has_resolved"] is False
+    # Even exact static matches carry a physical Qt resource now.
+    assert ir["trivial_has_resolved"] is True
     assert ir["trivial_axis"] is False
     synthetic = ir["synthetic"]
     assert synthetic is not None

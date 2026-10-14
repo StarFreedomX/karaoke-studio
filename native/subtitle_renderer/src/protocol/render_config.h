@@ -27,6 +27,7 @@ struct TimingChar {
     // Python-resolved missing-glyph fallback family for this cell (Qt's
     // measured choice); empty = requested face covers the cell.
     QString fallbackFamily;
+    FontInstanceHint fallbackHint;
     // Shared pointer into RenderConfig::vectorGlyphs (schema 2 dedup table).
     std::shared_ptr<const krok::subtitle::native::VectorGlyph> vectorGlyph;
     std::optional<krok::subtitle::native::BitmapGuide> bitmapGuide;
