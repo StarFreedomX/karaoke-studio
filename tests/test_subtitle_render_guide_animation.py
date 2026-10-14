@@ -285,6 +285,18 @@ def _render_painter_frame(track: TimingTrack, t_ms: int) -> QImage:
     return image
 
 
+@pytest.mark.parametrize("effect", ["char_fade", "char_drip", "spin_flip"])
+def test_character_entry_keeps_gif_display_anchor(qapp, effect):
+    track = _animated_track(_GIF_3)
+    style = _avatar_only_style(entry_anim=effect, entry_lead_ms=600)
+    # The display window starts at 700ms, matching the GPU anim_anchor_ms.
+    for t_ms, expected in [(750, "R"), (850, "G"), (950, "B")]:
+        image = QImage(320, 180, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        paint_frame(image, track, t_ms, style)
+        assert _dominant_avatar_color(image) == expected
+
+
 def test_painter_advances_animated_guide_from_display_anchor(qapp):
     track = _animated_track(_GIF_3)
     # 显示窗口起点由布局计划决定（该 fixture 下为 700ms）：
