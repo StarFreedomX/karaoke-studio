@@ -1167,6 +1167,96 @@ def format_lrc_timestamp(milliseconds: int) -> str:
     return f"{minutes:02}:{seconds:02}.{hundredths:02}"
 
 
+# 铺轴的「单元」判定：字母词组整词一个单元，其余非空白字符各自一个单元。
+# 汉字 / 假名 / 谚文的 .isalpha() 同为 True，按码位范围排除后才能按单字成轴。
+_LATIN_WORD_EXTRA_CHARS = "'’"
+_NON_LATIN_ALPHA_CODE_RANGES = (
+    (0x1100, 0x11FF),    # 谚文字母
+    (0x2E80, 0x2FDF),    # CJK 部首补充
+    (0x3000, 0x303F),    # CJK 符号与标点
+    (0x3040, 0x30FF),    # 平假名 / 片假名
+    (0x3130, 0x318F),    # 谚文兼容字母
+    (0x3400, 0x4DBF),    # CJK 扩展 A
+    (0x4E00, 0x9FFF),    # CJK 基本区
+    (0xA960, 0xA97F),    # 谚文字母扩展 A
+    (0xAC00, 0xD7AF),    # 谚文音节
+    (0xF900, 0xFAFF),    # CJK 兼容表意文字
+    (0xFF66, 0xFF9F),    # 半角片假名
+    (0x20000, 0x2FA1F),  # CJK 扩展 B 及之后
+)
+
+
+def _is_latin_word_char(char: str) -> bool:
+    if char in _LATIN_WORD_EXTRA_CHARS:
+        return True
+    if not char.isalpha():
+        return False
+    code = ord(char)
+    return not any(start <= code <= end for start, end in _NON_LATIN_ALPHA_CODE_RANGES)
+
+
+def _split_verbatim_units(text: str) -> list[tuple[int, str]]:
+    """把一行文本切成铺轴单元，返回 ``[(字符偏移, 单元文本)]``。
+
+    字母词组（``Apple``）整词一个单元；其余非空白字符各自一个单元；
+    空白不占单元，由渲染方原样保留。
+    """
+    units: list[tuple[int, str]] = []
+    word = ""
+    word_start = 0
+    for index, char in enumerate(text):
+        if _is_latin_word_char(char):
+            if not word:
+                word_start = index
+            word += char
+            continue
+        if word:
+            units.append((word_start, word))
+            word = ""
+        if not char.isspace():
+            units.append((index, char))
+    if word:
+        units.append((word_start, word))
+    return units
+
+
+def _render_verbatim_units(units: list[tuple[int, str]]) -> str:
+    """把逐单元 ``(时间戳, 文本)`` 渲染成一行内联时间戳 LRC（``[ts]单元``）。
+
+    单元粒度就是逐字粒度：汉字 / 假名 / 谚文按单字，字母词组按整词 ——
+    英文（及德文等拉丁文本）的「逐字」是 word by word，与 SUG 中「英文词
+    = 一个节奏点单位」的模型一致。
+    """
+    return "".join(
+        f"[{format_lrc_timestamp(start_ms)}]{unit}" for start_ms, unit in units
+    )
+
+
+def _render_verbatim_pieces(pieces: list[tuple[int, str]]) -> str:
+    """把来源逐段 ``(时间戳, 文本)`` 渲染成一行内联时间戳 LRC。
+
+    纯空白段不占轴：行首空白并入其后的首个带轴段，其余贴在前一段尾部。
+    """
+    timed: list[tuple[int, str]] = []
+    pending_prefix = ""
+    for start_ms, text in pieces:
+        if not text.strip():
+            if timed:
+                previous_start_ms, previous_text = timed[-1]
+                timed[-1] = (previous_start_ms, previous_text + text)
+            else:
+                pending_prefix += text
+            continue
+        timed.append((start_ms, f"{pending_prefix}{text}"))
+        pending_prefix = ""
+    if not timed:
+        return ""
+    if pending_prefix:
+        last_start_ms, last_text = timed[-1]
+        timed[-1] = (last_start_ms, f"{last_text}{pending_prefix}")
+    return _render_verbatim_units(timed)
+
+
 def _build_estimated_verbatim_lrc(lines: list[ParsedLrcLine]) -> str:
     rendered_lines: list[str] = []
     for index, line in enumerate(lines):
@@ -1179,22 +1269,32 @@ def _build_estimated_verbatim_lrc(lines: list[ParsedLrcLine]) -> str:
 
 
 def _render_verbatim_line(start_ms: int, end_ms: int, text: str) -> str:
-    visible_count = sum(1 for char in text if not char.isspace())
-    if visible_count <= 0:
+    units = _split_verbatim_units(text)
+    if not units:
         return f"[{format_lrc_timestamp(start_ms)}]{text}"
 
+    visible_count = sum(1 for char in text if not char.isspace())
     span_ms = max(end_ms - start_ms, visible_count * 40)
-    step_ms = max(span_ms // visible_count, 40)
-    current_index = 0
-    parts: list[str] = []
-    for char in text:
-        if char.isspace():
-            parts.append(char)
-            continue
-        char_start = start_ms + min(current_index * step_ms, span_ms)
-        parts.append(f"[{format_lrc_timestamp(char_start)}]{char}")
-        current_index += 1
-    return "".join(parts)
+    step_ms = max(span_ms // len(units), 40)
+
+    pieces: list[tuple[int, str]] = [
+        (start_ms + min(index * step_ms, span_ms), unit)
+        for index, (_offset, unit) in enumerate(units)
+    ]
+    # 空白原样保留：行首空白并入首个单元，其余空白贴在前一个单元尾部 ——
+    # 字级形态下与旧输出一致；增强型解析按「标签到下一个标签」取段，
+    # 尾随空白随之进入该段，不会丢。
+    leading = text[: units[0][0]]
+    if leading:
+        piece_start_ms, piece_text = pieces[0]
+        pieces[0] = (piece_start_ms, leading + piece_text)
+    for index, (offset, unit) in enumerate(units):
+        gap_start = offset + len(unit)
+        gap_end = units[index + 1][0] if index + 1 < len(units) else len(text)
+        if gap_end > gap_start:
+            piece_start_ms, piece_text = pieces[index]
+            pieces[index] = (piece_start_ms, piece_text + text[gap_start:gap_end])
+    return _render_verbatim_units(pieces)
 
 
 def _estimate_line_end_ms(start_ms: int, next_start_ms: int | None, text: str) -> int:
@@ -1647,18 +1747,18 @@ def _convert_krc_text(text: str) -> tuple[str, str, str, str]:
             continue
 
         text_parts: list[str] = []
-        verbatim_line: list[str] = []
+        pieces: list[tuple[int, str]] = []
         for word_match in words:
             word_text = word_match.group("content")
             if not word_text:
                 continue
             word_start = line_start + int(word_match.group("start"))
             text_parts.append(word_text)
-            verbatim_line.append(f"[{format_lrc_timestamp(word_start)}]{word_text}")
+            pieces.append((word_start, word_text))
         merged_text = "".join(text_parts).strip()
         if merged_text:
             line_parts.append(f"[{format_lrc_timestamp(line_start)}]{merged_text}")
-            verbatim_parts.append("".join(verbatim_line))
+            verbatim_parts.append(_render_verbatim_pieces(pieces))
 
     line_lyrics = _sanitize_lrc_text("\n".join(line_parts))
     verbatim_lyrics = _sanitize_lrc_text("\n".join([part for part in verbatim_parts if part]))
@@ -1741,18 +1841,18 @@ def _convert_yrc_text(text: str) -> tuple[str, str, str]:
             continue
 
         text_parts: list[str] = []
-        verbatim_line: list[str] = []
+        pieces: list[tuple[int, str]] = []
         for word_match in words:
             word_text = word_match.group("content")
             if not word_text:
                 continue
             word_start = int(word_match.group("start"))
             text_parts.append(word_text)
-            verbatim_line.append(f"[{format_lrc_timestamp(word_start)}]{word_text}")
+            pieces.append((word_start, word_text))
         merged_text = "".join(text_parts).strip()
         if merged_text:
             line_parts.append(f"[{format_lrc_timestamp(line_start)}]{merged_text}")
-            verbatim_parts.append("".join(verbatim_line))
+            verbatim_parts.append(_render_verbatim_pieces(pieces))
 
     line_lyrics = _sanitize_lrc_text("\n".join(line_parts))
     verbatim_lyrics = _sanitize_lrc_text("\n".join([part for part in verbatim_parts if part]))
