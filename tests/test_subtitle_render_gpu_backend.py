@@ -7848,6 +7848,46 @@ def test_gpu_legacy_top_margin_reserves_ruby_for_rubyless_line_like_painter(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("initial_interval", [0, 40])
+def test_gpu_ruby_interference_mesh_cache_preserves_final_positions(
+    initial_interval, monkeypatch,
+) -> None:
+    """Reused meshes must include the final ruby-interference translation."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[TimingLine(
+            chars=[TimingChar("A", 0), TimingChar("B", 1000), TimingChar("C", 2000)],
+            end_ms=3000, display_start_override_ms=0, display_end_override_ms=3000,
+        )],
+        rubies=[RubyAnnotation(
+            kanji=char, reading="WWWW", pos_start_ms=start, pos_end_ms=start + 1000,
+        ) for char, start in (("A", 0), ("B", 1000), ("C", 2000))],
+    )
+    style = _g1_style(
+        layout_semantics="n3_1074", font_family="Arial", font_family_latin="Arial",
+        font_size_px=54, ruby_font_family="Arial", ruby_font_family_latin="Arial",
+        ruby_font_size_px=28, ruby_alignment="center", ruby_interval_px=8,
+        letter_spacing_px=-70, stroke_width_px=3, stroke2_enabled=True,
+        stroke2_width_px=2, ruby_stroke_width_px=2, ruby_stroke2_enabled=False,
+        decoration_kind="shadow", dual_line_layout=False,
+    )
+    def render(renderer, current_style):
+        _, frames = _render_g1_frames(
+            renderer, current_style, (1500,), force_warp=False, track=track,
+            worker_count=2, wait_realizations=True,
+        )
+        return np.frombuffer(frames[0], dtype=np.uint8).astype(np.int16)
+
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        render(renderer, replace(style, ruby_interval_px=initial_interval))
+        reused = render(renderer, style)
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        fresh = render(renderer, style)
+    delta = np.abs(reused - fresh)
+    assert int(delta.max()) <= 2, "Cached meshes retained an old ruby-interference position"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_n3_adjacent_ruby_interference_shifts_following_text(monkeypatch) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     line = TimingLine(

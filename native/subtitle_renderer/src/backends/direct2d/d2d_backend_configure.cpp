@@ -2605,6 +2605,10 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 geometry = transformed;
             };
             auto translateCharX = [&](Impl::CachedChar &ch, float offsetX) {
+                // Both positioned-cache identity and shared-mesh placement must
+                // include the final interference shift, just like raw geometry.
+                ch.realizationTransform = ch.realizationTransform
+                    * D2D1::Matrix3x2F::Translation(offsetX, 0.0f);
                 ch.left += offsetX;
                 ch.right += offsetX;
                 ch.layoutLeft += offsetX;
@@ -2634,6 +2638,8 @@ void Direct2DGpuBackend::configure(const RenderScene &scene) {
                 ruby.fillBounds.right += offsetX;
                 ruby.pivotX += offsetX;
                 for (Impl::CachedChar &ch : ruby.chars) {
+                    ch.realizationTransform = ch.realizationTransform
+                        * D2D1::Matrix3x2F::Translation(offsetX, 0.0f);
                     ch.left += offsetX;
                     ch.right += offsetX;
                     ch.layoutLeft += offsetX;
