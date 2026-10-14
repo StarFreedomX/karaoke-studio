@@ -4338,7 +4338,10 @@ def _paint_line_static(
             _TEXT_RUN_COMPOSITOR.paint_ordered(
                 painter,
                 LayerContext(t_ms=t_ms, logical_w=0, logical_h=0),
-                _char_transition_layer_stack(layout, t_ms, transition, max(len(render_line.chars), 1)),
+                _char_transition_layer_stack(
+                    layout, t_ms, transition, max(len(render_line.chars), 1),
+                    guide_anim_anchor_ms=guide_anim_anchor_ms,
+                ),
             )
             paint_stroke_flash()
             paint_fx_particles(front=True)
@@ -4707,6 +4710,7 @@ def _BitmapGuideLayer(
     scope: str = SCOPE_LINE,
     guide_anim_anchor_ms: int = 0,
     gradient_rect: QRectF | None = None,
+    fade_opacity: float = 1.0,
 ) -> _HorizontalBitmapGuideLayer:
     return _HorizontalBitmapGuideLayer(
         glyph=glyph,
@@ -4720,6 +4724,7 @@ def _BitmapGuideLayer(
         scope=scope,
         anim_anchor_ms=guide_anim_anchor_ms,
         gradient_rect=gradient_rect,
+        fade_opacity=fade_opacity,
     )
 
 
@@ -4730,6 +4735,8 @@ def _char_transition_layer_stack(
     t_ms: int,
     transition: _LineCharTransition,
     char_count: int,
+    *,
+    guide_anim_anchor_ms: int = 0,
 ) -> list:
     return _build_char_transition_layer_stack(
         layout,
@@ -4737,6 +4744,7 @@ def _char_transition_layer_stack(
         transition,
         char_count,
         _CHAR_TRANSITION_LAYER_STACK_PORTS,
+        guide_anim_anchor_ms=guide_anim_anchor_ms,
     )
 
 
@@ -5698,6 +5706,7 @@ _HORIZONTAL_LAYER_STACK_PORTS = LayerStackPorts(
 
 
 _CHAR_TRANSITION_LAYER_STACK_PORTS = TransitionLayerStackPorts(
+    bitmap_guide_layer=lambda *args, **kwargs: _BitmapGuideLayer(*args, **kwargs),
     fill_clip_band_for_glyphs=lambda *args, **kwargs: (
         _fill_clip_band_for_glyphs(*args, **kwargs)
     ),

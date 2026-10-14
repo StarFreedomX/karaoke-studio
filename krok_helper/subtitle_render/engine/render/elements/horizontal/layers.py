@@ -75,6 +75,7 @@ from krok_helper.subtitle_render.engine.render.elements.horizontal.transitions i
     transition_char_state,
     utopia_following_done_time,
 )
+from krok_helper.subtitle_render.engine.render.elements.horizontal.wipe import segment_wipe_times
 from krok_helper.subtitle_render.engine.style.style_semantics import (
     effective_karaoke_colors,
 )
@@ -120,6 +121,7 @@ class LayerStackPorts:
 class TransitionLayerStackPorts:
     """Compatibility factories and sweep hook for character transitions."""
 
+    bitmap_guide_layer: Callable[..., object]
     fill_clip_band_for_glyphs: Callable[..., tuple[int, int] | None]
     glyph_run_after_glow_layer: Callable[..., object]
     glyph_run_before_glow_layer: Callable[..., object]
@@ -1017,6 +1019,8 @@ def line_layer_stack(
             )
             z_index += 1
     for glyph in bitmap_guide_glyphs(layout.text_layout):
+        if not glyph.vector_glyph.bitmap_after_path:
+            continue
         bitmap_after_layers.append(
             ports.bitmap_guide_layer(
                 glyph,
@@ -1048,6 +1052,8 @@ def char_transition_layer_stack(
     transition: LineCharTransition,
     char_count: int,
     ports: TransitionLayerStackPorts,
+    *,
+    guide_anim_anchor_ms: int = 0,
 ) -> list:
     """Build per-glyph layers for fade, drip, and spin-flip transitions."""
     y = layout.baseline_y
@@ -1074,6 +1080,24 @@ def char_transition_layer_stack(
         if progress <= 0.0:
             continue
         opacity = 1.0 if is_drip else progress
+        glyph_fill_rect = role_fill_rects.get(glyph.role_label, fill_rect)
+        if glyph_is_bitmap_guide(glyph):
+            # Direct2D drawBitmapGuidePart uses character alpha and the line
+            # matrix, never the text character's spin/drip geometry matrix.
+            for after in (False, True):
+                if after and not glyph.vector_glyph.bitmap_after_path:
+                    continue
+                body_layers.append(
+                    ports.bitmap_guide_layer(
+                        glyph, y, layout.fill_segments, t_ms, rtl,
+                        after=after, z_index=z,
+                        guide_anim_anchor_ms=guide_anim_anchor_ms,
+                        gradient_rect=glyph_fill_rect,
+                        fade_opacity=opacity,
+                    )
+                )
+                z += 1
+            continue
         if is_spin:
             transform = spin_flip_char_transform(
                 glyph,
@@ -1091,7 +1115,6 @@ def char_transition_layer_stack(
         else:
             transform = None
         run = [glyph]
-        glyph_fill_rect = role_fill_rects.get(glyph.role_label, fill_rect)
         if glyph_run_needs_before_glow_split(run):
             before_glow_layers.append(
                 ports.glyph_run_before_glow_layer(
@@ -1348,8 +1371,8 @@ def paint_bitmap_guide_decor(
     """把 N3 文字装饰（shadow / glow）套用到位图导唱符图片上。
 
     飾り画刷取走字前后两态（含渐变 / 贴图），与图片同侧受 wipe 前沿裁切
-    （调用方已设置好裁切区）；仅有走字后图片时装饰才切换到后态——前后同图
-    / 仅前图时保持前态，对应 @Emoji 未加 ForceWipeDecor 的默认行为。
+    （调用方已设置好裁切区）；配置了走字后图片时，装饰跟随前后态切换；
+    后图为空时保持前态，与 Direct2D drawBitmapGuideDecor 的判断一致。
     ``bitmap_no_decor`` 整体跳过（@Emoji ``NoDecor`` 语义）。渐变跨度取
     ``gradient_rect``（整行范围）；缺省回落到图片自身矩形。动图符号传入
     ``frame_identity``（路径 + 帧序号）后，剪影与模糊结果按帧进有界缓存，
@@ -1419,6 +1442,7 @@ def paint_bitmap_guide_glyph(
     rtl: bool,
     gradient_rect: QRectF | None = None,
     anim_ms: int | None = None,
+    phase: str | None = None,
 ) -> None:
     """Draw one bitmap guide avatar as a two-sided wipe mask.
 
@@ -1426,7 +1450,7 @@ def paint_bitmap_guide_glyph(
     (right of the wipe edge, or left in RTL) keeps the before image and the
     sung side shows the after image — the before image must not stay
     composited underneath a partly transparent after image.  Before-only
-    symbols have no wipe and always draw unclipped.  Unless ``NoDecor`` is
+    symbols have no wipe and draw once without a wipe clip. Unless ``NoDecor`` is
     set, the style's text decoration (shadow / glow, 飾り色) is painted
     behind the image with the same side clipping.
 
@@ -1436,9 +1460,18 @@ def paint_bitmap_guide_glyph(
     symbol = glyph.vector_glyph
     if not guide_symbol_is_bitmap(symbol):
         return
+    # Mirrors Direct2D's bitmapGuideNoWipe / drawBitmapGuidePart guards:
+    # no after image means one before-image draw in every karaoke phase.
+    if after and (
+        not symbol.bitmap_after_path or phase == "before"
+        or (band is None and phase != "after")
+    ):
+        return
+    if not after and symbol.bitmap_after_path and phase == "after":
+        return
     image_path = (
         symbol.bitmap_after_path
-        if after and symbol.bitmap_after_path
+        if after
         else symbol.bitmap_before_path
     )
     frame = bitmap_guide_frame_at(image_path, anim_ms)
@@ -1449,11 +1482,15 @@ def paint_bitmap_guide_glyph(
     painter.save()
     try:
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        if band is not None:
+        if band is not None and phase != "after":
             if after:
-                painter.setClipRect(horizontal_after_clip_rect(band, rtl))
+                painter.setClipRect(
+                    horizontal_after_clip_rect(band, rtl), Qt.ClipOperation.IntersectClip
+                )
             elif symbol.bitmap_after_path:
-                painter.setClipRect(horizontal_before_clip_rect(band, rtl))
+                painter.setClipRect(
+                    horizontal_before_clip_rect(band, rtl), Qt.ClipOperation.IntersectClip
+                )
         # 装饰剪影跟随当前侧实际绘制的图片（后侧用后图 Alpha），透明占位
         # 前图不会把发光/阴影贴成 1px 细条。frame_identity 带文件签名，
         # GIF 换内容后旧剪影自动失效。
@@ -1469,6 +1506,26 @@ def paint_bitmap_guide_glyph(
         painter.drawImage(rect, image)
     finally:
         painter.restore()
+
+
+def bitmap_guide_wipe_phase(
+    fill_segments: list[FillSegment], glyph: GlyphLayout, t_ms: int
+) -> str | None:
+    """Mirror Direct2D wipePhaseAt, including zero-time tags and successors."""
+    position = next(
+        (i for i, segment in enumerate(fill_segments) if glyph.index in segment.indices),
+        None,
+    )
+    if position is None:
+        return None
+    start, end = segment_wipe_times(fill_segments[position])
+    wiping = start < t_ms < end and start != end
+    if not wiping and position + 1 < len(fill_segments):
+        _, following_end = segment_wipe_times(fill_segments[position + 1])
+        wiping = start < t_ms < following_end and start != following_end
+    if wiping:
+        return "wiping"
+    return "before" if t_ms <= start else "after"
 
 
 def bitmap_guide_band_for_segments(
@@ -1524,8 +1581,6 @@ def paint_bitmap_guide_glyphs(
 ) -> None:
     for glyph in bitmap_guide_glyphs(layout.text_layout):
         band = bitmap_guide_band_for_glyph(layout, glyph, t_ms, ports)
-        if after and band is None:
-            continue
         paint_bitmap_guide_glyph(
             painter,
             glyph,
@@ -1539,6 +1594,7 @@ def paint_bitmap_guide_glyphs(
                 else layout.line_rect
             ),
             anim_ms=anim_ms,
+            phase=bitmap_guide_wipe_phase(layout.fill_segments, glyph, t_ms),
         )
 
 
@@ -1591,6 +1647,7 @@ def paint_bitmap_guide_transition_glyph(
         rtl,
         ports,
     )
+    phase = bitmap_guide_wipe_phase(fill_segments, glyph, t_ms)
     painter.save()
     try:
         painter.setOpacity(painter.opacity() * opacity)
@@ -1602,17 +1659,18 @@ def paint_bitmap_guide_transition_glyph(
             band=band,
             rtl=rtl,
             anim_ms=anim_ms,
+            phase=phase,
         )
-        if band is not None:
-            paint_bitmap_guide_glyph(
-                painter,
-                glyph,
-                baseline_y,
-                after=True,
-                band=band,
-                rtl=rtl,
-                anim_ms=anim_ms,
-            )
+        paint_bitmap_guide_glyph(
+            painter,
+            glyph,
+            baseline_y,
+            after=True,
+            band=band,
+            rtl=rtl,
+            anim_ms=anim_ms,
+            phase=phase,
+        )
     finally:
         painter.restore()
 
@@ -1630,6 +1688,7 @@ class BitmapGuideLayer:
     scope: str = SCOPE_LINE
     anim_anchor_ms: int = 0
     gradient_rect: QRectF | None = None
+    fade_opacity: float = 1.0
 
     def active_window(self, ctx: LayerContext) -> list[tuple[int, int]]:
         return []
@@ -1657,6 +1716,8 @@ class BitmapGuideLayer:
         ctx: LayerContext,
         layout: object,
     ) -> None:
+        if self.fade_opacity <= 0.0:
+            return
         band = bitmap_guide_band_for_segments(
             self.fill_segments,
             self.glyph,
@@ -1664,18 +1725,23 @@ class BitmapGuideLayer:
             self.rtl,
             self.ports,
         )
-        if self.after and band is None:
-            return
-        paint_bitmap_guide_glyph(
-            painter,
-            self.glyph,
-            self.baseline_y,
-            after=self.after,
-            band=band,
-            rtl=self.rtl,
-            gradient_rect=self.gradient_rect,
-            anim_ms=self.t_ms - self.anim_anchor_ms,
-        )
+        phase = bitmap_guide_wipe_phase(self.fill_segments, self.glyph, self.t_ms)
+        painter.save()
+        try:
+            painter.setOpacity(painter.opacity() * self.fade_opacity)
+            paint_bitmap_guide_glyph(
+                painter,
+                self.glyph,
+                self.baseline_y,
+                after=self.after,
+                band=band,
+                rtl=self.rtl,
+                gradient_rect=self.gradient_rect,
+                anim_ms=self.t_ms - self.anim_anchor_ms,
+                phase=phase,
+            )
+        finally:
+            painter.restore()
 
     def vertical_bounds(
         self,

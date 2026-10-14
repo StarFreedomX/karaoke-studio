@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialog
 
@@ -448,6 +448,158 @@ def test_bitmap_prefix_guide_paints_image_pixels(tmp_path):
     paint_frame(image, track, 1200, style)
 
     assert _count_red_pixels(image) > 20
+
+
+def _avatar_alpha_and_bounds(image: QImage, *, blue=False):
+    rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    data = bytes(rgba.constBits().asstring(rgba.sizeInBytes()))
+    pixels = [
+        i for i in range(0, len(data), 4)
+        if data[i + 3] > 0 and data[i + (2 if blue else 0)] > 240
+        and data[i + 1] < 16 and data[i + (0 if blue else 2)] < 16
+    ]
+    if not pixels:
+        return 0, None
+    xs = [i // 4 % image.width() for i in pixels]
+    ys = [i // 4 // image.width() for i in pixels]
+    return max(data[i + 3] for i in pixels), (min(xs), min(ys), max(xs), max(ys))
+
+
+@pytest.mark.parametrize("effect", ["char_fade", "char_drip", "spin_flip"])
+@pytest.mark.parametrize("role_label", [None, "A"])
+@pytest.mark.parametrize("images", ["before_only", "both", "after_only", "same_image"])
+def test_bitmap_avatar_character_transition_matches_gpu_rules(
+    tmp_path, effect, role_label, images
+):
+    """GPU avatars use wipe image states and character alpha, without char matrices."""
+    symbol = _bitmap_symbol(tmp_path)
+    if images != "before_only":
+        symbol = replace(
+            symbol, bitmap_after_path=_write_png(tmp_path / "after.png", "#0000FF")
+        )
+    if images == "same_image":
+        symbol = replace(symbol, bitmap_after_path=symbol.bitmap_before_path)
+    if images == "after_only":
+        symbol = replace(symbol, bitmap_before_path=None)
+    line = TimingLine(
+        chars=[
+            TimingChar("【A】", 2000, role_label=role_label),
+            TimingChar("a", 2000, role_label=role_label),
+            TimingChar("b", 3000, role_label=role_label),
+        ],
+        end_ms=4000,
+        inline_guide_symbols={0: symbol},
+    )
+    track = TimingTrack(lines=[line])
+    style = Style(
+        font_family="Arial", font_size_px=48, line_y_position="center",
+        dual_line_layout=False, line_lead_in_ms=1000, line_tail_ms=1000,
+        entry_anim=effect, entry_lead_ms=1000,
+        exit_anim=effect, exit_fade_ms=600, karaoke_anim="utopia",
+    )
+
+    def avatar(t_ms, *, blue=False):
+        image = QImage(320, 180, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        paint_frame(image, track, t_ms, style)
+        return _avatar_alpha_and_bounds(image, blue=blue)
+
+    assert avatar(1000)[0] == 0
+    entry_alpha, entry_bounds = avatar(1125)
+    stable_alpha, stable_bounds = avatar(1700)
+    if images == "after_only":
+        assert entry_alpha == stable_alpha == 0
+        assert avatar(1125, blue=True)[0] == 0
+    else:
+        assert entry_alpha > 0
+        assert stable_alpha == 255
+        # Direct2D restores the line matrix for images even during spin/drip.
+        assert entry_bounds == stable_bounds
+        if effect != "char_drip":
+            assert entry_alpha == pytest.approx(128, abs=3)
+    blue_after = images in {"both", "after_only"}
+    exit_alpha, _ = avatar(4525, blue=blue_after)
+    assert exit_alpha > 0
+    assert avatar(4675, blue=blue_after)[0] == 0
+    if effect != "char_drip":
+        assert exit_alpha == pytest.approx(128, abs=3)
+
+
+@pytest.mark.parametrize("effect", ["fade", "utopia"])
+def test_before_only_avatar_is_not_composited_twice_during_fade(tmp_path, effect):
+    symbol = _bitmap_symbol(tmp_path)
+    translucent = QImage(12, 8, QImage.Format.Format_ARGB32_Premultiplied)
+    translucent.fill(QColor(255, 0, 0, 128))
+    assert translucent.save(symbol.bitmap_before_path)
+    line = TimingLine(
+        chars=[TimingChar("a", 2000), TimingChar("b", 3000)],
+        end_ms=4000, guide_symbol=symbol,
+    )
+    track = TimingTrack(lines=[line])
+    style = Style(
+        font_family="Arial", font_size_px=48, dual_line_layout=False,
+        line_y_position="center", line_lead_in_ms=1000, line_tail_ms=1000,
+        entry_anim=effect, entry_lead_ms=1000,
+        exit_anim=effect, exit_fade_ms=1000,
+    )
+    # GPU draws the already-sung before-only image once. At 4500ms Fade's
+    # line alpha is (.5)^2 = .25. Utopia follows the next char (end=3000ms):
+    # at 3375ms its char alpha is .5. Image alpha=.5 must remain multiplicative.
+    t_ms = 4500 if effect == "fade" else 3375
+    image = QImage(320, 180, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    paint_frame(image, track, t_ms, style)
+    alpha, _ = _avatar_alpha_and_bounds(image)
+    assert alpha == pytest.approx(32 if effect == "fade" else 64, abs=3)
+
+
+@pytest.mark.parametrize("after", [False, True])
+def test_bitmap_wipe_preserves_enclosing_painter_clip(tmp_path, after):
+    from krok_helper.subtitle_render.engine.render.elements.horizontal.layers import (
+        bitmap_guide_target_rect, paint_bitmap_guide_glyph,
+    )
+    symbol = replace(
+        _bitmap_symbol(tmp_path),
+        bitmap_after_path=_write_png(tmp_path / "after.png", "#0000FF"),
+    )
+    line = TimingLine(chars=[TimingChar("a", 1000)], end_ms=2000,
+                      inline_guide_symbols={0: symbol})
+    layout = _layout_line_uncached(TimingTrack(lines=[line]), line,
+                                  Style(font_family="Arial", font_size_px=48), 320, 180)
+    glyph = layout.text_layout.glyphs[0]
+    rect = bitmap_guide_target_rect(glyph, layout.baseline_y)
+    image = QImage(320, 180, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(0)
+    painter = QPainter(image)
+    # Both GPU wipe clips intersect with the existing viewport/strip clip.
+    allowed = QRectF(rect.left(), rect.top(), rect.width(), rect.height() / 2)
+    painter.setClipRect(allowed)
+    edge = rect.right() if after else rect.left()
+    paint_bitmap_guide_glyph(painter, glyph, layout.baseline_y, after=after,
+                            band=(int(rect.left()), int(edge)), rtl=False)
+    painter.end()
+    alpha, bounds = _avatar_alpha_and_bounds(image, blue=after)
+    assert alpha > 0
+    assert bounds[3] < allowed.bottom()
+
+
+@pytest.mark.parametrize("karaoke", ["none", "utopia"])
+def test_zero_time_avatar_keeps_before_image_at_exact_start(tmp_path, karaoke):
+    symbol = replace(_bitmap_symbol(tmp_path),
+                     bitmap_after_path=_write_png(tmp_path / "after.png", "#0000FF"))
+    track = TimingTrack(lines=[TimingLine(
+        chars=[TimingChar("【A】", 2000), TimingChar("a", 2000)],
+        end_ms=3000, inline_guide_symbols={0: symbol},
+    )])
+    style = Style(font_family="Arial", font_size_px=48,
+                  dual_line_layout=False, karaoke_anim=karaoke,
+                  entry_anim="none", exit_anim="none")
+    for t_ms, after in [(2000, False), (2001, True), (3001, True)]:
+        image = QImage(320, 180, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        paint_frame(image, track, t_ms, style)
+        assert _avatar_alpha_and_bounds(image, blue=after)[0] > 0
+        assert _avatar_alpha_and_bounds(image, blue=not after)[0] == 0
 
 
 def _count_color_pixels(image: QImage, color: str) -> int:
