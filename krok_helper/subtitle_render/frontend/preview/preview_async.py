@@ -778,6 +778,7 @@ class AsyncSubtitleRenderer(QObject):
         extra_tracks: Optional[list[TimingTrack]] = None,
         *,
         duration_ms: int | None = None,
+        relayout_scope: str | None = None,  # noqa: ARG002 — CPU always renders the full frame.
     ) -> None:
         if self._stopped:
             return

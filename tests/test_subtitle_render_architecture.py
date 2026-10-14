@@ -2666,6 +2666,7 @@ def test_character_transition_layer_stack_has_explicit_factory_ports() -> None:
     assert isinstance(ports[0].func, ast.Name)
     assert ports[0].func.id == "TransitionLayerStackPorts"
     assert {keyword.arg for keyword in ports[0].keywords} == {
+        "bitmap_guide_layer",
         "fill_clip_band_for_glyphs",
         "glyph_run_after_glow_layer",
         "glyph_run_before_glow_layer",

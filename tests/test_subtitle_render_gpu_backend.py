@@ -5374,6 +5374,83 @@ def test_gpu_detailed_svg_guide_symbol_configures_within_budget(monkeypatch) -> 
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("effect", ["char_fade", "char_drip", "spin_flip", "utopia"])
+@pytest.mark.parametrize("images", ["before_only", "both", "after_only", "same_image"])
+@pytest.mark.parametrize("same_start", [False, True])
+def test_qpainter_bitmap_image_states_and_alpha_match_existing_gpu(
+    monkeypatch, tmp_path: Path, effect, images, same_start
+) -> None:
+    """The unchanged Direct2D bitmap phase/alpha path is the reference."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    paths = []
+    for name, color in [("before", QColor(255, 0, 0, 128)),
+                        ("after", QColor(0, 0, 255, 128))]:
+        path = tmp_path / (name + ".png")
+        image = QImage(48, 48, QImage.Format.Format_RGBA8888)
+        image.fill(color)
+        assert image.save(str(path))
+        paths.append(str(path))
+    symbol = GuideSymbol(
+        kind="bitmap", bitmap_no_decor=True,
+        bitmap_before_path=paths[0] if images != "after_only" else None,
+        bitmap_after_path=(
+            paths[0] if images == "same_image"
+            else paths[1] if images != "before_only" else None
+        ),
+    )
+    track = TimingTrack(lines=[TimingLine(
+        chars=[TimingChar("\uFFFC", 2000, vector_glyph=symbol),
+               TimingChar("a", 2000 if same_start else 3000), TimingChar("b", 3500)],
+        end_ms=4000,
+    )])
+    style = _g1_style(
+        font_size_px=48, decoration_kind="none", stroke_width_px=0,
+        stroke2_enabled=False, dual_line_layout=False,
+        line_lead_in_ms=1000, line_tail_ms=1000,
+        entry_anim=effect, entry_lead_ms=1000,
+        exit_anim=effect, exit_fade_ms=600, karaoke_anim="none",
+        karaoke_colors=KaraokeColors(
+            before=KaraokeColorState(text=PaintFill(color="#FFFFFFFF")),
+            after=KaraokeColorState(text=PaintFill(color="#FFFFFFFF")),
+        ),
+    )
+    timestamps = (1000, 1125, 1250, 1400, 1700, 2000, 2250, 2750,
+                  3200, 3500, 3875, 4400, 4525, 4675, 4900)
+    painter_frames = [
+        _render_painter_oracle(style, t_ms=t_ms, track=track)
+        for t_ms in timestamps
+    ]
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=15.0) as renderer:
+        _, gpu_frames = _render_g1_frames(
+            renderer, style, timestamps, force_warp=True, track=track
+        )
+
+    def image_states(frame):
+        pixels = np.frombuffer(frame, dtype=np.uint8).reshape(-1, 4)
+        states = []
+        for channel, other in [(0, 2), (2, 0)]:
+            mask = ((pixels[:, channel] > 240) & (pixels[:, 1] < 16)
+                    & (pixels[:, other] < 16) & (pixels[:, 3] > 0))
+            alpha = pixels[mask, 3]
+            states.append((int(alpha.max()) if alpha.size else 0,
+                           int(alpha.astype(np.uint32).sum())))
+        return states
+
+    for t_ms, painter, gpu in zip(timestamps, painter_frames, gpu_frames):
+        expected = image_states(gpu)
+        actual = image_states(painter)
+        assert [value[0] for value in actual] == pytest.approx(
+            [value[0] for value in expected], abs=3
+        ), (effect, images, t_ms, actual, expected)
+        expected_total = sum(value[1] for value in expected)
+        actual_total = sum(value[1] for value in actual)
+        if expected_total > 0 and actual_total > 0:
+            assert actual[1][1] / actual_total == pytest.approx(
+                expected[1][1] / expected_total, abs=0.05
+            ), (effect, images, t_ms, actual, expected)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_bitmap_guide_symbol_renders_during_utopia_exit(
     monkeypatch,
     tmp_path: Path,
