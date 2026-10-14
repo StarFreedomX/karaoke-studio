@@ -2537,7 +2537,7 @@ class GpuAsyncSubtitleRenderer(QObject):
             media_now = self._media_now_ms()
 
             if native:
-                # 1) 出队到点帧（一帧一帧放，保持到点才播放的语义）。
+                # 1) 出队到点帧；提交前丢弃严重过期帧，卡顿恢复不补播旧队列。
                 while rendered_queue and rendered_queue[0][1] <= media_now + 1.0:
                     _, due_t = rendered_queue.pop(0)
                     self._present_g6_frame(
@@ -2857,6 +2857,21 @@ class GpuAsyncSubtitleRenderer(QObject):
         if target_width < 1 or target_height < 1:
             return
 
+        # Native present changes the visible surface before its response arrives;
+        # rejecting the later Qt notification cannot undo an expired frame.
+        # Drain stale queued textures without presenting them, then let the due
+        # scheduler render at the current media clock instead of replaying backlog.
+        with self._condition:
+            if (
+                self._stopped
+                or generation != self._generation
+                or (
+                    self._playing
+                    and self._media_now_ms() - render_t > self._STALE_TOLERANCE_MS
+                )
+            ):
+                self._note("stale_frames_dropped")
+                return
         event = renderer.present_rendered_gpu_frame(
             parent_hwnd=parent_hwnd,
             x=target_x,

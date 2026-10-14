@@ -1779,12 +1779,14 @@ def test_gpu_native_preview_schedules_at_capacity_rate_without_waste(qapp, monke
         renderer.stop()
 
 
-def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
+@pytest.mark.parametrize("stall_seconds", [0.166, 0.5])
+def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch, stall_seconds):
     """恢复瞬态（2026-10 用户问询 + 拍板语义）：
 
     - 吞吐骤升（166ms→瞬时）时呈现键严格递增（不倒走）；
     - **到点才播放**：渲染提前完成也不得提前上屏——呈现戳与当时媒体
       时钟之差不得超过一个小余量（≈2 帧，含测试时钟的量化误差）。
+    - 卡顿恢复时跳过过期帧，不向 native 提交旧字幕追赶队列。
     """
     from krok_helper.subtitle_render.frontend.preview import preview_async as pa
     from krok_helper.subtitle_render.domain.models import Style, TimingTrack
@@ -1792,7 +1794,7 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
     presented: list[tuple[int, int, int]] = []  # (generation, t, media_at_present)
     clock = {"t": 60_000, "t0": 0.0}
     lock = threading.Lock()
-    slow_remaining = {"n": 3}
+    slow_remaining = {"n": 3 if stall_seconds == 0.166 else 1}
 
     class FakeGpuProcess:
         def __init__(self, *args, **kwargs):
@@ -1810,8 +1812,8 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
         def render_gpu_frame_direct(self, t_ms, **kwargs):
             if slow_remaining["n"] > 0:
                 slow_remaining["n"] -= 1
-                time.sleep(0.166)  # 慢机 6fps
-                duration = 166.0
+                time.sleep(stall_seconds)
+                duration = stall_seconds * 1000.0
             else:
                 duration = 1.0  # 骤快（缓存热了）
             return {
@@ -1885,6 +1887,10 @@ def test_gpu_native_preview_recovery_stays_monotonic(qapp, monkeypatch):
             if t - media > 40
         ]
         assert not early, f"提前上屏未到点的帧: {early[:6]}"
+        # Inspect actual present calls: dropping a Qt notification afterwards
+        # cannot undo stale pixels already submitted to DirectComposition.
+        late = [(t, media) for _, t, media in presented if media - t > 160]
+        assert not late, f"恢复后提交了过期帧: {late[:6]}"
     finally:
         renderer.stop()
 
