@@ -125,6 +125,7 @@ from krok_helper.ui_kit import (
     DEFAULT_UI_FONT_FAMILIES,
     ElidedLabel,
     build_app_ui_font,
+    configure_korean_font_fallback,
 )
 from krok_helper.updater import CheckResult, UpdateChecker, ensure_updater_settings
 from krok_helper.updater.dialogs import WorkbenchUpdateDialog
@@ -359,6 +360,7 @@ class KrokHelperQtApp(QMainWindow):
     """
     def __init__(self, startup_progress: Callable[[int, str], None] | None = None) -> None:
         super().__init__()
+        configure_korean_font_fallback()
         # 启动进度回调（cli.run_gui 注入，驱动 splash 的「阶段 + 百分比」展示）。
         # 必须在任何里程碑上报之前就位。
         self._startup_progress = startup_progress

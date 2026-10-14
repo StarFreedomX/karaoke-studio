@@ -49,6 +49,7 @@ def apply_sug_compat_patches() -> None:
     """Apply host-side compatibility patches for the embedded SUG runtime."""
 
     ensure_sug_src_path()
+    _patch_preview_font_families()
     from strange_uta_game.frontend.editor.timing import lyric_loader
 
     original_utaten_split: Callable[[str, str], tuple[list[str], bool]] | None = getattr(
@@ -93,3 +94,41 @@ def apply_sug_compat_patches() -> None:
         return _restore_source_kana_script(reading, normalized_tokens)
 
     lyric_loader._split_reading_by_reference = _split_reading_by_reference_preserving_source_kana
+
+
+def _patch_preview_font_families() -> None:
+    """Supply the lyric fallback chain to SUG versions predating lyrics_font."""
+    from functools import wraps
+    from PyQt6.QtGui import QFontMetrics
+    from strange_uta_game.frontend import font_utils
+    from strange_uta_game.frontend.editor.timing.karaoke_preview import KaraokePreview
+
+    if hasattr(font_utils, "lyrics_font"):
+        return
+    original = KaraokePreview.set_font_sizes
+    if getattr(original, "_krok_font_fallback", False):
+        return
+
+    @wraps(original)
+    def set_font_sizes(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        changed = False
+        for name in ("current", "context", "ruby"):
+            font = getattr(self, "_font_" + name)
+            families = font.families()
+            default = font_utils.DEFAULT_FONT_FAMILY
+            if not any(family.casefold() == default.casefold() for family in families):
+                font.setFamilies(families + [default])
+                setattr(self, "_fm_" + name, QFontMetrics(font))
+                changed = True
+        if changed:
+            # Font metrics and layout caches must use the same request as painting.
+            self._sentence_cache.clear()
+            self._line_versions.clear()
+            self._global_version += 1
+            self._recompute_visible_lines()
+            self._recompute_marker_glyph_top()
+            self.update()
+
+    set_font_sizes._krok_font_fallback = True
+    KaraokePreview.set_font_sizes = set_font_sizes

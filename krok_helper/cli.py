@@ -103,7 +103,11 @@ def run_gui(args: argparse.Namespace) -> int:
     # 抄一份 Qt 自己的消息：qFatal 会当场 abort 掉进程，而无控制台的 GUI 构建里
     # 那句话只会流向 OutputDebugString，没人接就等于没发生过。
     install_qt_message_capture()
+    from krok_helper.logging_config import install_font_diagnostics
+
+    install_font_diagnostics()
     qt_app = QApplication.instance() or QApplication(sys.argv)
+    install_font_diagnostics(qt_app)
     trace("gui.qapplication_ready")
     from krok_helper.startup_splash import StartupSplashWindow
 

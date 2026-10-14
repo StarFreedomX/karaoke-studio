@@ -6,10 +6,13 @@ import logging
 import logging.handlers
 import os
 import platform
+import queue
 import re
 import sys
 import tempfile
 import threading
+import time
+import traceback
 from pathlib import Path
 from typing import TextIO
 
@@ -35,6 +38,102 @@ _hooks_installed = False
 _qt_handler_installed = False
 _qt_message_handler_callback = None
 _shutdown_registered = False
+_font_trace_recorder = None
+FONT_TRACE_ENV = "KARAOKE_STUDIO_FONT_TRACE"
+
+
+class _FontTraceRecorder:
+    """Keep diagnostic disk I/O outside Qt's font database lock."""
+
+    def __init__(self) -> None:
+        self.pending = queue.Queue(maxsize=4096)
+        self.app = None
+        self.previous_handler = None
+        self.handler = self.capture
+        self.dropped = 0
+        self.thread = threading.Thread(
+            target=self._write, name="FontTraceWriter", daemon=True
+        )
+        self.thread.start()
+
+    def emit(self, category: str, message: str) -> None:
+        try:
+            self.pending.put_nowait(
+                (time.monotonic(), threading.current_thread().name, category, message)
+            )
+        except queue.Full:
+            # Diagnostic overload must never block a thread holding a Qt lock.
+            self.dropped += 1
+
+    def _write(self) -> None:
+        logger = logging.getLogger("krok_helper.font_trace")
+        while True:
+            item = self.pending.get()
+            try:
+                if item is None:
+                    return
+                stamp, origin, category, message = item
+                if self.dropped:
+                    dropped, self.dropped = self.dropped, 0
+                    logger.warning("字体诊断队列已满，跳过 %s 条记录", dropped)
+                logger.info(
+                    "字体诊断 t=%.6f origin=%s category=%s %s",
+                    stamp, origin, category, message,
+                )
+            finally:
+                self.pending.task_done()
+
+    def capture(self, message_type, context, message) -> None:
+        from PyQt6.QtCore import QtMsgType
+
+        category = getattr(context, "category", "") or ""
+        if message_type == QtMsgType.QtDebugMsg and category.startswith("qt.text.font."):
+            self.emit(category, str(message))
+        elif self.previous_handler is not None:
+            self.previous_handler(message_type, context, message)
+
+    def state_change(self, category: str, message: str) -> None:
+        # Record the caller without asking Qt to resolve any glyphs.
+        self.emit(category, message + "\n" + "".join(traceback.format_stack(limit=8)))
+
+    def stop(self) -> None:
+        if not self.thread.is_alive():
+            return
+        try:
+            self.pending.put_nowait(None)
+        except queue.Full:
+            return
+        self.thread.join(timeout=1.0)
+
+
+def install_font_diagnostics(app=None) -> bool:
+    """Opt-in matching trace; never resolve, prewarm, or replace a font."""
+    global _font_trace_recorder
+    if os.getenv(FONT_TRACE_ENV, "").strip().lower() not in {"1", "true", "yes"}:
+        return False
+    from PyQt6.QtCore import QLoggingCategory, qInstallMessageHandler
+
+    if _font_trace_recorder is None:
+        recorder = _FontTraceRecorder()
+        _font_trace_recorder = recorder
+        recorder.previous_handler = qInstallMessageHandler(recorder.handler)
+        rules = os.environ.get("QT_LOGGING_RULES", "")
+        rules += "\nqt.text.font.match.debug=true\nqt.text.font.db.debug=true"
+        os.environ["QT_LOGGING_RULES"] = rules
+        QLoggingCategory.setFilterRules(rules)
+        atexit.register(recorder.stop)
+        recorder.emit("enabled", "已开启字体匹配记录；不修改字体或配置")
+    recorder = _font_trace_recorder
+    if app is not None and recorder.app is not app:
+        recorder.app = app
+        app.fontChanged.connect(
+            lambda font: recorder.state_change("application-font-changed", font.toString())
+        )
+        app.fontDatabaseChanged.connect(
+            lambda: recorder.state_change("font-database-changed", "Qt 字体库发生变化")
+        )
+        recorder.emit("application-font-initial", app.font().toString())
+    return True
 
 
 def get_log_dir() -> Path:

@@ -11,9 +11,10 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PyQt6.QtCore import QChar, Qt
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -47,6 +48,7 @@ __all__ = [
     "DEFAULT_UI_FONT_FAMILIES",
     "ElidedLabel",
     "build_app_ui_font",
+    "configure_korean_font_fallback",
 ]
 
 
@@ -59,6 +61,21 @@ DEFAULT_UI_FONT_FAMILIES = [
     "Meiryo",
     "PingFang SC",
 ]
+
+
+def configure_korean_font_fallback() -> bool:
+    """Prefer the Windows Korean system font for missing Hangul glyphs only."""
+    if sys.platform != "win32" or QGuiApplication.instance() is None:
+        return False
+    family = "Malgun Gothic"
+    if family not in QFontDatabase.families():
+        return False
+    script = QChar.Script.Script_Hangul
+    previous = QFontDatabase.applicationFallbackFontFamilies(script)
+    preferred = [family] + [name for name in previous if name.casefold() != family.casefold()]
+    if previous != preferred:
+        QFontDatabase.setApplicationFallbackFontFamilies(script, preferred)
+    return True
 
 
 def build_app_ui_font(*, point_size: float = 10.5, bold: bool = False) -> QFont:

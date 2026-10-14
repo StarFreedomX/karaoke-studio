@@ -7,10 +7,16 @@
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+from PyQt6.QtCore import QChar
+from PyQt6.QtGui import QFont, QFontDatabase, QTextLayout
 from qfluentwidgets import ComboBox
 from qfluentwidgets.components.widgets.combo_box import ComboBoxMenu
 
 from krok_helper.ui_kit import StyledComboBox, WhiteComboBoxMenu
+from krok_helper.ui_kit import configure_korean_font_fallback
 
 
 def test_styled_combo_box_is_a_fluent_combo() -> None:
@@ -24,3 +30,66 @@ def test_white_combo_menu_is_a_fluent_menu() -> None:
 def test_styled_combo_box_uses_the_white_menu() -> None:
     """下拉面板的白底样式靠这个覆写生效。"""
     assert StyledComboBox._createComboMenu is not ComboBox._createComboMenu
+
+
+def test_korean_fallback_overrides_competitor_but_preserves_primary_font() -> None:
+    installed = QFontDatabase.families()
+    competitor = next((f for f in ("NanumBarunGothic", "Source Han Sans SC", "Gulim", "Batang") if f in installed), None)
+    if sys.platform != "win32" or competitor is None or not all(f in installed for f in ("Malgun Gothic", "Microsoft YaHei")):
+        pytest.skip("Windows Korean and Chinese system fonts required")
+
+    def faces(text, family="Microsoft YaHei", weight=QFont.Weight.Normal):
+        layout = QTextLayout(text, QFont(family, 30, weight))
+        layout.beginLayout()
+        line = layout.createLine()
+        line.setLineWidth(10000)
+        layout.endLayout()
+        return [(run.rawFont().familyName(), run.rawFont().styleName(), tuple(run.glyphIndexes())) for run in line.glyphRuns()]
+
+    script = QChar.Script.Script_Hangul
+    previous = QFontDatabase.applicationFallbackFontFamilies(script)
+    try:
+        QFontDatabase.setApplicationFallbackFontFamilies(script, [competitor])
+        assert {f[0] for f in faces("한글")} == {competitor}
+        unaffected = {text: faces(text) for text in ("0123456789", "中文", "あいう")}
+        assert configure_korean_font_fallback()
+        assert configure_korean_font_fallback()  # idempotent: no duplicate candidates
+        assert QFontDatabase.applicationFallbackFontFamilies(script) == ["Malgun Gothic", competitor]
+        for weight in (QFont.Weight.Normal, QFont.Weight.Bold):
+            assert {f[0] for f in faces("한글", weight=weight)} == {"Malgun Gothic"}
+        assert {f[0] for f in faces("한글", family=competitor)} == {competitor}
+        assert {text: faces(text) for text in unaffected} == unaffected
+    finally:
+        QFontDatabase.setApplicationFallbackFontFamilies(script, previous)
+
+
+def test_missing_korean_font_keeps_existing_fallback_policy(monkeypatch) -> None:
+    monkeypatch.setattr(QFontDatabase, "families", lambda: [])
+    monkeypatch.setattr(
+        QFontDatabase, "setApplicationFallbackFontFamilies",
+        lambda *args: pytest.fail("missing system font must not change the fallback policy"),
+    )
+    assert configure_korean_font_fallback() is False
+
+
+def test_preview_bold_keeps_primary_and_default_fallback(qapp):
+    from PyQt6.QtGui import QFont
+    from strange_uta_game.frontend.font_utils import DEFAULT_FONT_FAMILY
+    from strange_uta_game.frontend.editor.timing.karaoke_preview import KaraokePreview
+
+    from krok_helper.sug_compat import _patch_preview_font_families
+    _patch_preview_font_families()
+    _patch_preview_font_families()
+    preview = KaraokePreview()
+    try:
+        preview.set_font_sizes(18, main_font="Arial", ruby_font="Arial")
+        expected = ["Arial", DEFAULT_FONT_FAMILY]
+        assert preview._font_current.families() == expected
+        assert preview._font_context.families() == expected
+        assert preview._font_ruby.families() == expected
+        assert preview._font_current.weight() == QFont.Weight.Bold
+        assert preview._font_context.weight() == QFont.Weight.Normal
+        preview.set_font_sizes(18, main_font=DEFAULT_FONT_FAMILY)
+        assert preview._font_current.families() == [DEFAULT_FONT_FAMILY]
+    finally:
+        preview.close()
