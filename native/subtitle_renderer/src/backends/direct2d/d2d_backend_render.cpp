@@ -8654,16 +8654,27 @@ NativePreviewResult Direct2DGpuBackend::presentFrame(
         return result;
     }
     // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
-    const std::lock_guard<std::mutex> immediateContextLock(
-        device_.immediateContextMutex()
-    );
-    return previewSurface_.present(
-        device_.d3dDevice(),
-        device_.d3dContext(),
-        impl_->frameStore[static_cast<std::size_t>(slotIndex)].texture.Get(),
-        rendered.renderMs,
-        target
-    );
+    NativePreviewResult result;
+    {
+        const std::lock_guard<std::mutex> immediateContextLock(
+            device_.immediateContextMutex()
+        );
+        result = previewSurface_.present(
+            device_.d3dDevice(),
+            device_.d3dContext(),
+            impl_->frameStore[static_cast<std::size_t>(slotIndex)].texture.Get(),
+            rendered.renderMs,
+            target
+        );
+    }
+    // 本帧的路径与资源版本：preview 返回值里没有，必须从渲染诊断补回，
+    // 否则上屏侧永远看不到「这帧是谁画的」（2026-10 上屏探针实测
+    // present 返回 false/0 而渲染是 true/1）。
+    result.realizationPathReady =
+        rendered.frameDiagnostics.realizationPathReady;
+    result.realizationGeneration =
+        rendered.frameDiagnostics.realizationGeneration;
+    return result;
 }
 
 void Direct2DGpuBackend::closeNativePreview() {
@@ -8725,6 +8736,13 @@ NativePreviewResult Direct2DGpuBackend::presentRendered(
     }
     {
         // present 的 backbuffer 拷贝走 immediate context，与回读互斥。
+        // previewSurface_.present 返回的是整份新结果：帧仓的路径/资源版本
+        // 必须先取出，返回后补回（否则上屏诊断恢复默认值——2026-10 真实
+        // 上屏探针：渲染 true/1，上屏 false/0）。
+        const bool slotPathReady =
+            impl_->frameStore[foundIndex].realizationPathReady;
+        const std::uint64_t slotGeneration =
+            impl_->frameStore[foundIndex].realizationGeneration;
         const std::lock_guard<std::mutex> immediateContextLock(
             device_.immediateContextMutex()
         );
@@ -8735,6 +8753,8 @@ NativePreviewResult Direct2DGpuBackend::presentRendered(
             0.0,
             target
         );
+        result.realizationPathReady = slotPathReady;
+        result.realizationGeneration = slotGeneration;
     }
     // 时间丢弃：到点帧已上屏，同代里更早的帧永远不会再被播放，登记
     // 即刻释放（纹理保留复用，避免 seek 前后反复分配全幅目标）。

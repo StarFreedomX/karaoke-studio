@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import ctypes
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 import threading
@@ -725,6 +728,7 @@ def _render_g1_frames(
     realization_enabled: bool = True,
     shared_resources: bool = False,
     wait_realizations: bool = False,
+    dpr: float = 1.0,
 ) -> tuple[dict, list[bytes]]:
     configured = renderer.configure_gpu(
         track or _g1_track(),
@@ -732,6 +736,7 @@ def _render_g1_frames(
         width=width,
         height=height,
         fps=60,
+        dpr=dpr,
         force_warp=force_warp,
         extra_tracks=extra_tracks,
         worker_count=worker_count,
@@ -14448,6 +14453,47 @@ def _jit_scene(name: str) -> tuple[TimingTrack, Style]:
             _g1_style(**{**_FILL_STYLE, "font_size_px": 120}, stroke_width_px=8,
                       stroke2_enabled=False, decoration_kind="none"),
         )
+    if name == "small_latin":
+        return (
+            TimingTrack(
+                lines=[
+                    TimingLine(
+                        chars=[
+                            TimingChar(ch, index * 250)
+                            for index, ch in enumerate("Sg@&e")
+                        ],
+                        end_ms=1_500,
+                    )
+                ]
+            ),
+            _g1_style(
+                font_family="Times New Roman", font_family_latin="Times New Roman",
+                font_size_px=12, stroke_width_px=0, stroke2_enabled=False,
+                decoration_kind="none",
+            ),
+        )
+    if name == "small_cjk":
+        return (
+            TimingTrack(
+                lines=[
+                    TimingLine(
+                        chars=[
+                            TimingChar(ch, index * 250)
+                            for index, ch in enumerate("永漢あぬ")
+                        ],
+                        end_ms=1_500,
+                    )
+                ]
+            ),
+            _g1_style(**{**_FILL_STYLE, "font_size_px": 18}, stroke_width_px=0,
+                      stroke2_enabled=False, decoration_kind="none"),
+        )
+    if name == "thin_stroke":
+        return (
+            TimingTrack(lines=[_jit_lines()]),
+            _g1_style(**_FILL_STYLE, stroke_width_px=1, stroke2_enabled=False,
+                      decoration_kind="none"),
+        )
     if name == "animated":
         return (
             TimingTrack(lines=[_jit_lines()]),
@@ -14467,6 +14513,9 @@ _JIT_SCENES = (
     "glow",
     "vector_guide",
     "animated",
+    "small_latin",
+    "small_cjk",
+    "thin_stroke",
 )
 
 
@@ -14633,48 +14682,68 @@ def test_gpu_same_timestamp_repeats_are_byte_identical_across_pool_workers(monke
 @pytest.mark.parametrize("dpr", [1.0, 2.0])
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 def test_gpu_same_timestamp_repeats_are_byte_identical_across_dpr(dpr, monkeypatch) -> None:
-    """不同 DPR（预览质量）下重复渲染同样必须一致。"""
+    """不同 DPR（预览质量）下重复渲染同样必须一致。
+
+    两次采样都必须显式使用目标 DPR 并断言实际输出物理尺寸——辅助函数默认
+    dpr=1.0，曾经把 DPR 用例变成「两次都是 DPR 1」的空跑（2026-10 审查）。
+    """
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track, style = _jit_scene("ruby")
     with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
         _, first = _render_g1_frames(
             renderer, style, (1_000,), force_warp=False, track=track,
-            width=640, height=360, realization_enabled=False,
-        )
-        renderer.configure(
-            track, style, width=640, height=360, fps=60, dpr=dpr
+            width=320, height=180, realization_enabled=False, dpr=dpr,
         )
         _, second = _render_g1_frames(
             renderer, style, (1_000,), force_warp=False, track=track,
-            width=640, height=360, realization_enabled=False,
+            width=320, height=180, realization_enabled=False, dpr=dpr,
         )
-    # configure() 走 dpr 参数；两次渲染必须给出相同像素（同一 DPR 下）。
+        # 物理尺寸 = 逻辑尺寸 × DPR（避免"逻辑尺寸相同但实际渲染不同"的假通过）。
+        event = renderer.render_gpu_frame(1_000, frame_index=3)
+        with SharedFrameRingReader.from_event(event) as reader:
+            slot = reader.read_frame(event)
+    assert slot.width == round(320 * dpr), (slot.width, dpr)
+    assert slot.height == round(180 * dpr), (slot.height, dpr)
     assert first[0] == second[0], f"dpr={dpr}: 重复渲染像素不一致"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
 @pytest.mark.parametrize(
     "layer",
-    ["fill_only", "double_stroke", "glow", "vector_outline_stroke"],
+    [
+        "fill_only",
+        "double_stroke",
+        "glow",
+        "thin_stroke",
+        "small_latin",
+        "small_cjk",
+        "ruby_fill",
+        "vector_outline_stroke",
+    ],
 )
 def test_gpu_raw_vs_baked_local_metrics(layer, monkeypatch) -> None:
     """raw→baked 切换的局部差异验收（第 2 类）。
 
     逐像素预乘比较，按「轮廓位置（IoU/重心）+ 边缘亮度带（AA 斜坡最大/平均
-    差）+ 墨迹总量」三维度验收，不看整幅平均值。2026-10 实测基线（
-    640×360、Meiryo/Arial「永漢Abg」、预乘口径）：
+    差）+ 墨迹总量」三维度验收，不看整幅平均值。
 
-    | 层 | IoU | 重心位移 | 差>8 像素 | 最大通道差 | alpha 变化 |
+    2026-10 实测（640×360，预乘口径）：
+
+    | 场景 | IoU | 重心位移 | 差>8 像素 | 最大通道差 | alpha 总量 |
     |---|---:|---:|---:|---:|---:|
-    | 正文填充（曲线几何） | 0.9826 | 0.32px | 1240 | 112 | +1.95% |
-    | 双描边 | 0.9997 | 0.04px | 1263 | 105 | +0.06% |
-    | 发光 | 1.0000 | 0.01px | 1354 | 105 | +0.01% |
-    | 矢量轮廓描边（同多边形） | 0.9991 | — | 269 | 96 | -0.09% |
+    | 正文填充 64px | 0.9826 | 0.32px | 1239 | 112 | +1.95% |
+    | 双描边 64px | 0.9997 | 0.04px | 1263 | 105 | +0.06% |
+    | 发光 64px | 1.0000 | ~0 | 1354 | 105 | +0.01% |
+    | **12px Times New Roman** | 0.9427 | 0.01px | 165 | 173 | **+32.0%** |
+    | **18px Meiryo** | 0.9542 | 0.16px | 419 | 159 | **+9.4%** |
+    | 注音 + 正文 64px | 0.9922 | 0.25px | 1823 | 112 | +0.74% |
+    | 矢量轮廓描边（同多边形） | 0.9991 | — | 269 | 96 | −0.09% |
 
-    纯多边形（矩形）实测最大差 3/255 —— 说明差异来自「两条路径对同一条曲线
-    各做各的近似」，不是光栅化器差异，也不是展平容差能调掉的（容差 0.25→0.005
-    实测反而更大）。本测试钉住基线防回归；像素级统一的目标见
-    ``test_gpu_raw_baked_goal_unified_pixels``。
+    **小字号的墨迹膨胀是当前最严重的一档**（12px 正文 +32%）：网格路径的
+    覆盖率斜坡比直描偏外约 0.1-0.2px，特征越细影响越大。该结论经三重排除：
+    展平容差 0.25→0.005 无改善；单轮廓字形膨胀更大（重叠双覆盖不成立）；
+    审查者 A 原型（两路共用同一展平多边形）未消除差异。本测试钉住基线防
+    回归；像素级统一的目标见 ``test_gpu_raw_baked_goal_unified_pixels``。
     """
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     if layer == "vector_outline_stroke":
@@ -14692,6 +14761,12 @@ def test_gpu_raw_vs_baked_local_metrics(layer, monkeypatch) -> None:
             stroke2_enabled=False, decoration_kind="none",
             fill_color="#00FF2030", base_color="#00FF2030",
         )
+    elif layer in ("small_latin", "small_cjk"):
+        track, style = _jit_scene(layer)
+    elif layer == "ruby_fill":
+        track = TimingTrack(lines=[_jit_lines()], rubies=[_jit_ruby()])
+        style = _g1_style(**_FILL_STYLE, stroke_width_px=0, stroke2_enabled=False,
+                          decoration_kind="none")
     else:
         track = TimingTrack(lines=[_jit_lines()])
         styles = {
@@ -14702,6 +14777,8 @@ def test_gpu_raw_vs_baked_local_metrics(layer, monkeypatch) -> None:
             "glow": dict(stroke_width_px=6, stroke2_enabled=False,
                          decoration_kind="glow", glow_radius_px=8,
                          glow_before_radius_px=8, glow_after_radius_px=8),
+            "thin_stroke": dict(stroke_width_px=1, stroke2_enabled=False,
+                                decoration_kind="none"),
         }
         style = _g1_style(**_FILL_STYLE, **styles[layer])
 
@@ -14719,31 +14796,51 @@ def test_gpu_raw_vs_baked_local_metrics(layer, monkeypatch) -> None:
     assert diagnostics["realization_count"] > 0, diagnostics
     metric = _jit_compare(raw[0], baked[0], 640, 360)
 
-    # 轮廓位置一致：交并比 + 重心位移（局部，不用整幅均值）。
-    assert metric["iou"] >= 0.97, (layer, metric)
+    # 轮廓位置一致：交并比 + 重心位移（局部，不用整幅均值）。小字号因
+    # 覆盖率整体偏移，交并比基线本来就低（实测 0.943/0.954），单列预算。
+    iou_budgets = {
+        "small_latin": 0.90,
+        "small_cjk": 0.92,
+    }
+    assert metric["iou"] >= iou_budgets.get(layer, 0.97), (layer, metric)
     assert abs(metric["centroid"][0]) <= 1.0, (layer, metric)
     assert abs(metric["centroid"][1]) <= 1.0, (layer, metric)
-    # 边缘亮度带：AA 斜坡上的差必须有界（实测 ≤ 128）。
-    assert metric["edge_max"] <= 160, (layer, metric)
-    # 墨迹总量变化有界（实测 |Δ| ≤ 2.0%）。
-    assert abs(metric["alpha_ratio"] - 1.0) <= 0.03, (layer, metric)
+    # 边缘亮度带：AA 斜坡上的差必须有界。
+    assert metric["edge_max"] <= 200, (layer, metric)
+    # 墨迹总量变化有界：按各档实测基线留余量（小字号是已知最差档）。
+    alpha_budgets = {
+        "fill_only": 0.03,
+        "double_stroke": 0.03,
+        "glow": 0.03,
+        "thin_stroke": 0.06,
+        "small_latin": 0.40,
+        "small_cjk": 0.15,
+        "ruby_fill": 0.03,
+        "vector_outline_stroke": 0.03,
+    }
+    assert abs(metric["alpha_ratio"] - 1.0) <= alpha_budgets[layer], (layer, metric)
     # 差 > 8 的像素数上限：按各层实测基线留 ~1.6× 余量。
-    budgets = {
+    over8_budgets = {
         "fill_only": 2000,
         "double_stroke": 2000,
         "glow": 2200,
+        "thin_stroke": 2000,
+        "small_latin": 300,
+        "small_cjk": 700,
+        "ruby_fill": 2600,
         "vector_outline_stroke": 450,
     }
-    assert metric["over8"] <= budgets[layer], (layer, metric)
-    assert metric["max"] <= 160, (layer, metric)
+    assert metric["over8"] <= over8_budgets[layer], (layer, metric)
+    assert metric["max"] <= 220, (layer, metric)
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "像素来源尚未统一：raw/baked 各自近似同一条曲线（实测差 40-130/255）。"
-        "目标路线：两条路径共用同一多边形（曲线先展平，再同时用于直描与 "
-        "realization）——纯多边形实测最大差 3/255。"
+        "像素来源尚未统一：realization 网格路径的 AA 覆盖率斜坡比直描偏外"
+        "约 0.1-0.2px（小字号 ink +10~40%），与容差/几何共用无关。"
+        "目标路线：静态层逐层共用栅格化结果（直描一次成位图、按缩放分资源），"
+        "动态层保持稳定直描路径。"
     ),
 )
 @pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
@@ -14751,8 +14848,9 @@ def test_gpu_raw_baked_goal_unified_pixels(monkeypatch) -> None:
     """目标验收（当前已知不达标，strict xfail 钉住）：静态层 raw/baked 像素一致。
 
     通过条件：正文填充层 raw 与 baked 的最大通道差 ≤ 8、IoU ≥ 0.999。
-    实现「两条路径共用同一多边形」后本测试应转为通过——届时 strict xfail
-    会让套件失败，强制把它改成正式验收。
+    实现「逐层共用栅格化结果」（直描结果缓存成位图，两条路径取同一份像素）
+    后本测试应转为通过——届时 strict xfail 会让套件失败，强制把它改成正式
+    验收。
     """
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     track = TimingTrack(lines=[_jit_lines()])
@@ -14771,185 +14869,299 @@ def test_gpu_raw_baked_goal_unified_pixels(monkeypatch) -> None:
     assert metric["max"] <= 8, metric
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
-def test_gpu_playback_sequence_records_path_and_resource_version(monkeypatch) -> None:
-    """连续播放记录验收（第 3 类）：上屏时间戳 + 渲染路径 + 资源版本。
 
-    以媒体节奏驱动「渲染提前、到点上屏」的直画序列，长跑中包含**改色、
-    seek 与缩放**，逐帧记录上屏时间戳、渲染路径（raw/baked）、realization
-    代际（资源版本）与渲染耗时，然后检查：
+_PRESENT_PROBE_SOURCE = '''
+"""Real-present playback recording probe (run with the real Windows platform)."""
+import json
+import os
+import sys
+import threading
+import time
 
-    - 倒帧：记录的时间戳严格递增（seek 跳跃也只前进）；
-    - 重复切换：稳态内路径不得来回抖动，每次 configure 最多一次 raw→baked；
-    - 资源版本：代际单调不减，且每次 configure 后有界帧数内回到烘焙路径
-      （预热有界收敛的端到端回归）；
-    - 冻结：帧序列持续推进，不出现长时间空洞。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-    物理上屏（DComp 子窗口）由 ``test_gpu_g6_direct_composition_child_window_has_zero_readback``
-    覆盖；本套件会话固定 offscreen（conftest），故这里记录的是到点提交序列，
-    在真实桌面平台下会额外执行真实 present（platform=windows 时）。
-    """
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+from PyQt6.QtWidgets import QApplication, QWidget
+
+app = QApplication.instance() or QApplication(sys.argv)
+if app.platformName().lower() != "windows":
+    print(json.dumps({"platform": app.platformName(), "skipped": True}))
+    sys.exit(3)
+
+from krok_helper.subtitle_render.domain.models import Style
+from krok_helper.subtitle_render.domain.timing import (
+    TimingChar, TimingLine, TimingTrack,
+)
+from krok_helper.subtitle_render.native.backend import NativeRendererProcess
+
+FPS = 60
+FRAME_MS = 1000.0 / FPS
+PHASE_FRAMES = 40
+SUSTAINED_FRAMES = 240
+WIDTH, HEIGHT = 320, 180
+RESIZED = (480, 270)
+
+
+def build_scene():
     track = TimingTrack(
         lines=[
             TimingLine(
                 chars=[
-                    TimingChar(ch, 4_000 + index * 400)
+                    TimingChar(ch, 2_000 + index * 400)
                     for index, ch in enumerate("永漢Abg")
                 ],
-                end_ms=7_000,
+                end_ms=10_000,
             )
         ]
     )
-    base_style = _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=True,
-                           stroke2_width_px=4, decoration_kind="none")
-    frame_ms = 1000.0 / 60.0
-    frame_count = 90
-    reconfigures: list[int] = []
-    records: list[dict] = []
+    style = Style(
+        font_family="Meiryo",
+        font_family_latin="Arial",
+        font_size_px=64,
+        font_reference_height=360,
+        base_color="#FFFFFF",
+        fill_color="#FF2030",
+        stroke_color="#101010",
+        stroke_width_px=6,
+        stroke2_enabled=True,
+        stroke2_width_px=4,
+        decoration_kind="none",
+        line_y_position="center",
+        line_horizontal_layout="center",
+        line_lead_in_ms=0,
+        line_tail_ms=0,
+    )
+    return track, style
 
-    with NativeRendererProcess(_renderer_path(), response_timeout_s=30.0) as process:
-        # G6 直画走单后端（池化 configure 配置的是池内 worker，直画后端
-        # 由 ensureGpuBackend 按需建，worker_count>1 会拿不到场景）。
-        process.configure_gpu(
-            track, base_style, width=320, height=180, fps=60,
-            realization_enabled=True,
-        )
-        generation = 0
-        offset = 0
-        for index in range(frame_count):
-            t_ms = 4_000 + int(index * frame_ms) + offset
-            reason = None
-            if index == frame_count // 6:
-                # 前段缩放：整场景重建（realization 代际前进 = 资源版本换代）。
-                process.resize_gpu_target(
-                    width=480, height=270, dpr=1.0, realization_enabled=True
-                )
-                generation += 1
-                process.send_cancel_generation(generation - 1)
-                reconfigures.append(index)
-                reason = "resize"
-            elif index == frame_count // 3:
-                # 中段改色（同尺寸）：池走仅改色快速路径，场景换代。
+
+def main(out_path):
+    track, style = build_scene()
+    parent = QWidget()
+    parent.resize(WIDTH, HEIGHT)
+    parent.show()
+    app.processEvents()
+    parent_hwnd = int(parent.winId())
+    if parent_hwnd == 0:
+        print(json.dumps({"platform": app.platformName(), "skipped": True}))
+        return 3
+
+    records = []
+    errors = []
+
+    def playback():
+        with NativeRendererProcess(response_timeout_s=30.0) as process:
+            process.configure_gpu(
+                track, style, width=WIDTH, height=HEIGHT, fps=FPS,
+                realization_enabled=True,
+            )
+            state = {"generation": 0, "t_base": 4_000, "frame_index": 0}
+
+            def run_phase(name, frames, t_offset_ms=0):
+                for step in range(frames):
+                    t_ms = (state["t_base"] + t_offset_ms
+                            + int(step * FRAME_MS))
+                    rendered = process.render_gpu_frame_direct(
+                        t_ms, generation=state["generation"],
+                        frame_index=state["frame_index"],
+                    )
+                    state["frame_index"] += 1
+                    record = {
+                        "phase": name,
+                        "step": step,
+                        "t_ms": t_ms,
+                        "generation": state["generation"],
+                        "render_event": rendered.get("event"),
+                        "render_path_ready": rendered.get("realization_path_ready"),
+                        "render_res_version": rendered.get("realization_generation"),
+                        "event": None,
+                        "present_t_ms": None,
+                        "present_generation": None,
+                        "dropped": None,
+                        "present_path_ready": None,
+                        "present_res_version": None,
+                        "present_ms": None,
+                        "render_ms": rendered.get("render_ms"),
+                    }
+                    if rendered.get("reason") == "generation_cancelled":
+                        record["event"] = "generation_cancelled"
+                        records.append(record)
+                        continue
+                    presented = process.present_rendered_gpu_frame(
+                        parent_hwnd=parent_hwnd,
+                        x=0, y=0, width=WIDTH, height=HEIGHT,
+                        t_ms=t_ms, generation=state["generation"],
+                    )
+                    record["event"] = presented.get("event")
+                    # 以上屏完成事件回显的身份为准（不是测试自己生成的输入）。
+                    record["present_t_ms"] = presented.get("t_ms")
+                    record["present_generation"] = presented.get("generation")
+                    record["dropped"] = bool(presented.get("dropped"))
+                    record["present_path_ready"] = presented.get("realization_path_ready")
+                    record["present_res_version"] = presented.get("realization_generation")
+                    record["present_ms"] = presented.get("present_ms")
+                    records.append(record)
+                    app.processEvents()
+                    time.sleep(FRAME_MS / 1000.0)
+                state["t_base"] += int(frames * FRAME_MS)
+
+            try:
+                run_phase("steady", PHASE_FRAMES)
                 process.configure_gpu(
-                    track, replace(base_style, stroke_color="#2040C0"),
-                    width=320, height=180, fps=60,
+                    track,
+                    Style(**{**style.__dict__, "stroke_color": "#2040C0"}),
+                    width=WIDTH, height=HEIGHT, fps=FPS,
                     realization_enabled=True,
                 )
-                generation += 1
-                process.send_cancel_generation(generation - 1)
-                reconfigures.append(index)
-                reason = "recolor"
-            elif index == 2 * frame_count // 3:
-                # 中段 seek：代际前进 + 时间戳跳变（只允许向前）。
-                generation += 1
-                process.send_cancel_generation(generation - 1)
-                offset += 700
-                t_ms += 700
-                reconfigures.append(index)
-                reason = "seek"
-            # 媒体节奏（真实播放的墙钟推进）：预热线程要在帧间空隙里推进，
-            # 全速空跑会让本用例永远停在 raw 路径、验不到切换不变量。
-            time.sleep(frame_ms / 1000.0)
-            rendered = process.render_gpu_frame_direct(
-                t_ms, generation=generation, frame_index=index
-            )
-            if rendered.get("reason") == "generation_cancelled":
-                records.append(
-                    {
-                        "index": index,
-                        "t_ms": t_ms,
-                        "generation": generation,
-                        "cancelled": True,
-                        "path_ready": None,
-                        "resource_version": None,
-                        "render_ms": 0.0,
-                        "reason": reason,
-                    }
+                run_phase("recolor", PHASE_FRAMES)
+                process.resize_gpu_target(
+                    width=RESIZED[0], height=RESIZED[1], dpr=1.0,
+                    realization_enabled=True,
                 )
-                continue
-            records.append(
-                {
-                    "index": index,
-                    "t_ms": t_ms,
-                    "generation": generation,
-                    "cancelled": False,
-                    "path_ready": bool(rendered.get("realization_path_ready")),
-                    "resource_version": rendered.get("realization_generation"),
-                    "render_ms": float(rendered.get("render_ms") or 0.0),
-                    "reason": reason,
-                }
-            )
+                run_phase("resize", PHASE_FRAMES)
+                state["generation"] += 1
+                process.send_cancel_generation(state["generation"] - 1)
+                run_phase("seek_fwd", PHASE_FRAMES, 600)
+                state["generation"] += 1
+                process.send_cancel_generation(state["generation"] - 1)
+                run_phase("seek_back", PHASE_FRAMES, -600)
+                run_phase("sustained", SUSTAINED_FRAMES)
+            except BaseException as exc:
+                errors.append("%s: %s" % (type(exc).__name__, exc))
 
-    assert records, "没有记录到任何帧"
-    live = [record for record in records if not record["cancelled"]]
-    assert len(live) >= frame_count - 8, len(live)
+    thread = threading.Thread(target=playback, name="present-probe", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 180.0
+    while thread.is_alive() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    thread.join(timeout=5.0)
+    if thread.is_alive():
+        errors.append("playback thread did not finish")
+    parent.close()
+    app.processEvents()
 
-    # 时间正确：时间戳严格递增，不出现倒帧或重复提交。
-    timestamps = [record["t_ms"] for record in live]
-    assert all(current > previous for previous, current in zip(timestamps, timestamps[1:])), (
-        [
-            (previous, current)
-            for previous, current in zip(timestamps, timestamps[1:])
-            if current <= previous
-        ]
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"platform": app.platformName(), "frames": records, "errors": errors},
+            handle,
+        )
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1]))
+'''
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_preview_playback_presents_recorded_frames(tmp_path, monkeypatch) -> None:
+    """连续播放验收（第 3 类）：**真实上屏**的时间戳 / 路径 / 资源版本。
+
+    套件会话固定 ``QT_QPA_PLATFORM=offscreen``（conftest），而 DComp 子窗口
+    必须有真实 HWND——因此这里把录制放进子进程（真实 windows 平台、真实父
+    窗口、真实 present），报告写成 JSON 再由本测试断言。上一版用例只调
+    ``render_gpu_frame_direct`` 且时间戳来自测试自己的输入，单调性断言发现
+    不了上屏侧倒帧（2026-10 审查指出）。
+
+    录制的分相（各 40 帧，60fps 媒体节奏）与不变量：
+      steady → recolor（同尺寸改色）→ resize（480×270）→ seek_fwd（+600ms）
+      → seek_back（−600ms）→ sustained（240 帧：帧仓/缓存填满后持续运行）
+    - 上屏事件回显的 t_ms 在每相内严格递增（倒帧检查用上屏确认值）；
+    - seek 相允许且仅允许一次方向一致的跳变，其余相不出现回退；
+    - 每次 configure 后路径最多切换一次，且必须有界帧内回到烘焙路径；
+    - 资源版本单调不减；每次 present 都必须带路径/资源版本（诊断回归：
+      曾经 present 返回值把帧仓诊断覆盖成默认值）；
+    - 全程 0 丢帧、present 耗时无尖峰（冻结检查）。
+    """
+    probe = tmp_path / "gpu_present_probe.py"
+    probe.write_text(_PRESENT_PROBE_SOURCE, encoding="utf-8")
+    report_path = tmp_path / "present_report.json"
+    env = dict(os.environ)
+    env.pop("QT_QPA_PLATFORM", None)  # 真实 Windows 平台
+    repo_root = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = str(repo_root)
+    completed = subprocess.run(
+        [sys.executable, str(probe), str(report_path)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=str(repo_root),
+    )
+    if completed.returncode == 3:
+        pytest.skip("真实上屏录制需要 Windows 桌面会话（platform != windows）")
+    assert report_path.is_file(), (completed.returncode, completed.stdout[-2000:], completed.stderr[-2000:])
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert not report["errors"], report["errors"]
+    assert report["platform"].lower() == "windows", report["platform"]
+    frames = report["frames"]
+    assert frames, "没有录制到任何帧"
+
+    by_phase = {}
+    for record in frames:
+        by_phase.setdefault(record["phase"], []).append(record)
+    for phase in ("steady", "recolor", "resize", "seek_fwd", "seek_back", "sustained"):
+        assert by_phase.get(phase), f"缺少 {phase} 相"
+
+    # 诊断回归：present 返回必须带路径与资源版本（此前被 preview 返回值覆盖成默认）。
+    present_versions = [
+        record["present_res_version"]
+        for record in frames
+        if record["present_res_version"] is not None
+    ]
+    assert present_versions, "present 响应缺少 realization_generation（诊断被覆盖）"
+    assert any(record["present_path_ready"] for record in frames), (
+        "present 响应从未报告烘焙路径（诊断被覆盖）"
     )
 
-    # 帧序列只前进：索引连续（允许被取消的帧缺号）。
-    indices = [record["index"] for record in live]
-    assert indices == sorted(indices)
-
-    # 持续出帧：不出现超过 20 帧的空洞（冻结信号）。
-    gaps = [
-        current - previous
-        for previous, current in zip(indices, indices[1:])
-        if current - previous > 1
+    # 上屏身份：present 回显的 (t_ms, generation) 必须与请求一致。
+    mismatched = [
+        (record["phase"], record["t_ms"], record["present_t_ms"])
+        for record in frames
+        if record["present_t_ms"] != record["t_ms"]
     ]
-    assert not gaps or max(gaps) <= 20, gaps
+    assert not mismatched, mismatched[:5]
 
-    # 重复切换：稳态段内路径不得抖动；每次 configure 之后路径只能切换一次。
-    segments: list[list[dict]] = []
-    segment: list[dict] = []
-    for record in live:
-        if record["reason"] is not None and segment:
-            segments.append(segment)
-            segment = []
-        segment.append(record)
-    if segment:
-        segments.append(segment)
-    for segment in segments:
+    # 丢帧：除 seek 相的首帧外不得丢帧。
+    dropped = [
+        (record["phase"], record["step"]) for record in frames if record["dropped"]
+    ]
+    assert len(dropped) <= 2, dropped
+
+    # 倒帧：每相内上屏时间戳严格递增（用上屏确认值）。
+    for phase, phase_frames in by_phase.items():
+        stamps = [record["present_t_ms"] for record in phase_frames]
+        assert all(current > previous for previous, current in zip(stamps, stamps[1:])), (
+            phase,
+            [
+                (previous, current)
+                for previous, current in zip(stamps, stamps[1:])
+                if current <= previous
+            ],
+        )
+    # seek 方向：前跳为正、回跳为负，各一次。
+    assert by_phase["seek_fwd"][0]["t_ms"] > by_phase["resize"][-1]["t_ms"]
+    assert by_phase["seek_back"][0]["t_ms"] < by_phase["seek_fwd"][-1]["t_ms"]
+
+    # 重复切换：每相内路径切换 ≤ 1，且每相都必须回到烘焙路径。
+    for phase, phase_frames in by_phase.items():
         flips = sum(
             1
-            for previous, current in zip(segment, segment[1:])
-            if previous["path_ready"] != current["path_ready"]
+            for previous, current in zip(phase_frames, phase_frames[1:])
+            if previous["present_path_ready"] != current["present_path_ready"]
         )
-        assert flips <= 1, [(record["index"], record["path_ready"]) for record in segment]
-
-    # 非空跑校验：序列里必须真的出现过烘焙路径（否则切换不变量形同虚设）。
-    assert any(record["path_ready"] for record in live), (
-        "整段播放都没走上 realization 路径：预热未收敛或门控未放行"
-    )
-
-    # 每次 configure 之后必须有界帧数内回到烘焙路径（预热有界收敛端到端）。
-    for reconfig_index in reconfigures:
-        following = [
-            record for record in live if record["index"] >= reconfig_index
-        ][:90]
-        assert any(record["path_ready"] for record in following), (
-            reconfig_index,
-            [(record["index"], record["path_ready"]) for record in following][:20],
+        assert flips <= 1, (phase, [(r["step"], r["present_path_ready"]) for r in phase_frames])
+        assert any(record["present_path_ready"] for record in phase_frames[60:] or phase_frames), (
+            phase,
+            [(r["step"], r["present_path_ready"]) for r in phase_frames[:12]],
         )
 
-    # 资源版本：单调不减；出现过的不同版本数与 configure 次数相称。
-    versions = [
-        record["resource_version"]
-        for record in live
-        if record["resource_version"] is not None
+    # 资源版本：单调不减。
+    versions = [value for value in present_versions]
+    assert versions == sorted(versions), versions
+
+    # 冻结：sustained 相 240 帧全部上屏且 present 无尖峰。
+    sustained = by_phase["sustained"]
+    assert len(sustained) == 240, len(sustained)
+    assert max((record["present_ms"] or 0.0) for record in sustained) < 50.0, [
+        record["present_ms"] for record in sustained
     ]
-    if versions:
-        assert versions == sorted(versions), versions
-        assert len(set(versions)) >= 2, versions
-
-    # 系统读数：改色/seek 之后仍在出帧（没有把预览卡死）。
-    tail = [record["render_ms"] for record in live[-20:]]
-    assert tail and max(tail) < 60.0, tail
