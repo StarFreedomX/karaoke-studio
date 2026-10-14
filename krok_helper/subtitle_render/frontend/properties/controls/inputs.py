@@ -909,7 +909,8 @@ class WheelFocusedFontComboBox(WheelFocusedComboBox):
                 self.setInherited()
             return
         if index == self.currentIndex():
-            self.currentFontChanged.emit(self.currentFont())
+            # 字体族未变化时不再补发 currentFontChanged：下游会因此
+            # 无差别刷新四组字重下拉（每次改字号都触发，全部在 UI 线程）。
             return
         self.setCurrentIndex(index)
 

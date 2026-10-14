@@ -1968,6 +1968,7 @@ class SubtitleRenderWindow(QWidget):
         if plan.selected_scheme_key is not None:
             self._selected_scheme_key = plan.selected_scheme_key
         self._property_panel.set_style(self._style)
+        self._property_panel.mark_style_relayout_full()
         self._property_panel.set_current_scheme_key(self._selected_scheme_key)
         self._selected_scheme_key = self._property_panel.current_scheme_key()
         self._preview_panel.set_style(self._style)
@@ -2025,6 +2026,7 @@ class SubtitleRenderWindow(QWidget):
             if migrated != self._style:
                 self._style = migrated
                 self._property_panel.set_style(self._style)
+                self._property_panel.mark_style_relayout_full()
                 self._preview_panel.set_style(self._style)
                 self._lyrics_panel.set_style(self._style)
                 self._mark_project_dirty()
@@ -2736,6 +2738,7 @@ class SubtitleRenderWindow(QWidget):
                     video_height,
                 )
                 self._property_panel.set_style(self._style)
+                self._property_panel.mark_style_relayout_full()
                 self._preview_panel.set_style(self._style)
                 self._lyrics_panel.set_style(self._style)
             self._sync_output_size_to_video(self._video_info)
@@ -4949,6 +4952,9 @@ class SubtitleRenderWindow(QWidget):
         self._style = style
         self._remember_style_preferences(previous, style)
         self._property_panel.set_style(style)
+        # 撤销/重做属于外部灌入：显式 sticky FULL，防抖窗口内后续局部
+        # mark 不得把它掩盖成局部刷新。
+        self._property_panel.mark_style_relayout_full()
         # 撤销/重做是离散动作：停掉防抖计时器后即时重刷，不给过期触发留窗口。
         self._apply_preview_style_now()
         self._clamp_active_title_index()
@@ -5262,6 +5268,8 @@ class SubtitleRenderWindow(QWidget):
             replace(self._style, title_overlays=overlays),
             emit=True,
         )
+        # 标题条目替换属于仅标题变化：走 "titles" 局部重排。
+        self._property_panel.mark_style_relayout_scope("titles")
 
     def _title_source_start(self) -> Optional[int]:
         """字幕源下拉里第一个标题条目的下标；无主字幕时不显示标题源。"""
@@ -5446,13 +5454,17 @@ class SubtitleRenderWindow(QWidget):
         """
         if self._timing_track is None or self._loading_project:
             return
+        # 轨道字符块的样式更新与显示窗口重算解耦：busy 时早退不能顺带跳过
+        # set_style（纯 karaoke_anim 修改可能被判为轻量动画而不触发窗口
+        # 重算，块上的有效动画档不能因此滞后）。
+        self._tracks_view.set_style(style_snapshot := self._style)
         if self._tracks_window_worker_busy:
             self._tracks_window_rerun_pending = True
             return
         self._tracks_window_generation += 1
         generation = self._tracks_window_generation
         tracks = list(self._all_tracks())
-        style = self._style
+        style = style_snapshot
         logical_w = self._screen_settings.width
         logical_h = self._screen_settings.height
 
@@ -5479,7 +5491,6 @@ class SubtitleRenderWindow(QWidget):
             self._tracksViewWindowsReady.emit(generation, windows)
 
         self._tracks_window_worker_busy = True
-        self._tracks_view.set_style(style)
         threading.Thread(
             target=compute, name="tracks-window-refresh", daemon=True
         ).start()
@@ -8374,6 +8385,7 @@ class SubtitleRenderWindow(QWidget):
             schemes.update(from_presets)
             self._style = replace(self._style, custom_style_schemes=schemes)
             self._property_panel.set_style(self._style)
+            self._property_panel.mark_style_relayout_full()
             self._preview_panel.set_style(self._style)
             self._lyrics_panel.set_style(self._style)
             self._schedule_persisted_state_save()
@@ -8836,6 +8848,7 @@ class SubtitleRenderWindow(QWidget):
         self._loading_project = True
         try:
             self._property_panel.set_style(self._style)
+            self._property_panel.mark_style_relayout_full()
             self._preview_panel.set_style(self._style)
             self._lyrics_panel.set_style(self._style)
             self._clamp_active_title_index()

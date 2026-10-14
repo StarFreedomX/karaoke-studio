@@ -9067,7 +9067,14 @@ def test_main_window_marks_pure_color_preview_as_paint_scope(qapp, monkeypatch):
     win._apply_preview_style_now()
     assert seen[-1] == "paint"
 
+    # 字号等布局输入变化走 "layout" 局部差分（行级摆放原位更新，预览侧
+    # include_placement=True 消费）；防抖窗口内只有这一个 scope 时原样
+    # 取走。字号后紧接改色（scope 并存）则合并回落全量 None。
     win._apply_style(replace(win._style, font_size_px=win._style.font_size_px + 1))
+    win._apply_preview_style_now()
+    assert seen[-1] == "layout"
+    win._apply_style(replace(win._style, font_size_px=win._style.font_size_px + 1))
+    win._apply_style(replace(win._style, fill_color="#654321"))
     win._apply_preview_style_now()
     assert seen[-1] is None
     win.close()
@@ -10782,7 +10789,7 @@ def test_screen_height_rescale_uses_targeted_property_sync(qapp, monkeypatch):
 
 
 def test_title_update_marks_partial_relayout_scope(qapp):
-    """标题条目编辑标记 "titles" 局部重排；常规样式编辑与全量同步复位。"""
+    """标题条目编辑标记 "titles" 局部重排；scope 只累加、take 时消费。"""
     panel = PropertyPanel()
     panel.set_style(Style())
 
@@ -10791,14 +10798,19 @@ def test_title_update_marks_partial_relayout_scope(qapp):
     # 取后复位：第二次取为全量
     assert panel.take_style_relayout_scope() is None
 
-    # 常规样式编辑复位 scope
+    # 常规样式编辑不清 scope：与先前编辑的 scope 并集合并（真实链路中
+    # 宿主 _apply_style 会补 "layout"/"paint" mark），多 scope 并存时
+    # 取走回落全量，杜绝「字号后改色被降级成纯配色刷新」。
     panel._update_title(0, fade_in_ms=900)
     panel._update_style(stroke_width_px=max(Style.stroke_width_px + 1, 1))
+    panel.mark_style_relayout_scope("layout")
     assert panel.take_style_relayout_scope() is None
 
-    # 全量 set_style（外部灌入 / 撤销重做等）复位 scope
+    # 全量 set_style（外部灌入 / 撤销重做等）同样不清 scope——正确性由
+    # 布局签名闸门把关，scope 只是性能提示。
     panel._update_title(0, fade_in_ms=800)
     panel.set_style(replace(Style(), font_size_px=Style.font_size_px + 4), emit=True)
+    panel.mark_style_relayout_scope("layout")
     assert panel.take_style_relayout_scope() is None
 
 

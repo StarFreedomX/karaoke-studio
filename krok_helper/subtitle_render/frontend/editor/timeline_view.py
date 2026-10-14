@@ -66,6 +66,7 @@ from krok_helper.subtitle_render.domain.timing import (
 )
 from krok_helper.subtitle_render.domain.models import (
     Style,
+    effective_karaoke_animation,
     style_with_line_animation,
 )
 
@@ -381,7 +382,14 @@ class TrackTimelineView(QWidget):
         """设置用于解析逐行有效入退场特效的当前样式。"""
         if style == self._style:
             return
+        # 轨道块只在 Utopia 逐字动画下依赖样式（resolve_utopia_visual_intervals
+        # 其余情况一律回退源时间轴）。两个非 Utopia 样式之间切换时块快照不变，
+        # 跳过整轨重建——改字号/配色/描边这类高频编辑不该带着轨道全量重算。
+        was_utopia = effective_karaoke_animation(self._style) == "utopia"
+        is_utopia = effective_karaoke_animation(style) == "utopia"
         self._style = style
+        if not was_utopia and not is_utopia:
+            return
         self._rebuild_lanes()
         self.update()
 

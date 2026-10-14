@@ -235,6 +235,9 @@ from krok_helper.subtitle_render.engine.text.font_weight import (
     physical_weight_styles,
     resolve_weight_plan,
 )
+from krok_helper.subtitle_render.engine.text.font_capabilities import (
+    capabilities_generation,
+)
 
 _GLOBAL_SCHEME_KEY = "global"
 _CUSTOM_SCHEME_PREFIX = "custom:"
@@ -323,6 +326,34 @@ _FONT_CARD_FIELDS: tuple[str, ...] = (
 「应用到其他角色」只搬这些；斜体、参与注音高度计算与配色等卡外项不动。
 """
 
+# ── 方案控件分组同步的字段分类（批次1 局部减负）────────────────────────
+# _sync_subtitle_scheme_controls 按这三组拆分；_update_style 只同步实际
+# 受影响的组，改字号不再连带刷配色/填充，改颜色不再连带刷字体下拉。
+_FONT_SYNC_FIELDS = frozenset({
+    "font_family", "font_family_latin",
+    "font_size_px", "latin_font_size_px",
+    "latin_font_stretch_pct",
+    "font_weight", "latin_font_weight",
+    "ruby_font_family", "ruby_font_family_latin",
+    "ruby_font_size_px", "ruby_latin_font_size_px",
+    "ruby_latin_font_stretch_pct",
+    "ruby_font_weight", "ruby_latin_font_weight",
+    "italic", "affects_ruby_anchor",
+    "ruby_font_follow_main",
+})
+_STROKE_SYNC_FIELDS = frozenset({
+    field for field in _FONT_CARD_FIELDS
+    if "stroke" in field
+})
+# 排版参数与注音间距：不在字体/描边/配色任何一组的同步范围内，也没有
+# 归入配色组的依据——按保守规则全量同步，不做无依据的分组。
+_LAYOUT_ONLY_SYNC_FIELDS = frozenset({
+    "letter_spacing_px",
+    "space_width_percent",
+    "allow_biting",
+    "ruby_gap_px",
+})
+
 
 def _available_font_weights(family: str) -> tuple[int, ...]:
     """Return the distinct weights Qt can actually resolve for a font family.
@@ -351,6 +382,9 @@ _GENERIC_FONT_STYLE_NAMES = frozenset({
 })
 
 
+_FONT_WEIGHT_ITEMS_CACHE: dict[tuple[int, str], tuple[tuple[int, str], ...]] = {}
+
+
 def _font_weight_combo_items(family: str) -> tuple[tuple[int, str], ...]:
     """字重下拉选项：标准预设 ∪ 该字体的真实字重，非原生档标注。
 
@@ -358,7 +392,15 @@ def _font_weight_combo_items(family: str) -> tuple[tuple[int, str], ...]:
     可变字体轴内=真实插值（不标）、轴下限之下=「越界」（钳制到端
     点）、凡比基 face 重的缺档=「模拟」（统一公式的轮廓膨胀放大）。
     真实字重额外带命名实例名（如 425 · R）。
+
+    结果按 (字体库代际, 字体族) 缓存：字体装卸 / 同名字体替换会推进
+    capabilities_generation()，缓存自动失效；同代际内四个槽位与高频
+    样式编辑直接复用，跳过逐字重解析。
     """
+    key = (capabilities_generation(), str(family))
+    cached = _FONT_WEIGHT_ITEMS_CACHE.get(key)
+    if cached is not None:
+        return cached
     physical = _available_font_weights(family)
     style_names = dict(physical_weight_styles(family))
     weights = sorted(set(_FONT_WEIGHT_PRESETS) | set(physical))
@@ -372,7 +414,12 @@ def _font_weight_combo_items(family: str) -> tuple[tuple[int, str], ...]:
         if mark:
             label += f"（{mark}）"
         items.append((weight, label))
-    return tuple(items)
+    result = tuple(items)
+    if len(_FONT_WEIGHT_ITEMS_CACHE) > 64:
+        # 有界缓存：只在字体库代际推进或字体族名很多时增长，正常会话远小于此。
+        _FONT_WEIGHT_ITEMS_CACHE.clear()
+    _FONT_WEIGHT_ITEMS_CACHE[key] = result
+    return result
 
 
 _LIT_FIELDS = {
@@ -689,6 +736,10 @@ class PropertyPanel(QWidget):
         super().__init__(parent)
         self._style = Style()
         self._syncing = False
+        # 字重下拉最近一次重建对应的（字体库代际, 字体族），按槽位。
+        # 代际或字体族变化才整表 clear+重填；选项不变时只调整选中项。
+        # 改字号/颜色等操作会高频走到这里，全部发生在 UI 线程。
+        self._weight_combo_families: dict[tuple[str, str], tuple[int, str]] = {}
         # 「跟随字体」大小推导基准的主轨引用（auto/role 档回显与渲染同源，
         # 见 auto_appearance_basis）；None = 尚未收到轨道，回显用全局主样式
         # 旧口径。引用不拥有轨道——内容变更由宿主重推。
@@ -701,11 +752,18 @@ class PropertyPanel(QWidget):
         self._timing_follows: list[bool] = [True]
         self._timing_override_views: list[Optional[dict]] = [None]
         self._timing_scope_index: int = 0
-        # 最近一次样式变更的局部重排 scope（None = 全量）：
-        # _update_title 置 "titles"，_update_style / set_style 全量同步路径置
-        # None；主窗口防抖刷新时经 take_style_relayout_scope() 取走并透传给
-        # 预览。scope 只是性能提示——正确性由歌词布局样式签名把关。
-        self._pending_style_relayout_scope: Optional[str] = None
+        # 待生效的局部重排 scope 集合（空 = 全量）：
+        # _update_title 置 "titles"，_update_style / set_style 全量同步路径清空；
+        # 主窗口防抖刷新时经 take_style_relayout_scope() 取走并透传给预览。
+        # 集合并集语义：防抖窗口内先后出现多个 scope（如先字号 "layout" 再
+        # 改色 "paint"）不能互相覆盖或降级，取走时只有单一 scope 才返回它，
+        # 否则按全量重排（保守方向）。scope 只是性能提示——正确性由歌词
+        # 布局样式签名把关。
+        # 显式全量失效标记：外部灌入 / 撤销重做 / 恢复默认 / 整体缩放等
+        # 必须全量重排的变更置位。不能用「清空 scope 集合」表示全量——
+        # 否则同窗口随后一次 paint/titles mark 会把它掩盖成局部刷新。
+        self._pending_style_relayout_full = False
+        self._pending_style_relayout_scopes: set[str] = set()
         # 控件是否已按 _style 完整同步过一次；未同步前不能走 set_style 的等值快路径。
         self._style_synced = False
         self._canvas_slider_controls: list[tuple[Any, str]] = []
@@ -1115,10 +1173,12 @@ class PropertyPanel(QWidget):
             self._style = replace(style)
             self._sync_font_preview()
             return
-        # 全量同步（外部灌入 / 撤销重做 / 恢复默认等）不再是「仅标题变化」，
-        # 清掉待取的局部 scope。注意必须放在等值快路径之后：刚由 _update_title
-        # 发出的样式被宿主回流时，scope 还要留给随后的预览刷新取用。
-        self._pending_style_relayout_scope = None
+        # 全量同步（外部灌入 / 撤销重做 / 恢复默认等）**不**清待取 scope：
+        # 防抖窗口内先前编辑标记的 scope（如字号 "layout"）若被这里清掉，
+        # 紧接着的一次仅配色修改会被降级成 "paint" 局部刷新。scope 之间
+        # 用并集合并，取走时多 scope 并存自动回落全量；正确性由布局签名
+        # 闸门把关（scope 只是性能提示）。set_rescaled_style 这类显式全量
+        # 几何重排仍自行清空。
         self._style = replace(style)
         current_key = self._current_scheme_key()
         self._syncing = True
@@ -1353,7 +1413,9 @@ class PropertyPanel(QWidget):
         """
         self._title_text_change_timer.stop()
         self._title_text_pending.clear()
-        self._pending_style_relayout_scope = None
+        # 整体几何缩放是显式全量重排：sticky FULL，同窗口后续局部 mark
+        # 不得掩盖。
+        self.mark_style_relayout_full()
         self._style = replace(style)
         self._syncing = True
         try:
@@ -1706,6 +1768,41 @@ class PropertyPanel(QWidget):
             current_data = weight_combo.currentData()
             preferred_weight = int(current_data) if current_data is not None else 400
         family = self._effective_font_family(slot)
+        # 缓存键包含字体库代际：字体装卸 / 同名字体替换推进代际后，
+        # 可用字重与「模拟/越界」标注必须重新解析，不能沿用旧选项。
+        cache_key = (capabilities_generation(), family)
+        if (
+            self._weight_combo_families.get(slot) == cache_key
+            and weight_combo.count() > 0
+        ):
+            # 选项表已对应该字体族与代际：分开处理「重建选项」与「选择
+            # 字重」——只有目标字重变化时不 clear()/addItem()，仅调整
+            # 选中项（下拉重建是 UI 线程的隐性开销大户）。
+            if weight_combo.currentData() == preferred_weight:
+                return preferred_weight
+            weights = tuple(
+                weight_combo.itemData(index)
+                for index in range(weight_combo.count())
+                if weight_combo.itemData(index) is not None
+            )
+            if preferred_weight == 0 and inheritance_label is not None:
+                selected_weight = 0
+            else:
+                selected_weight = min(
+                    weights,
+                    key=lambda candidate: (
+                        abs(int(candidate) - int(preferred_weight)),
+                        int(candidate),
+                    ),
+                )
+            was_blocked = weight_combo.blockSignals(True)
+            try:
+                weight_combo.setCurrentIndex(
+                    max(0, weight_combo.findData(selected_weight))
+                )
+            finally:
+                weight_combo.blockSignals(was_blocked)
+            return selected_weight
         items = _font_weight_combo_items(family)
         weights = tuple(weight for weight, _label in items)
         if preferred_weight == 0 and inheritance_label is not None:
@@ -1728,6 +1825,7 @@ class PropertyPanel(QWidget):
             )
         finally:
             weight_combo.blockSignals(was_blocked)
+        self._weight_combo_families[slot] = cache_key
         return selected_weight
 
     def _refresh_font_weight_combos(
@@ -1764,14 +1862,16 @@ class PropertyPanel(QWidget):
     def _on_font_family_changed(
         self, slot: tuple[str, str], font: QFont
     ) -> None:
+        # 程序回填（_sync_subtitle_scheme_controls 等）期间直接忽略：
+        # 字重下拉由同步流程自己按方案值刷新，这里再刷一遍是纯重复工作。
+        if self._syncing:
+            return
         previous_weights = {
             current_slot: int(controls[1].currentData())
             for current_slot, controls in self._font_controls.items()
             if controls[1].currentData() is not None
         }
         resolved_weights = self._refresh_font_weight_combos(previous_weights)
-        if self._syncing:
-            return
 
         font_combo, _weight_combo, _inheritance_label = self._font_controls[slot]
         family_field = {
@@ -2384,24 +2484,39 @@ class PropertyPanel(QWidget):
         finally:
             self._syncing = False
         # 仅标题条目变化：预览重排可走局部路径（歌词计划按签名复用）。
-        self._pending_style_relayout_scope = "titles"
+        self._pending_style_relayout_scopes.add("titles")
         self.styleChanged.emit(self._style)
 
     def take_style_relayout_scope(self) -> Optional[str]:
-        """取走最近一次样式变更的局部重排 scope（取后复位为全量）。
+        """取走防抖窗口内累积的局部重排 scope（取后复位为全量）。
 
         返回 ``"titles"`` 表示只有标题条目变化，``"paint"`` 表示只有
-        不影响布局的颜色变化；``None`` 表示走全量重排。主窗口在防抖
-        刷新预览前调用。
+        不影响布局的颜色变化，``"layout"`` 表示布局输入变化（行级摆放
+        原位差分）；``None`` 表示走全量重排。主窗口在防抖刷新预览前调用。
+
+        防抖期间累积了多个不同 scope 时返回 ``None``：局部分类彼此不兼容
+        （字号后紧接改色不能降级成纯配色刷新），保守走全量。显式
+        ``mark_style_relayout_full`` 优先级最高，同窗口任何后续局部 mark
+        都不能把它掩盖。
         """
-        scope = self._pending_style_relayout_scope
-        self._pending_style_relayout_scope = None
-        return scope
+        full = self._pending_style_relayout_full
+        scopes = self._pending_style_relayout_scopes
+        self._pending_style_relayout_full = False
+        self._pending_style_relayout_scopes = set()
+        if full or len(scopes) != 1:
+            return None
+        return next(iter(scopes))
+
+    def mark_style_relayout_full(self) -> None:
+        """Mark the next preview refresh as a full relayout (sticky)."""
+        self._pending_style_relayout_full = True
 
     def mark_style_relayout_scope(self, scope: str) -> None:
         """Mark one host-classified safe partial relayout for the next preview."""
-        if scope in {"titles", "paint"}:
-            self._pending_style_relayout_scope = scope
+        if self._pending_style_relayout_full:
+            return
+        if scope in {"titles", "paint", "layout"}:
+            self._pending_style_relayout_scopes.add(scope)
 
     def _derive_title_custom_windows(
         self, title: TitleOverlay
@@ -4462,77 +4577,96 @@ class PropertyPanel(QWidget):
             self._syncing = False
         self._sync_subtitle_scheme_controls()
 
-    def _sync_subtitle_scheme_controls(self) -> None:
+    def _sync_subtitle_scheme_controls(
+        self, groups: Optional[set[str]] = None
+    ) -> None:
+        """同步方案（字体/描边/配色/填充）控件；可只同步指定组。
+
+        ``groups`` 为 ``None`` 时全量同步（方案切换、导入、撤销等）；
+        传入 ``{"font", "stroke", "color"}`_ 的子集时只跑对应组——
+        ``_update_style`` 用它避免改字号连带刷配色、改颜色连带刷字体。
+        """
         if not hasattr(self, "_singer_combo"):
             return
+        if groups is None:
+            groups = {"font", "stroke", "color"}
         was_syncing = self._syncing
         self._syncing = True
         try:
-            self._font_combo.setCurrentFont(QFont(str(self._scheme_value("font_family"))))
-            latin_family = self._scheme_value("font_family_latin")
-            if latin_family is None:
-                self._font_latin_combo.setInherited()
-            else:
-                self._font_latin_combo.setCurrentFont(QFont(str(latin_family)))
-            self._font_size_spin.setValue(int(self._scheme_value("font_size_px")))
-            latin_size = self._scheme_value("latin_font_size_px")
-            self._font_latin_size_spin.setValue(
-                0 if latin_size is None else int(latin_size)
-            )
-            self._latin_font_stretch_spin.setValue(
-                int(self._scheme_value("latin_font_stretch_pct") or 100)
-            )
-            latin_weight = self._scheme_value("latin_font_weight")
-            self._italic_check.setChecked(bool(self._scheme_value("italic")))
-            self._ruby_anchor_check.setChecked(
-                bool(self._scheme_value("affects_ruby_anchor"))
-            )
-            ruby_family = self._scheme_value("ruby_font_family")
-            ruby_size = self._scheme_value("ruby_font_size_px")
-            ruby_weight = self._scheme_value("ruby_font_weight")
-            if ruby_family is None:
-                self._ruby_font_combo.setInherited()
-            else:
-                self._ruby_font_combo.setCurrentFont(QFont(str(ruby_family)))
-            self._ruby_font_size_spin.setValue(int(ruby_size))
-            ruby_latin_family = self._scheme_value("ruby_font_family_latin")
-            ruby_latin_size = self._scheme_value("ruby_latin_font_size_px")
-            ruby_latin_weight = self._scheme_value("ruby_latin_font_weight")
-            if ruby_latin_family is None:
-                self._ruby_font_latin_combo.setInherited()
-            else:
-                self._ruby_font_latin_combo.setCurrentFont(QFont(str(ruby_latin_family)))
-            self._ruby_font_latin_size_spin.setValue(
-                0 if ruby_latin_size is None else int(ruby_latin_size)
-            )
-            self._ruby_latin_font_stretch_spin.setValue(
-                int(self._scheme_value("ruby_latin_font_stretch_pct")
-                    or self._scheme_value("latin_font_stretch_pct") or 100)
-            )
-            self._sync_font_size_follow_controls()
-            self._refresh_font_weight_combos(
-                {
-                    ("main", "japanese"): int(self._scheme_value("font_weight")),
-                    ("main", "latin"): (
-                        0 if latin_weight is None else int(latin_weight)
-                    ),
-                    ("ruby", "japanese"): (
-                        0 if ruby_weight is None else int(ruby_weight)
-                    ),
-                    ("ruby", "latin"): (
-                        0 if ruby_latin_weight is None else int(ruby_latin_weight)
-                    ),
-                }
-            )
-            self._sync_font_stroke_controls()
-            self._sync_color_subject_style_controls()
-            self._set_ruby_color_controls_visible(
-                self._current_color_subject_key() == "ruby"
-            )
-            self._sync_ruby_color_follow_controls()
-            self._sync_color_fill_controls()
+            if "font" in groups:
+                self._sync_scheme_font_controls()
+            if "stroke" in groups:
+                self._sync_font_stroke_controls()
+            if "color" in groups:
+                self._sync_scheme_color_controls()
         finally:
             self._syncing = was_syncing
+
+    def _sync_scheme_font_controls(self) -> None:
+        self._font_combo.setCurrentFont(QFont(str(self._scheme_value("font_family"))))
+        latin_family = self._scheme_value("font_family_latin")
+        if latin_family is None:
+            self._font_latin_combo.setInherited()
+        else:
+            self._font_latin_combo.setCurrentFont(QFont(str(latin_family)))
+        self._font_size_spin.setValue(int(self._scheme_value("font_size_px")))
+        latin_size = self._scheme_value("latin_font_size_px")
+        self._font_latin_size_spin.setValue(
+            0 if latin_size is None else int(latin_size)
+        )
+        self._latin_font_stretch_spin.setValue(
+            int(self._scheme_value("latin_font_stretch_pct") or 100)
+        )
+        latin_weight = self._scheme_value("latin_font_weight")
+        self._italic_check.setChecked(bool(self._scheme_value("italic")))
+        self._ruby_anchor_check.setChecked(
+            bool(self._scheme_value("affects_ruby_anchor"))
+        )
+        ruby_family = self._scheme_value("ruby_font_family")
+        ruby_size = self._scheme_value("ruby_font_size_px")
+        ruby_weight = self._scheme_value("ruby_font_weight")
+        if ruby_family is None:
+            self._ruby_font_combo.setInherited()
+        else:
+            self._ruby_font_combo.setCurrentFont(QFont(str(ruby_family)))
+        self._ruby_font_size_spin.setValue(int(ruby_size))
+        ruby_latin_family = self._scheme_value("ruby_font_family_latin")
+        ruby_latin_size = self._scheme_value("ruby_latin_font_size_px")
+        ruby_latin_weight = self._scheme_value("ruby_latin_font_weight")
+        if ruby_latin_family is None:
+            self._ruby_font_latin_combo.setInherited()
+        else:
+            self._ruby_font_latin_combo.setCurrentFont(QFont(str(ruby_latin_family)))
+        self._ruby_font_latin_size_spin.setValue(
+            0 if ruby_latin_size is None else int(ruby_latin_size)
+        )
+        self._ruby_latin_font_stretch_spin.setValue(
+            int(self._scheme_value("ruby_latin_font_stretch_pct")
+                or self._scheme_value("latin_font_stretch_pct") or 100)
+        )
+        self._sync_font_size_follow_controls()
+        self._refresh_font_weight_combos(
+            {
+                ("main", "japanese"): int(self._scheme_value("font_weight")),
+                ("main", "latin"): (
+                    0 if latin_weight is None else int(latin_weight)
+                ),
+                ("ruby", "japanese"): (
+                    0 if ruby_weight is None else int(ruby_weight)
+                ),
+                ("ruby", "latin"): (
+                    0 if ruby_latin_weight is None else int(ruby_latin_weight)
+                ),
+            }
+        )
+
+    def _sync_scheme_color_controls(self) -> None:
+        self._sync_color_subject_style_controls()
+        self._set_ruby_color_controls_visible(
+            self._current_color_subject_key() == "ruby"
+        )
+        self._sync_ruby_color_follow_controls()
+        self._sync_color_fill_controls()
 
     def _sync_font_stroke_controls(self) -> None:
         if not hasattr(self, "_font_stroke_controls"):
@@ -4765,6 +4899,35 @@ class PropertyPanel(QWidget):
         ):
             control.setEnabled(volume_manual)
 
+    @staticmethod
+    def _scheme_sync_groups_for_changes(
+        changes: dict[str, object],
+    ) -> Optional[set[str]]:
+        """按修改字段挑选要同步的方案控件组；不可判定时返回 None（全量）。
+
+        保守规则：方案表整体变化（singer_style_overrides /
+        custom_style_schemes）、排版参数（字间距/空格宽/咬字/注音间距）
+        或未分类字段全量同步；字号/字体族变化连带描边组（注音描边按
+        主/注音字号比例换算显示）。
+        """
+        hit = set(changes)
+        if hit & {"singer_style_overrides", "custom_style_schemes"}:
+            return None
+        scheme_hit = hit & set(_SCHEME_FIELDS)
+        if not scheme_hit:
+            return None
+        if scheme_hit & _LAYOUT_ONLY_SYNC_FIELDS:
+            return None
+        groups: set[str] = set()
+        if scheme_hit & _FONT_SYNC_FIELDS:
+            groups.update({"font", "stroke"})
+        if scheme_hit & _STROKE_SYNC_FIELDS:
+            groups.add("stroke")
+        remaining = scheme_hit - _FONT_SYNC_FIELDS - _STROKE_SYNC_FIELDS
+        if remaining:
+            groups.add("color")
+        return groups or None
+
     def _update_style(self, _force_global: bool = False, **changes) -> None:
         if self._syncing:
             return
@@ -4820,8 +4983,8 @@ class PropertyPanel(QWidget):
                 changes[name_field] = (
                     role_names[0] if role_names else SCANLINE_GLOBAL_ROLE_KEY
                 )
-        # 常规样式编辑不再属于「仅标题变化」，复位局部重排 scope。
-        self._pending_style_relayout_scope = None
+        # 常规样式编辑不清 scope（与 set_style 同理：防抖窗口内与先前编辑
+        # 的 scope 并集合并，取走时多 scope 并存回落全量）。
         result = self._style_controller.update(
             self._style,
             changes,
@@ -4870,7 +5033,9 @@ class PropertyPanel(QWidget):
             if set(changes).intersection(
                 _SCHEME_FIELDS | {"singer_style_overrides", "custom_style_schemes"}
             ):
-                self._sync_subtitle_scheme_controls()
+                self._sync_subtitle_scheme_controls(
+                    self._scheme_sync_groups_for_changes(changes)
+                )
             if set(changes).intersection(
                 {"ruby_colors_follow_main", "ruby_karaoke_colors"}
                 | set(_RUBY_DECORATION_SLOTS.values())
