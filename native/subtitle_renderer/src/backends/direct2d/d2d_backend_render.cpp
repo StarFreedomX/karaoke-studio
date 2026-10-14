@@ -623,6 +623,136 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         sharedInstanceTransformActive = true;
         impl_->realizationContext->DrawGeometryRealization(realization, brush);
     };
+    // 静态层蒙版路径（2026-10 原型）：把 baked 路径的栅格化结果（完整绘制
+    // 变换烘进内容）缓存成小位图，此后整帧 1:1 NEAREST blit。生成帧与命中
+    // 帧画同一张位图 ⇒ 一致性由构造保证；与直接 DrawGeometryRealization 的
+    // 逐位一致是验收门槛（同栅格化器、同变换、同画笔，src-over 数学相同）。
+    const auto drawStaticMasked = [&] (
+        ID2D1GeometryRealization *realization,
+        ID2D1Geometry *geometry,
+        ID2D1Brush *brush,
+        const D2D1_MATRIX_3X2_F &instanceTransform,
+        float strokeWidthPad
+    ) -> bool {
+        if (!impl_->staticMaskEnabled
+            || realization == nullptr || geometry == nullptr) {
+            return false;
+        }
+        const auto key = std::make_pair(realization, brush);
+        auto found = impl_->staticMaskCache.find(key);
+        if (found == impl_->staticMaskCache.end()) {
+            const D2D1_MATRIX_3X2_F full =
+                instanceTransform * realizationBaseTransform;
+            D2D1_RECT_F bounds{};
+            if (FAILED(geometry->GetBounds(&full, &bounds))) {
+                return false;
+            }
+            const float pad = strokeWidthPad + 4.0f;
+            const float originX = std::floor(bounds.left - pad);
+            const float originY = std::floor(bounds.top - pad);
+            const float width = std::ceil(bounds.right + pad) - originX;
+            const float height = std::ceil(bounds.bottom + pad) - originY;
+            if (width < 1.0f || height < 1.0f
+                || width > 8192.0f || height > 8192.0f) {
+                return false;
+            }
+            // 惰性建独立生成 context：主帧渲染在 BeginDraw 作用域内，同一
+            // context 嵌套 BeginDraw 非法；同设备 realization/brush 可跨
+            // context 使用（与预热线程的 workerContext 同款做法）。
+            if (impl_->staticMaskContext == nullptr) {
+                Microsoft::WRL::ComPtr<ID2D1DeviceContext> baseContext;
+                if (FAILED(device_.d2dDevice()->CreateDeviceContext(
+                        D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                        baseContext.ReleaseAndGetAddressOf()
+                    ))
+                    || FAILED(baseContext.As(&impl_->staticMaskContext))) {
+                    return false;
+                }
+            }
+            D2D1_BITMAP_PROPERTIES1 properties{};
+            properties.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+            properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+            Microsoft::WRL::ComPtr<ID2D1Bitmap1> surface;
+            const auto generateStart = Clock::now();
+            if (FAILED(impl_->staticMaskContext->CreateBitmap(
+                    D2D1_SIZE_U{
+                        static_cast<UINT>(width),
+                        static_cast<UINT>(height),
+                    },
+                    nullptr,
+                    0,
+                    &properties,
+                    surface.ReleaseAndGetAddressOf()
+                ))) {
+                return false;
+            }
+            impl_->staticMaskContext->SetTarget(surface.Get());
+            impl_->staticMaskContext->BeginDraw();
+            impl_->staticMaskContext->Clear(
+                D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f)
+            );
+            impl_->staticMaskContext->SetTransform(
+                full * D2D1::Matrix3x2F::Translation(-originX, -originY)
+            );
+            impl_->staticMaskContext->DrawGeometryRealization(
+                realization, brush
+            );
+            const HRESULT drawn = impl_->staticMaskContext->EndDraw();
+            impl_->staticMaskContext->SetTarget(nullptr);
+            if (FAILED(drawn)) {
+                return false;
+            }
+            const double generateMs = elapsedMs(generateStart);
+            Impl::StaticMaskEntry entry;
+            entry.bitmap = surface;
+            entry.originX = originX;
+            entry.originY = originY;
+            entry.width = static_cast<int>(width);
+            entry.height = static_cast<int>(height);
+            entry.lastUse = ++impl_->staticMaskUseSerial;
+            impl_->staticMaskBytesEstimate +=
+                static_cast<std::uint64_t>(width)
+                * static_cast<std::uint64_t>(height) * 4u;
+            ++impl_->staticMaskGenerated;
+            impl_->staticMaskGenerateMs += generateMs;
+            while (impl_->staticMaskCache.size()
+                   >= impl_->staticMaskCapacity) {
+                auto victim = impl_->staticMaskCache.begin();
+                for (auto it = impl_->staticMaskCache.begin();
+                     it != impl_->staticMaskCache.end(); ++it) {
+                    if (it->second.lastUse < victim->second.lastUse) {
+                        victim = it;
+                    }
+                }
+                impl_->staticMaskCache.erase(victim);
+            }
+            found = impl_->staticMaskCache.emplace(
+                key, std::move(entry)
+            ).first;
+        } else {
+            found->second.lastUse = ++impl_->staticMaskUseSerial;
+        }
+        ++impl_->staticMaskHits;
+        restoreRealizationBaseTransform();
+        const Impl::StaticMaskEntry &entry = found->second;
+        // 整数落点 + identity 变换 + NEAREST：绝不二次采样或分数平移。
+        context->SetTransform(D2D1::Matrix3x2F::Identity());
+        context->DrawBitmap(
+            entry.bitmap.Get(),
+            D2D1::RectF(
+                entry.originX,
+                entry.originY,
+                entry.originX + static_cast<float>(entry.width),
+                entry.originY + static_cast<float>(entry.height)
+            ),
+            1.0f,
+            D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+        );
+        context->SetTransform(realizationBaseTransform);
+        sharedInstanceTransformActive = false;
+        return true;
+    };
     // Snapshot the frame-wide path once. The pool waits for all followers and
     // prewarmers before opening the gate; publication rejects raw frames that
     // finish after that transition. Never infer this flag from hit counters:
@@ -638,7 +768,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
         bool eligible
     ) {
         if (eligible && realizationReady && realization != nullptr) {
-            drawSharedRealization(realization, brush, instanceTransform);
+            if (!drawStaticMasked(
+                    realization, geometry, brush, instanceTransform, 0.0f
+                )) {
+                drawSharedRealization(realization, brush, instanceTransform);
+            }
             count(frameDiagnostics.realizationHit);
             return;
         }
@@ -659,7 +793,11 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
     ) {
         const auto start = Clock::now();
         if (eligible && realizationReady && realization != nullptr) {
-            drawSharedRealization(realization, brush, instanceTransform);
+            if (!drawStaticMasked(
+                    realization, geometry, brush, instanceTransform, width
+                )) {
+                drawSharedRealization(realization, brush, instanceTransform);
+            }
             count(frameDiagnostics.realizationHit);
         } else {
             if (realizationReady && eligible) {
@@ -6797,7 +6935,17 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
             // 的基元差（原路径 vs 网格逐字符切换），多 worker 各自预热
             // 进度不同时显形为描边/主文字层逐帧跳动；门控后窗口内一律
             // 原路径，窗口外一律网格。仅动画字走动态几何。
-            const bool realizationEligible = !animated;
+            // 「整显示周期钉路径」（行级、确定性）：带出入场动画的行在
+            // 动画结束的收尾帧若从 raw 切到网格/蒙版，覆盖率跳变即一次可见
+            // 的粗细/亮度突变（小字号墨量差 10-40%）。按行配置钉（而非按
+            // 渲染历史钉）：渲染保持纯配置函数——同一配置同一历史必然同一
+            // 像素（第 1 类抖动验收依赖这一点）。代价是该行 settle 后也走
+            // 直描（无网格加速）；zoom_pulse 类逐字缩放的 settle 跳变是
+            // 已知残留缺口，待逐层共用栅格化覆盖。
+            const bool lineAnimPinned =
+                (line->entryAnimation.empty() || line->entryAnimation == "none")
+                && (line->exitAnimation.empty() || line->exitAnimation == "none");
+            const bool realizationEligible = !animated && lineAnimPinned;
             if (layer == 0) {
                 if (charStyle.stroke2Width <= 0.0f) {
                     return;
@@ -7252,8 +7400,13 @@ ProbeResult Direct2DGpuBackend::renderFrameInternal(
                 const D2D1_MATRIX_3X2_F identityTransform =
                     D2D1::Matrix3x2F::Identity();
                 const bool rubyTransformed = rubyUnitTransformed(ruby, index);
-                // 与主字形同口径：存在即用（2026-10 用户二次确认）。
-                const bool realizationEligible = !rubyTransformed;
+                // 与主字形同口径：存在即用（2026-10 用户二次确认）+ 行级
+                // 钉路径（带出入场动画的行整周期原路径，收尾零切换）。
+                const bool rubyLineAnimPinned =
+                    (line->entryAnimation.empty() || line->entryAnimation == "none")
+                    && (line->exitAnimation.empty() || line->exitAnimation == "none");
+                const bool realizationEligible =
+                    !rubyTransformed && rubyLineAnimPinned;
                 if (rubyStyle.rubyStroke2Width > 0.0f) {
                     if (rubyTransformed && animatedStroke2 != nullptr) {
                         fillCountedStroke(

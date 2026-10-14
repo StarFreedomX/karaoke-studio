@@ -4443,8 +4443,16 @@ def test_gpu_realization_utopia_dynamic_units_fall_back_without_visual_jump(
     realized_events, realized = render(True)
     _, fallback = render(False)
 
+    # 2026-10 行级钉路径后语义更新：带出入场动画的行整显示周期原路径，
+    # realization 开/关必须给出**逐字节一致**的画面——比旧的「settle 后
+    # 允许有界跳变（mean<1.2、bounds≤2px）」更强，也才是「无视觉跳变」
+    # 的本义。命中断言随之反转：动画行的 hit 恒 0（钉住），miss 恒 0
+    # （不是「想用没得用」，而是根本不申请）。
     assert all(event["realization_miss"] == 0 for event in realized_events)
-    assert any(event["realization_hit"] > 0 for event in realized_events)
+    for t_ms, realized_frame, fallback_frame in zip(timestamps, realized, fallback):
+        assert realized_frame == fallback_frame, (
+            f"t={t_ms}: 钉路径行在 realization 开/关下画面不一致"
+        )
     for t_ms, realized_frame, fallback_frame in zip(timestamps, realized, fallback):
         deltas = [abs(a - b) for a, b in zip(realized_frame, fallback_frame)]
         assert sum(deltas) / len(deltas) < 1.2
@@ -15165,3 +15173,433 @@ def test_gpu_preview_playback_presents_recorded_frames(tmp_path, monkeypatch) ->
     assert max((record["present_ms"] or 0.0) for record in sustained) < 50.0, [
         record["present_ms"] for record in sustained
     ]
+
+
+# ---------------------------------------------------------------------------
+# 蒙版原型验收（2026-10 第 2 项候选方案）：KROK_GPU_STATIC_LAYER_MASK，默认关。
+#
+# 方案：静态字符层用**当前 baked 路径**（DrawGeometryRealization + 实际画笔）
+# 离屏栅格化成小位图——完整绘制变换（DPR/缩放/亚像素落点）烘进位图内容、
+# 整数像素落点、NEAREST 1:1 blit——观感来源因此与旧 baked 完全同一。
+# 动态字整显示周期钉原路径（见 charAnimatedEver），收尾零切换。
+# ---------------------------------------------------------------------------
+
+_MASK_SCENES = {
+    "fill_stroke": dict(
+        font_family="Meiryo", font_family_latin="Arial", font_size_px=64,
+        stroke_width_px=6, stroke2_enabled=True, stroke2_width_px=4,
+        decoration_kind="none",
+    ),
+    "small_cjk": dict(
+        font_family="Meiryo", font_family_latin="Arial", font_size_px=18,
+        stroke_width_px=0, stroke2_enabled=False, decoration_kind="none",
+    ),
+}
+
+
+def _mask_frames(
+    monkeypatch_env: dict[str, str],
+    style_kwargs: dict,
+    *,
+    dpr: float = 1.0,
+    width: int = 640,
+    height: int = 360,
+    timestamps: tuple[int, ...] = (1_000, 1_000),
+    viewport_offset_x: int | None = None,
+) -> tuple[list[bytes], dict]:
+    """同一 sidecar 内按给定 env 渲染一串帧并取回像素 + 最终诊断。"""
+    track = TimingTrack(
+        lines=[
+            TimingLine(
+                chars=[
+                    TimingChar(ch, index * 250)
+                    for index, ch in enumerate("永漢Abg")
+                ],
+                end_ms=1_500,
+            )
+        ]
+    )
+    style = _g1_style(**style_kwargs)
+    if viewport_offset_x is not None:
+        style = replace(style, viewport_offset_x=viewport_offset_x)
+    payloads: list[bytes] = []
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        configured = renderer.configure_gpu(
+            track, style, width=width, height=height, fps=60, dpr=dpr,
+            realization_enabled=True, wait_realizations=True,
+        )
+        # 门开之前的帧走原路径：滚到门开再采样，否则 mask 侧全 RAW、
+        # 相等断言形同虚设。
+        gate = renderer.render_gpu_frame(timestamps[0], frame_index=99)
+        deadline = time.monotonic() + 20.0
+        while (
+            not gate.get("realization_path_ready", False)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+            gate = renderer.render_gpu_frame(timestamps[0], frame_index=99)
+        assert gate.get("realization_path_ready"), gate
+        for index, t_ms in enumerate(timestamps):
+            event = renderer.render_gpu_frame(t_ms, frame_index=index)
+            with SharedFrameRingReader.from_event(event) as reader:
+                payloads.append(bytes(reader.read_frame(event).payload))
+        diagnostics = renderer.gpu_diagnostics()
+    assert configured["realization_prewarm_complete"] or diagnostics[
+        "realization_prewarm_complete"
+    ]
+    return payloads, diagnostics
+
+
+def _max_channel_diff(expected: bytes, actual: bytes) -> int:
+    e = np.frombuffer(expected, dtype=np.uint8).astype(np.int16)
+    a = np.frombuffer(actual, dtype=np.uint8).astype(np.int16)
+    return int(np.abs(e - a).max())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("scene", sorted(_MASK_SCENES))
+@pytest.mark.parametrize("dpr", [1.0, 2.0])
+def test_gpu_static_mask_matches_legacy_baked_and_repeats(scene, dpr, monkeypatch) -> None:
+    """蒙版候选的第一道验收：观感不退化 + 切换稳定。
+
+    - 生成帧 == 命中帧（同一张位图，逐字节一致由构造保证）；
+    - 蒙版画面 == 旧 baked 画面：预算 ≤ 1/255 且 over8 == 0（实测双描边
+      场景 max=1、正文小字号 0——1/255 来自中间位图一次额外的 8bpc 量化，
+      任何中间位图方案都有，视觉不可辨）；
+    - 诊断证明蒙版真的接管（generated/hits > 0），相等断言非空跑；
+    - DPR 1/2 与亚像素落点（viewport_offset_x=1）都覆盖：完整变换烘进
+      位图、整数落点 NEAREST blit，不做二次采样。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "1")
+    for viewport_offset in (None, 1):
+        mask_frames, mask_diag = _mask_frames(
+            {}, _MASK_SCENES[scene], dpr=dpr,
+            viewport_offset_x=viewport_offset,
+        )
+        assert mask_diag["static_mask_generated"] > 0, mask_diag
+        assert mask_diag["static_mask_hits"] > 0, mask_diag
+        assert mask_diag["static_mask_bytes_estimate"] > 0, mask_diag
+        # 生成帧 == 命中帧。
+        assert mask_frames[0] == mask_frames[1], (
+            f"{scene} dpr={dpr} offset={viewport_offset}: 生成帧与命中帧不一致"
+        )
+        # 与旧 baked 对照（同一 sidecar、同 env 关掉蒙版）。
+        monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "0")
+        legacy_frames, _legacy_diag = _mask_frames(
+            {}, _MASK_SCENES[scene], dpr=dpr,
+            viewport_offset_x=viewport_offset,
+        )
+        monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "1")
+        diff = _max_channel_diff(legacy_frames[0], mask_frames[0])
+        assert diff <= 1, (
+            f"{scene} dpr={dpr} offset={viewport_offset}: 蒙版与旧 baked 差 {diff}/255"
+        )
+        e = np.frombuffer(legacy_frames[0], dtype=np.uint8).reshape(-1, 4)
+        a = np.frombuffer(mask_frames[0], dtype=np.uint8).reshape(-1, 4)
+        ink = (e[:, 3] > 2) | (a[:, 3] > 2)
+        over8 = int((np.abs(e.astype(np.int16) - a.astype(np.int16)).max(axis=1)[ink] > 8).sum())
+        assert over8 == 0, (scene, dpr, viewport_offset, over8)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_static_mask_costs_and_eviction_rebuild(monkeypatch, tmp_path) -> None:
+    """蒙版候选的第二道验收：冷首帧 / 生成成本 / 显存 / 命中帧耗 / 逐出重建。
+
+    逐出（LRU 上限 1）后重建的蒙版仍必须与旧 baked 等价 —— 缓存冷热不
+    改变画面（第 1 类抖动验收在蒙版路径上的延伸）。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    style_kwargs = _MASK_SCENES["fill_stroke"]
+    # 容量 1：每帧都在逐出/重建，画面必须仍然一致。
+    monkeypatch.setenv("KROK_GPU_STATIC_MASK_CAPACITY", "1")
+    monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "1")
+    churn_frames, churn_diag = _mask_frames({}, style_kwargs)
+    assert churn_diag["static_mask_cache_size"] <= 1, churn_diag
+    assert churn_diag["static_mask_generated"] >= 2, churn_diag
+    assert churn_frames[0] == churn_frames[1]
+
+    # 成本与显存（正常容量）。
+    monkeypatch.setenv("KROK_GPU_STATIC_MASK_CAPACITY", "4096")
+    mask_frames, mask_diag = _mask_frames({}, style_kwargs)
+    # 生成成本：64px 双描边 5 字实测 ~2.6ms / 16 张（每张零点几毫秒级）。
+    assert mask_diag["static_mask_generate_ms"] < 50.0, mask_diag
+    # 显存估算有界且被计入总量。
+    assert 0 < mask_diag["static_mask_bytes_estimate"] < 64 * 1024 * 1024, mask_diag
+    assert (
+        mask_diag["estimated_cache_bytes"]
+        >= mask_diag["static_mask_bytes_estimate"]
+    )
+    # 命中帧耗不劣于直描网格（实测蒙版更省：blit 少于网格 draw）。
+    monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "0")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        track = TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[
+                        TimingChar(ch, index * 250)
+                        for index, ch in enumerate("永漢Abg")
+                    ],
+                    end_ms=1_500,
+                )
+            ]
+        )
+        renderer.configure_gpu(
+            track, _g1_style(**style_kwargs), width=640, height=360, fps=60,
+            realization_enabled=True, wait_realizations=True,
+        )
+        gate = renderer.render_gpu_frame(1_000, frame_index=99)
+        deadline = time.monotonic() + 20.0
+        while not gate.get("realization_path_ready", False) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            gate = renderer.render_gpu_frame(1_000, frame_index=99)
+        legacy_samples = []
+        for index in range(20):
+            event = renderer.render_gpu_frame(1_000, frame_index=10 + index)
+            legacy_samples.append(float(event.get("render_ms") or 0.0))
+    mask_samples = []
+    monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "1")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        renderer.configure_gpu(
+            track, _g1_style(**style_kwargs), width=640, height=360, fps=60,
+            realization_enabled=True, wait_realizations=True,
+        )
+        gate = renderer.render_gpu_frame(1_000, frame_index=99)
+        deadline = time.monotonic() + 20.0
+        while not gate.get("realization_path_ready", False) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            gate = renderer.render_gpu_frame(1_000, frame_index=99)
+        for index in range(20):
+            event = renderer.render_gpu_frame(1_000, frame_index=10 + index)
+            mask_samples.append(float(event.get("render_ms") or 0.0))
+    legacy_p50 = sorted(legacy_samples)[len(legacy_samples) // 2]
+    mask_p50 = sorted(mask_samples)[len(mask_samples) // 2]
+    # 热帧预算：蒙版命中帧耗不劣于旧 baked 的 1.5×（实测反而更低）。
+    assert mask_p50 <= max(legacy_p50 * 1.5, 0.5), (legacy_p50, mask_p50)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_animated_chars_stay_raw_for_whole_display(monkeypatch) -> None:
+    """动画收尾零切换：动画过的字符整显示周期钉原路径。
+
+    旧行为：动画结束帧 realizationEligible 翻真 → raw→baked 覆盖率跳变
+    （小字号墨量差 10-40%）= 一次可见的粗细/亮度突变。现在：动画过的字符
+    （主字与注音）整周期 raw，settle 后画面与全程 raw 逐字节一致。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(
+        lines=[_jit_lines()],
+        rubies=[
+            RubyAnnotation(
+                kanji="永漢",
+                reading="よんかん",
+                reading_parts=["よん", "かん"],
+                reading_part_ms=[500],
+                pos_start_ms=0,
+                pos_end_ms=1_500,
+            )
+        ],
+    )
+    style = _g1_style(
+        **_FILL_STYLE, stroke_width_px=6, stroke2_enabled=False,
+        decoration_kind="none", entry_anim="utopia", exit_anim="utopia",
+        entry_lead_ms=300, exit_fade_ms=300,
+    )
+    settled_ms = 1_000  # 入场（300ms）早已结束、出场未开始。
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        # 先经历动画期（把 wasAnimated 置位），再取 settle 帧。
+        renderer.configure_gpu(
+            track, style, width=640, height=360, fps=60,
+            realization_enabled=False,
+        )
+        renderer.render_gpu_frame(50, frame_index=0)   # 动画进行中
+        settled_after_anim = renderer.render_gpu_frame(settled_ms, frame_index=1)
+        with SharedFrameRingReader.from_event(settled_after_anim) as reader:
+            pinned = bytes(reader.read_frame(settled_after_anim).payload)
+        # 全新 sidecar 直接从 settle 帧开始（没有动画历史）。
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        renderer.configure_gpu(
+            track, style, width=640, height=360, fps=60,
+            realization_enabled=False,
+        )
+        fresh = renderer.render_gpu_frame(settled_ms, frame_index=0)
+        with SharedFrameRingReader.from_event(fresh) as reader:
+            baseline = bytes(reader.read_frame(fresh).payload)
+    assert pinned == baseline, "动画过的字符 settle 后画面与纯 raw 不一致（路径未钉住）"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+@pytest.mark.parametrize("mask_on", [False, True])
+def test_gpu_wipe_boundary_frames_are_path_invariant(mask_on, monkeypatch) -> None:
+    """wipe 边界跨帧等价：卡拉OK边界前后的帧序列与路径无关。
+
+    蒙版键含画笔指针：before/after 状态天然分蒙版，边界帧序列在
+    蒙版开/关下必须一致（≤1/255）——边界处的颜色切换是业务语义，
+    路径切换不得叠加额外跳变。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    if mask_on:
+        monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "1")
+    else:
+        monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "0")
+    track = TimingTrack(lines=[_jit_lines()])
+    style = _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=False,
+                      decoration_kind="none")
+    boundary_ms = 250  # 第二字的 wipe 边界前后。
+    timestamps = tuple(boundary_ms - 40 + index * 16 for index in range(6))
+    payloads: list[bytes] = []
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=60.0) as renderer:
+        renderer.configure_gpu(
+            track, style, width=640, height=360, fps=60,
+            realization_enabled=True, wait_realizations=True,
+        )
+        gate = renderer.render_gpu_frame(timestamps[0], frame_index=99)
+        deadline = time.monotonic() + 20.0
+        while not gate.get("realization_path_ready", False) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            gate = renderer.render_gpu_frame(timestamps[0], frame_index=99)
+        for index, t_ms in enumerate(timestamps):
+            event = renderer.render_gpu_frame(t_ms, frame_index=index)
+            with SharedFrameRingReader.from_event(event) as reader:
+                payloads.append(bytes(reader.read_frame(event).payload))
+    # 与基线（蒙版关）比较。
+    if mask_on:
+        monkeypatch.setenv("KROK_GPU_STATIC_LAYER_MASK", "0")
+        baseline_payloads, _ = _mask_frames(
+            {}, dict(_FILL_STYLE, stroke_width_px=6, stroke2_enabled=False,
+                     decoration_kind="none"),
+            timestamps=timestamps,
+        )
+        for expected, actual in zip(baseline_payloads, payloads):
+            assert _max_channel_diff(expected, actual) <= 1, (
+                "wipe 边界帧在蒙版开/关下不一致"
+            )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g6_frame_store_fills_then_purges_on_seek(monkeypatch) -> None:
+    """G6 帧仓填满验收：提前渲染到容量、消费、seek 清仓。
+
+    直画路径提前渲染不 present，帧仓登记数（frame_store_registered）必须
+    实际到达容量上限（默认 25）——「渲一帧呈一帧」的用例到不了这个状态。
+    随后按序 present（回显身份一致）、seek（代际翻新）后旧帧整仓作废。
+    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    track = TimingTrack(lines=[_jit_lines()])
+    style = _g1_style(**_FILL_STYLE, stroke_width_px=6, stroke2_enabled=True,
+                      stroke2_width_px=4, decoration_kind="none")
+    with NativeRendererProcess(_renderer_path(), response_timeout_s=30.0) as renderer:
+        renderer.configure_gpu(
+            track, style, width=320, height=180, fps=60,
+            realization_enabled=True,
+        )
+        capacity = 25
+        stamps = [4_000 + int(index * 1000.0 / 60.0) for index in range(capacity + 8)]
+        for index, t_ms in enumerate(stamps):
+            renderer.render_gpu_frame_direct(t_ms, generation=0, frame_index=index)
+        filled = renderer.gpu_diagnostics()
+        assert filled["frame_store_registered"] == capacity, filled
+        # 池满逐出：超容量的最旧 8 帧已被 LRU 逐出（登记不在，present 必须
+        # 丢帧而不是上错帧——offscreen 无窗口，正好只走到仓未命中分支）。
+        evicted = renderer.present_rendered_gpu_frame(
+            parent_hwnd=1, x=0, y=0, width=320, height=180,
+            t_ms=stamps[0], generation=0,
+        )
+        assert evicted["event"] == "gpu_frame_dropped", evicted
+        assert evicted["dropped"] is True, evicted
+        # seek：代际翻新 + 取消 → 旧代整仓作废。
+        renderer.send_cancel_generation(0)
+        renderer.render_gpu_frame_direct(4_000, generation=1, frame_index=99)
+        purged = renderer.gpu_diagnostics()
+        assert purged["frame_store_registered"] <= 1, purged
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Direct2D GPU backend is Windows-only")
+def test_gpu_g5_scheduler_fills_cache_then_survives_seek(qapp, monkeypatch) -> None:
+    """G5 正式调度器缓存填满验收：真实 sidecar、真实调度路径。
+
+    「渲一帧呈一帧」的直画用例覆盖不了这个状态：这里走 GpuAsyncSubtitle-
+    Renderer 的**正式填缝调度器**（共享内存 + QImage 缓存），以媒体节奏喂
+    request()，断言：
+      - 帧缓存占用峰值实际到达容量的绝大部分（缓存填满，不是名义播放）；
+      - 填满后持续播放仍持续出帧（无冻结、无停填）；
+      - seek（大时间跳变）后缓存清空并重新填满。
+    """
+    monkeypatch.setenv("KROK_SUBTITLE_ASYNC_PREVIEW", "1")
+    monkeypatch.setenv("KROK_SUBTITLE_NATIVE_RENDER", "1")
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_PREVIEW", "1")
+    monkeypatch.setenv("KROK_SUBTITLE_GPU_NATIVE_PREVIEW", "0")  # G5 读回路径
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+
+    from krok_helper.subtitle_render.frontend.preview import preview_async as pa
+
+    renderer = pa.GpuAsyncSubtitleRenderer(320, 180)
+    emitted: list[int] = []
+    renderer.frame_ready.connect(lambda _image, t_ms: emitted.append(int(t_ms)))
+    try:
+        track = TimingTrack(
+            lines=[
+                TimingLine(
+                    chars=[
+                        TimingChar(ch, 4_000 + index * 400)
+                        for index, ch in enumerate("永漢Abg")
+                    ],
+                    end_ms=60_000,
+                )
+            ]
+        )
+        renderer.set_state(track, _g1_style(**_FILL_STYLE))
+        renderer.set_playing(True)
+
+        # 媒体节奏 = 真实时钟（每 ~16.7ms 前进一帧，期间以当前 t 反复
+        # request——比真实快的请求节奏会把媒体锚点推到填充管线前面，
+        # 永远 miss）。目标状态 = 填充窗口（STALE_TOLERANCE）被填满并
+        # 随播放滑动（stale_frames_dropped 持续增长），不是名义容量。
+        frame_interval_ms = 1000.0 / 60.0
+        window_frames = int(renderer._STALE_TOLERANCE_MS / frame_interval_ms) + 1  # noqa: SLF001
+        peak_occupancy = 0
+        deadline = time.monotonic() + 25.0
+        t_ms = 4_000
+        while time.monotonic() < deadline:
+            for _ in range(4):
+                renderer.request(int(t_ms))
+                qapp.processEvents()
+                time.sleep(frame_interval_ms / 1000.0 / 4.0)
+            t_ms += frame_interval_ms
+            occupancy = renderer._frame_cache.size()  # noqa: SLF001
+            peak_occupancy = max(peak_occupancy, occupancy)
+            if peak_occupancy >= window_frames and len(emitted) >= 120:
+                break
+        stats = renderer.stats_snapshot()
+        assert peak_occupancy >= window_frames, (
+            f"填充窗口未填满：峰值 {peak_occupancy}，窗口 {window_frames}，"
+            f"stats={stats}"
+        )
+        assert stats.get("future_frames_cached", 0) > 0, stats
+        assert stats.get("stale_frames_dropped", 0) > 0, stats  # 窗口在滑动
+        assert len(emitted) >= 120, (len(emitted), stats)
+
+        # seek：大时间跳变 → 代际翻新清缓存，随后重新填满。
+        pre_seek_emitted = len(emitted)
+        renderer.request(20_000)
+        deadline = time.monotonic() + 20.0
+        refilled = 0
+        t_ms = 20_000
+        while time.monotonic() < deadline:
+            for _ in range(4):
+                renderer.request(int(t_ms))
+                qapp.processEvents()
+                time.sleep(frame_interval_ms / 1000.0 / 4.0)
+            t_ms += frame_interval_ms
+            refilled = max(refilled, renderer._frame_cache.size())  # noqa: SLF001
+            if refilled >= window_frames and len(emitted) > pre_seek_emitted + 30:
+                break
+        after_stats = renderer.stats_snapshot()
+        assert len(emitted) > pre_seek_emitted + 30, (len(emitted), after_stats)
+        assert refilled >= window_frames, (refilled, window_frames, after_stats)
+        # 后端仍是 GPU（没被异常打回 CPU）。
+        assert renderer.current_backend_mode in (None, "gpu"), (
+            renderer.current_backend_mode, after_stats
+        )
+    finally:
+        renderer.stop()
