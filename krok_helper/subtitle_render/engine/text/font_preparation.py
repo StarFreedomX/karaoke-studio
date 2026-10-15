@@ -43,6 +43,11 @@ def prepare_fonts(
             apply_resolved_font_faces(style_to_dict(style))
             for item in ([track] if track is not None else []) + list(extra_tracks or ()):
                 apply_resolved_font_faces(style_to_dict(style_for_track(style, item)))
+            # Titles resolve their own scheme and inline roles; their effective
+            # font/weight combinations need preparing on the GUI thread too.
+            if track is not None:
+                from krok_helper.subtitle_render.engine.render.render_ir import titles_to_ir
+                apply_resolved_font_faces(titles_to_ir(track, style))
         _prewarm_font_fallback(track, style, extra_tracks)
     except Exception:  # noqa: BLE001 — 预热失败不阻断预览，渲染线程回退原路径
         _log.debug("字体能力缓存预热失败", exc_info=True)

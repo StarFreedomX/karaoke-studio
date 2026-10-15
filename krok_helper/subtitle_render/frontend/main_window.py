@@ -4843,6 +4843,10 @@ class SubtitleRenderWindow(QWidget):
             self._property_panel.mark_style_relayout_scope("layout")
         self._remember_style_preferences(previous, style)
         self._refresh_preview_style_soon()
+        # Lightweight animation edits skip the display-window task below, but
+        # timeline character blocks must still receive the new effective style.
+        if paint_only or anim_lightweight:
+            self._tracks_view.set_style(style)
         # 角色在属性面板中新建 / 重命名 / 删除时，同步逐字符编辑器的可选项。
         self._lyrics_panel.set_role_options(self._merged_role_options())
         # 标题条目数 / 名称变化（增删、改名、撤销重做）才需要刷新字幕源下拉；

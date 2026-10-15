@@ -540,13 +540,15 @@ class PreviewGraphicsView(QGraphicsView):
     def set_style(self, style: Style, *, relayout_scope: str | None = None) -> None:
         """样式变化后重渲当前帧。
 
-        ``relayout_scope``：None = 全量重排（默认）；``"titles"`` / ``"paint"``
-        分别表示仅标题或仅上色变化，worker configure 时歌词布局计划按签名
-        复用（分轴局部重排）。
+        所有属性编辑统一发送完整场景并重建布局计划，包括角色配色和
+        注音覆盖，避免局部更新残留旧逐字符/注音派生数据。
         """
         self._subtitle_item.set_style(style)
         self._subtitle_item.clear_async_image()
-        self._style_relayout_scope = relayout_scope if relayout_scope else None
+        # Scope is only an optimization hint. Even paint edits can change role
+        # appearance and derived per-character/ruby state; do not retain any
+        # part of the previous scene when applying property-card edits.
+        self._style_relayout_scope = None
         self._refresh_async_state()
 
     def set_duration(self, duration_ms: int) -> None:

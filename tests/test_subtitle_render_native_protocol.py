@@ -5145,7 +5145,8 @@ def test_collect_referenced_font_families_from_dict_ir() -> None:
     ir = {
         "style": {
             "font_family": "Yu Gothic",
-            "latin_font_family": "Segoe UI",
+            "font_family_latin": "Segoe UI",
+            "ruby_font_family_latin": "Arial",
             "ruby_font_family": None,
             "font_weight": 700,
         },
@@ -5158,7 +5159,7 @@ def test_collect_referenced_font_families_from_dict_ir() -> None:
 
     families = collect_referenced_font_families(ir)
 
-    assert families == ["Yu Gothic", "Segoe UI", "MS Gothic"]
+    assert families == ["Yu Gothic", "Segoe UI", "Arial", "MS Gothic"]
 
 
 def test_collect_referenced_font_families_walks_objects_and_cycles() -> None:
@@ -5172,7 +5173,7 @@ def test_collect_referenced_font_families_walks_objects_and_cycles() -> None:
     @dataclass
     class Scheme:
         font_family: str
-        latin_font_family: str | None = None
+        font_family_latin: str | None = None
 
     class Holder:
         def __init__(self) -> None:
@@ -5219,7 +5220,7 @@ def test_font_face_slot_overrides_empty_family_never_queries_capabilities(monkey
 
     payload = {
         "font_family": "",
-        "latin_font_family": None,
+        "font_family_latin": None,
         "ruby_font_family": "",
         "font_weight": 400,
     }

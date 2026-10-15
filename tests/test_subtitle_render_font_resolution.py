@@ -44,6 +44,33 @@ def _require_family(family: str) -> None:
     pytest.skip(f"font family not installed: {family}")
 
 
+def test_ir_font_slots_preserve_independent_card_families(monkeypatch):
+    from krok_helper.subtitle_render.engine.text import font_weight
+    from krok_helper.subtitle_render.engine.text.weight_resolver import ResolvedFontInstance
+    from krok_helper.subtitle_render.native.protocol import apply_resolved_font_faces
+
+    def resolve(family, weight, italic=False):
+        return ResolvedFontInstance(
+            requested=FontRequest(family, weight, italic), family=family,
+            face_weight=weight, resource_path=f"{family}.otf",
+        )
+
+    monkeypatch.setattr(font_weight, "resolve_font_instance", resolve)
+    payload = {
+        "font_family": "Main", "font_weight": 400,
+        "font_family_latin": "Latin", "latin_font_weight": 500,
+        "ruby_font_family": "Ruby", "ruby_font_weight": 600,
+        "ruby_font_family_latin": "RubyLatin", "ruby_latin_font_weight": 700,
+    }
+    apply_resolved_font_faces(payload)
+    for slot, family, weight in (
+        ("font", "Main", 400), ("latin_font", "Latin", 500),
+        ("ruby_font", "Ruby", 600), ("ruby_latin_font", "RubyLatin", 700),
+    ):
+        assert payload[f"{slot}_resolved"]["resource_path"] == f"{family}.otf"
+        assert payload[f"{slot}_resolved"]["weight"] == weight
+
+
 def _cap(family: str, weights, italic_weights=(), **kwargs) -> FontCapabilities:
     faces = tuple(
         FontFace(w, f"w{w}", False) for w in sorted(weights)

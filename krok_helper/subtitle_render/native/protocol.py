@@ -293,7 +293,7 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
     if resolved is not None:
         payload["font_resolved"] = resolved
 
-    latin_family = payload.get("latin_font_family") or main_family
+    latin_family = payload.get("font_family_latin") or main_family
     payload["latin_font_axis"], resolved = slot(
         latin_family, payload.get("latin_font_weight")
     )
@@ -307,7 +307,7 @@ def _font_face_slot_overrides(payload: dict[str, Any]) -> None:
     if resolved is not None:
         payload["ruby_font_resolved"] = resolved
 
-    ruby_latin_family = payload.get("ruby_latin_font_family") or ruby_family
+    ruby_latin_family = payload.get("ruby_font_family_latin") or ruby_family
     ruby_latin_weight = payload.get("ruby_latin_font_weight")
     if ruby_latin_weight is None:
         ruby_latin_weight = payload.get("ruby_font_weight")
@@ -334,7 +334,7 @@ def apply_resolved_font_faces(node: Any) -> None:
             apply_resolved_font_faces(item)
 
 
-_FONT_AXIS_FAMILY_FIELD_SUFFIX = "font_family"
+_FONT_AXIS_FAMILY_FIELD_SUFFIX = ("font_family", "font_family_latin")
 
 
 def collect_referenced_font_families(*roots: Any) -> list[str]:

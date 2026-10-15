@@ -34,6 +34,32 @@ from krok_helper.subtitle_render.frontend.preview.preview_async import (
 _WIDTH, _HEIGHT, _FPS = 640, 360, 60
 
 
+def test_style_patch_transport_preserves_all_generated_sections(qapp, monkeypatch):
+    """发送端不得再次筛字段，丢失布局表或角色/注音样式。"""
+    from copy import deepcopy
+    from krok_helper.subtitle_render.native import backend
+
+    patch = build_style_patch_ir(
+        _patch_track(), _patch_style(), width=_WIDTH, height=_HEIGHT,
+        fps=_FPS, include_placement=True,
+    )
+    # An additional IR section must survive without updating a transport whitelist.
+    patch["future_style_section"] = {"values": [1, None, False]}
+    expected = deepcopy(patch)
+    resolved = []
+    monkeypatch.setattr(backend, "apply_resolved_font_faces", resolved.append)
+    renderer = backend.NativeRendererProcess()
+    sent = []
+    monkeypatch.setattr(renderer, "_send", sent.append)
+    monkeypatch.setattr(renderer, "_read_until_event", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(renderer, "_expect_ok", lambda value: value)
+    renderer.configure_style_gpu(patch)
+    assert resolved == [patch]
+    assert "line_layout_table" in expected
+    for key, value in expected.items():
+        assert sent[0][key] == value, key
+
+
 def _patch_track() -> TimingTrack:
     return TimingTrack(
         lines=[

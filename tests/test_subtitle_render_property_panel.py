@@ -9066,13 +9066,13 @@ def test_main_window_marks_pure_color_preview_as_paint_scope(qapp, monkeypatch):
     win._apply_style(replace(win._style, fill_color="#123456"))
     win._apply_preview_style_now()
     assert seen[-1] == "paint"
+    assert win._preview_panel.canvas._style_relayout_scope is None
 
-    # 字号等布局输入变化走 "layout" 局部差分（行级摆放原位更新，预览侧
-    # include_placement=True 消费）；防抖窗口内只有这一个 scope 时原样
-    # 取走。字号后紧接改色（scope 并存）则合并回落全量 None。
+    # 宿主仍分类优化 UI 同步，但预览必须完整更新所有样式派生数据。
     win._apply_style(replace(win._style, font_size_px=win._style.font_size_px + 1))
     win._apply_preview_style_now()
     assert seen[-1] == "layout"
+    assert win._preview_panel.canvas._style_relayout_scope is None
     win._apply_style(replace(win._style, font_size_px=win._style.font_size_px + 1))
     win._apply_style(replace(win._style, fill_color="#654321"))
     win._apply_preview_style_now()

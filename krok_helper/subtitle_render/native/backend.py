@@ -1123,7 +1123,13 @@ class NativeRendererProcess:
         configure、画面段漂移或行集对不上时返回协议错误——调用方应回落
         全量 :meth:`configure_gpu`。
         """
+        # Differential updates must resolve the same physical faces as a full
+        # configure, including title and per-line style overrides.
+        apply_resolved_font_faces(style_ir)
         payload: dict[str, Any] = {
+            # Forward the complete generated snapshot. A second hand-maintained
+            # section whitelist silently dropped line_layout_table in P6.
+            **style_ir,
             "cmd": "gpu_configure_style",
             "force_warp": bool(force_warp),
             "prewarm_t_ms": max(int(prewarm_t_ms), 0),
@@ -1132,18 +1138,6 @@ class NativeRendererProcess:
             "defer_realizations_until_first_frame": bool(
                 defer_realizations_until_first_frame
             ),
-            "screen": style_ir["screen"],
-            "style": style_ir["style"],
-            "titles": style_ir["titles"],
-            "fx_sprites": style_ir["fx_sprites"],
-            # lines_style 可省（titles scope 行数据不变时），sidecar 保留
-            # 既有行级样式字段。
-            **({"lines_style": style_ir["lines_style"]}
-               if "lines_style" in style_ir else {}),
-            # 发射边界去重表（schema 3 开发期）：lines_style 的 bursts 用
-            # color_id/paint_id 引用，表必须随载荷同发。
-            "fx_color_table": style_ir.get("fx_color_table", []),
-            "fx_paint_table": style_ir.get("fx_paint_table", []),
         }
         self._send(payload)
         return self._expect_ok(
